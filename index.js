@@ -372,6 +372,27 @@ bot.on('message', async (msg) => {
 
 // --- КОМАНДЫ ---
 
+// Команда /help
+bot.onText(/\/help/, (msg) => {
+    const chatId = msg.chat.id;
+    const helpText = `🤖 *Что я умею:*
+
+👤 *Для всех:*
+/me — Посмотреть свою статистику (уровень, опыт, репутация)
+/top — Топ-10 активных участников
+/kto <вопрос> — Выбрать случайного участника (например: /kto кто сегодня платит?)
+👍 *Репутация:* Ставь реакции (🔥, 👍, ❤️) или отвечай "спасибо", чтобы повысить репутацию другим!
+
+👮‍♂️ *Для админов:*
+/banword <слово> — Запретить слово
+/unbanword <слово> — Разрешить слово
+/listwords — Список запрещенных слов
+
+_Я также защищаю чат от спама и проверяю новичков!_`;
+
+    bot.sendMessage(chatId, helpText, { parse_mode: 'Markdown' });
+});
+
 bot.onText(/\/banword (.+)/, async (msg, match) => {
     const chatId = msg.chat.id;
     if (!(await isAdmin(chatId, msg.from.id))) return;
