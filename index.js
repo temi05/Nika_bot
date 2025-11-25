@@ -360,6 +360,15 @@ bot.on('message', async (msg) => {
             const reputationTriggers = ['+', 'спасибо', 'спс', 'thx', 'благодарю', '👍', '🔥', '❤️', 'top'];
             const text = msg.text.toLowerCase();
 
+            if (reputationTriggers.some(trigger => text.includes(trigger))) {
+                const receiver = await getUser(chatId, receiverId, msg.reply_to_message.from);
+                if (receiver) {
+                    await updateUser(receiver.id, { reputation: receiver.reputation + 1 });
+                    const senderName = getUserName(user);
+                    const receiverName = getUserName(msg.reply_to_message.from);
+                    sendTimedMessage(chatId, `🌟 ${senderName} повысил репутацию ${receiverName}! (+1)`);
+                }
+            }
         }
     }
 });
