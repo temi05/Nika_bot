@@ -25,6 +25,10 @@ const bot = new TelegramBot(token, {
     }
 });
 
+bot.on('polling_error', (error) => {
+    console.error('[POLLING ERROR]', error.code, error.message);
+});
+
 // --- НАСТРОЙКА ДЛЯ ХОСТИНГА ---
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -57,12 +61,13 @@ async function getUser(chatId, userId, userInfo = {}) {
         .single();
 
     if (error && error.code !== 'PGRST116') { // PGRST116 = не найдено
-        console.error('Ошибка получения пользователя:', error);
+        console.error('Ошибка получения пользователя:', error.message);
         return null;
     }
 
     // Если нет - создаем
     if (!user) {
+        console.log(`[DEBUG] Creating new user: ${userId}`);
         const newUser = {
             chat_id: chatId,
             user_id: userId,
@@ -81,18 +86,10 @@ async function getUser(chatId, userId, userInfo = {}) {
             .single();
 
         if (createError) {
-            console.error('Ошибка создания пользователя:', createError);
+            console.error('Ошибка создания пользователя:', createError.message);
             return null;
         }
         return data;
-    }
-
-    // Обновляем инфо, если изменилось
-    if (userInfo.username && (user.username !== userInfo.username || user.first_name !== userInfo.first_name)) {
-        await supabase.from('users').update({
-            username: userInfo.username,
-            first_name: userInfo.first_name
-        }).eq('id', user.id);
     }
 
     return user;
