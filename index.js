@@ -247,6 +247,30 @@ bot.on('callback_query', async (query) => {
             bot.answerCallbackQuery(query.id, { text: 'Ошибка! Убедитесь, что бот — админ.', show_alert: true });
         }
     }
+});
+
+// --- ОБРАБОТКА СООБЩЕНИЙ (XP, Репутация, Фильтр) ---
+bot.on('message', async (msg) => {
+    const chatId = msg.chat.id;
+    const userId = msg.from.id;
+    const user = msg.from;
+
+    // Логируем сообщение для реакций (Persistent Reputation)
+    if (msg.message_id) {
+        // Кэш для быстрого доступа
+        if (!messageAuthors[chatId]) messageAuthors[chatId] = {};
+        messageAuthors[chatId][msg.message_id] = userId;
+
+        // БД для надежности
+        await supabase.from('message_logs').insert([{
+            chat_id: chatId,
+            message_id: msg.message_id,
+            user_id: userId
+        }]).then(({ error }) => {
+            if (error) console.error('Ошибка лога сообщения:', error.message);
+            else console.log(`[DEBUG] Message ${msg.message_id} saved to DB`);
+        });
+    }
 
     // --- ФИЛЬТР ---
     if (msg.text) {
@@ -337,6 +361,66 @@ bot.on('callback_query', async (query) => {
                 }
             }
         }
+    }
+});
+
+// --- РЕПУТАЦИЯ (РЕАКЦИИ) ---
+bot.on('message_reaction', async (reaction) => {
+    console.log('[DEBUG] Reaction received:', JSON.stringify(reaction));
+
+    const chatId = reaction.chat.id;
+    const messageId = reaction.message_id;
+    const userWhoReacted = reaction.user; // Тот, кто поставил лайк
+
+    // Игнорируем снятие реакции (old_reaction есть, new_reaction пусто)
+    if (reaction.new_reaction.length === 0) return;
+
+    // 1. Ищем автора сообщения (кому поставили лайк)
+    let authorId = null;
+
+    // Сначала ищем в кэше
+    if (messageAuthors[chatId] && messageAuthors[chatId][messageId]) {
+        authorId = messageAuthors[chatId][messageId];
+        console.log(`[DEBUG] Author found in cache: ${authorId}`);
+    }
+    // Если нет в кэше - ищем в БД
+    else {
+        console.log(`[DEBUG] Author not in cache, checking DB for msg ${messageId}...`);
+        const { data, error } = await supabase
+            .from('message_logs')
+            .select('user_id')
+            .eq('chat_id', chatId)
+            .eq('message_id', messageId)
+            .single();
+
+        if (data) {
+            authorId = data.user_id;
+            console.log(`[DEBUG] Author found in DB: ${authorId}`);
+            // Обновляем кэш
+            if (!messageAuthors[chatId]) messageAuthors[chatId] = {};
+            messageAuthors[chatId][messageId] = authorId;
+        } else {
+            console.log(`[DEBUG] Author not found in DB. Error: ${error?.message}`);
+        }
+    }
+
+    if (!authorId) {
+        console.log('[DEBUG] Could not determine message author. Ignoring.');
+        return;
+    }
+
+    // Нельзя лайкать самого себя
+    if (userWhoReacted.id === authorId) {
+        console.log('[DEBUG] User liked themselves. Ignoring.');
+        return;
+    }
+
+    // Начисляем репутацию автору сообщения
+    const author = await getUser(chatId, authorId);
+    if (author) {
+        await updateUser(author.id, { reputation: author.reputation + 1 });
+        console.log(`[REP] User ${authorId} reputation +1 (Reaction)`);
+        // Не пишем сообщение в чат, чтобы не спамить
     }
 });
 
