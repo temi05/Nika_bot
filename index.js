@@ -33,7 +33,13 @@ app.get('/', (req, res) => {
 
 // Роут для приема сообщений от Telegram
 app.post(`/bot${token}`, (req, res) => {
-    console.log('[DEBUG] Webhook request received:', JSON.stringify(req.body).substring(0, 100) + '...');
+    // console.log('[DEBUG] Webhook request received:', JSON.stringify(req.body).substring(0, 100) + '...');
+
+    // Ручная обработка реакций (если библиотека не поддерживает)
+    if (req.body.message_reaction) {
+        handleReaction(req.body.message_reaction);
+    }
+
     bot.processUpdate(req.body);
     res.sendStatus(200);
 });
@@ -47,8 +53,11 @@ app.listen(PORT, async () => {
         const webhookUrl = `${RENDER_EXTERNAL_URL}/bot${token}`;
         console.log(`Ставим вебхук: ${webhookUrl}`);
         try {
-            await bot.setWebHook(webhookUrl);
-            console.log('✅ Вебхук успешно установлен!');
+            // Явно указываем allowed_updates, чтобы Telegram присылал реакции
+            await bot.setWebHook(webhookUrl, {
+                allowed_updates: ['message', 'message_reaction', 'chat_member', 'callback_query']
+            });
+            console.log('✅ Вебхук успешно установлен (с реакциями)!');
         } catch (err) {
             console.error('❌ Ошибка установки вебхука:', err.message);
         }
@@ -365,7 +374,7 @@ bot.on('message', async (msg) => {
 });
 
 // --- РЕПУТАЦИЯ (РЕАКЦИИ) ---
-bot.on('message_reaction', async (reaction) => {
+async function handleReaction(reaction) {
     console.log('[DEBUG] Reaction received:', JSON.stringify(reaction));
 
     const chatId = reaction.chat.id;
@@ -422,7 +431,9 @@ bot.on('message_reaction', async (reaction) => {
         console.log(`[REP] User ${authorId} reputation +1 (Reaction)`);
         // Не пишем сообщение в чат, чтобы не спамить
     }
-});
+}
+// Подстраховка: если библиотека все же решит сама вызвать событие
+bot.on('message_reaction', handleReaction);
 
 // Хранилище кулдаунов команд
 const commandCooldowns = {};
