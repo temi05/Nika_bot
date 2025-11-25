@@ -291,11 +291,12 @@ bot.on('message', async (msg) => {
     messageAuthors[`${chatId}_${msg.message_id}`] = userId;
 
     // Сохраняем автора сообщения в БД (навечно)
-    await supabase.from('message_logs').insert({
+    const { error: logError } = await supabase.from('message_logs').insert({
         chat_id: chatId,
         message_id: msg.message_id,
         user_id: userId
-    }).catch(err => console.error('Ошибка лога сообщения:', err.message));
+    });
+    if (logError) console.error('Ошибка лога сообщения:', logError.message);
 
     // Чистим память авторов (оставляем последние 2000)
     const keys = Object.keys(messageAuthors);
