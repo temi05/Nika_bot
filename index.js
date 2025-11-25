@@ -238,39 +238,161 @@ bot.on('callback_query', async (query) => {
 });
 
 // Реакции (Репутация)
-message = `🎉 Поздравляем, ${getUserName(user)}! Ты достиг уровня ${newLevel}!`;
-                }
+bot.on('message_reaction', async (reaction) => {
+    const chatId = reaction.chat.id;
+    const messageId = reaction.message_id;
+    const userReacted = reaction.user;
 
-await updateUser(dbUser.id, {
-    xp: newXp,
-    level: newLevel,
-    last_message_time: currentTime
+    // 1. Ищем автора в оперативной памяти
+    let authorId = messageAuthors[`${chatId}_${messageId}`];
+
+    // 2. Если нет в памяти, ищем в базе данных (Supabase)
+    if (!authorId) {
+        const { data } = await supabase
+            .from('message_logs')
+            .select('user_id')
+            .eq('chat_id', chatId)
+            .eq('message_id', messageId)
+            .single();
+
+        if (data) {
+            authorId = data.user_id;
+        }
+    }
+
+    if (!authorId) return; // Если так и не нашли — выходим
+
+    if (userReacted.id === authorId) return;
+
+    const goodEmojis = ['👍', '🔥', '❤️', '🍪', '⚡', '🥰', '🎉'];
+    const newEmojis = reaction.new_reaction.filter(r => r.type === 'emoji').map(r => r.emoji);
+    const oldEmojis = reaction.old_reaction.filter(r => r.type === 'emoji').map(r => r.emoji);
+    const addedEmojis = newEmojis.filter(emoji => !oldEmojis.includes(emoji));
+
+    if (addedEmojis.some(emoji => goodEmojis.includes(emoji))) {
+        const user = await getUser(chatId, authorId);
+        if (user) {
+            await updateUser(user.id, { reputation: user.reputation + 1 });
+            sendTimedMessage(chatId, `🌟 Репутация ${getUserName(user)} повышена! (+1)`);
+            console.log(`[REP] ${userReacted.first_name} лайкнул сообщение ${authorId}. Репутация +1`);
+        }
+    }
 });
 
-console.log(`[XP] ${getUserName(user)}: +${xpGain} XP`);
-if (message) sendTimedMessage(chatId, message, 30000);
-            }
-        }
+// Обработка сообщений
+bot.on('message', async (msg) => {
+    const chatId = msg.chat.id;
+    const userId = msg.from.id;
+    const user = msg.from;
+
+    if (user.is_bot) return;
+
+    // Сохраняем автора сообщения для реакций (в память)
+    messageAuthors[`${chatId}_${msg.message_id}`] = userId;
+
+    // Сохраняем автора сообщения в БД (навечно)
+    await supabase.from('message_logs').insert({
+        chat_id: chatId,
+        message_id: msg.message_id,
+        user_id: userId
+    }).catch(err => console.error('Ошибка лога сообщения:', err.message));
+
+    // Чистим память авторов (оставляем последние 2000)
+    const keys = Object.keys(messageAuthors);
+    if (keys.length > 2000) {
+        delete messageAuthors[keys[0]];
     }
 
-// --- РЕПУТАЦИЯ (ОТВЕТЫ) ---
-if (msg.reply_to_message && msg.text) {
-    const receiverId = msg.reply_to_message.from.id;
-    if (userId !== receiverId && !msg.reply_to_message.from.is_bot) {
-        const reputationTriggers = ['+', 'спасибо', 'спс', 'thx', 'благодарю', '👍', '🔥', '❤️', 'top'];
+    // --- ФИЛЬТР ---
+    if (msg.text) {
         const text = msg.text.toLowerCase();
+        const badWords = await getBadWords(chatId);
+        const isPromo = text.includes('t.me/') || text.includes('telegram.me/');
 
-        if (reputationTriggers.some(trigger => text.includes(trigger))) {
-            const receiver = await getUser(chatId, receiverId, msg.reply_to_message.from);
-            if (receiver) {
-                await updateUser(receiver.id, { reputation: receiver.reputation + 1 });
-                const senderName = getUserName(user);
-                const receiverName = getUserName(msg.reply_to_message.from);
-                sendTimedMessage(chatId, `🌟 ${senderName} повысил репутацию ${receiverName}! (+1)`);
+        const foundBadWord = badWords.find(word => {
+            const escapedWord = word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            const regex = new RegExp(`(^|\\s|[.,!?;:()"])${escapedWord}($|\\s|[.,!?;:()"])`, 'i');
+            return regex.test(text);
+        });
+
+        if (foundBadWord || isPromo) {
+            bot.deleteMessage(chatId, msg.message_id).catch(() => { });
+
+            const dbUser = await getUser(chatId, userId, user);
+            if (dbUser) {
+                const newWarns = dbUser.warns + 1;
+                await updateUser(dbUser.id, { warns: newWarns });
+
+                if (newWarns >= 3) {
+                    await updateUser(dbUser.id, { warns: 0 });
+                    const untilDate = Math.floor(Date.now() / 1000) + 3600;
+                    bot.restrictChatMember(chatId, userId, {
+                        until_date: untilDate,
+                        can_send_messages: false
+                    }).then(() => {
+                        bot.sendMessage(chatId, `⛔ ${getUserName(user)} получил мут на 1 час.`);
+                    }).catch(() => {
+                        sendTimedMessage(chatId, `⚠️ ${getUserName(user)} нарушает, но я не могу дать мут!`);
+                    });
+                } else {
+                    sendTimedMessage(chatId, `⚠️ ${getUserName(user)}, нарушение! Предупреждение ${newWarns}/3.`, 15000);
+                }
+            }
+            return;
+        }
+    }
+
+    // --- XP SYSTEM ---
+    // Проверяем текст ИЛИ медиа
+    const isMedia = msg.photo || msg.voice || msg.video_note || msg.sticker || msg.animation || msg.document;
+
+    if ((msg.text || isMedia) && !msg.text?.startsWith('/')) {
+        const dbUser = await getUser(chatId, userId, user);
+        if (dbUser) {
+            const currentTime = Date.now();
+            if (currentTime - dbUser.last_message_time >= 60000) {
+                const xpGain = Math.floor(Math.random() * 11) + 15;
+                const newXp = dbUser.xp + xpGain;
+                const nextLevelXp = getNextLevelXp(dbUser.level);
+
+                let newLevel = dbUser.level;
+                let message = null;
+
+                if (newXp >= nextLevelXp) {
+                    newLevel += 1;
+                    message = `🎉 Поздравляем, ${getUserName(user)}! Ты достиг уровня ${newLevel}!`;
+                }
+
+                await updateUser(dbUser.id, {
+                    xp: newXp,
+                    level: newLevel,
+                    last_message_time: currentTime
+                });
+
+                console.log(`[XP] ${getUserName(user)}: +${xpGain} XP`);
+                if (message) sendTimedMessage(chatId, message, 30000);
             }
         }
     }
-}
+
+    // --- РЕПУТАЦИЯ (ОТВЕТЫ) ---
+    if (msg.reply_to_message && msg.text) {
+        const receiverId = msg.reply_to_message.from.id;
+        if (userId !== receiverId && !msg.reply_to_message.from.is_bot) {
+            const reputationTriggers = ['+', 'спасибо', 'спс', 'thx', 'благодарю', '👍', '🔥', '❤️', 'top'];
+            const text = msg.text.toLowerCase();
+
+            if (reputationTriggers.some(trigger => text.includes(trigger))) {
+                const receiver = await getUser(chatId, receiverId, msg.reply_to_message.from);
+                if (receiver) {
+                    await updateUser(receiver.id, { reputation: receiver.reputation + 1 });
+                    const senderName = getUserName(user);
+                    const receiverName = getUserName(msg.reply_to_message.from);
+                    sendTimedMessage(chatId, `🌟 ${senderName} повысил репутацию ${receiverName}! (+1)`);
+                }
+            }
+        }
+    }
 });
 
 // Хранилище кулдаунов команд
