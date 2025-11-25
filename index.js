@@ -33,7 +33,7 @@ app.get('/', (req, res) => {
 
 // Роут для приема сообщений от Telegram
 app.post(`/bot${token}`, (req, res) => {
-    // console.log('[DEBUG] Webhook request received:', JSON.stringify(req.body).substring(0, 100) + '...');
+    console.log('[DEBUG] Webhook request received:', JSON.stringify(req.body).substring(0, 100) + '...');
 
     // Ручная обработка реакций (если библиотека не поддерживает)
     if (req.body.message_reaction) {
