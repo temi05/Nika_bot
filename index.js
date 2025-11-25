@@ -360,18 +360,13 @@ bot.on('message', async (msg) => {
             const reputationTriggers = ['+', 'спасибо', 'спс', 'thx', 'благодарю', '👍', '🔥', '❤️', 'top'];
             const text = msg.text.toLowerCase();
 
-            if (reputationTriggers.some(trigger => text.includes(trigger))) {
-                const receiver = await getUser(chatId, receiverId, msg.reply_to_message.from);
-                if (receiver) {
-                    await updateUser(receiver.id, { reputation: receiver.reputation + 1 });
-                    const senderName = getUserName(user);
-                    const receiverName = getUserName(msg.reply_to_message.from);
-                    sendTimedMessage(chatId, `🌟 ${senderName} повысил репутацию ${receiverName}! (+1)`);
-                }
-            }
         }
     }
 });
+
+// Хранилище кулдаунов реакций
+const reactionCooldowns = {};
+const REACTION_COOLDOWN_TIME = 60000; // 1 минута
 
 // --- РЕПУТАЦИЯ (РЕАКЦИИ) ---
 async function handleReaction(reaction) {
@@ -424,12 +419,23 @@ async function handleReaction(reaction) {
         return;
     }
 
+    // Проверка кулдауна (1 минута на пару "кто поставил - кому поставил")
+    const cooldownKey = `${userWhoReacted.id}_${authorId}`;
+    const lastReactionTime = reactionCooldowns[cooldownKey] || 0;
+
+    if (Date.now() - lastReactionTime < REACTION_COOLDOWN_TIME) {
+        console.log(`[DEBUG] Reaction cooldown active for ${userWhoReacted.id} -> ${authorId}`);
+        return;
+    }
+
     // Начисляем репутацию автору сообщения
     const author = await getUser(chatId, authorId);
     if (author) {
         await updateUser(author.id, { reputation: author.reputation + 1 });
         console.log(`[REP] User ${authorId} reputation +1 (Reaction)`);
-        // Не пишем сообщение в чат, чтобы не спамить
+
+        // Обновляем таймер кулдауна
+        reactionCooldowns[cooldownKey] = Date.now();
     }
 }
 // Подстраховка: если библиотека все же решит сама вызвать событие
