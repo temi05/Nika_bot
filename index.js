@@ -372,7 +372,14 @@ bot.on('message', async (msg) => {
 
 // Хранилище кулдаунов команд
 const commandCooldowns = {};
-const COMMAND_COOLDOWN_TIME = 300000; // 5 минут
+const COMMAND_COOLDOWN_TIME = 120000; // 2 минуты
+
+// Вспомогательная функция для удаления сообщения
+function deleteMsg(chatId, msgId, delay = 60000) {
+    setTimeout(() => {
+        bot.deleteMessage(chatId, msgId).catch(() => { });
+    }, delay);
+}
 
 // --- КОМАНДЫ ---
 
@@ -381,12 +388,15 @@ bot.onText(/\/help/, async (msg) => {
     const chatId = msg.chat.id;
     const userId = msg.from.id;
 
+    // Удаляем команду пользователя через 1 минуту
+    deleteMsg(chatId, msg.message_id);
+
     // Проверка кулдауна (для всех, кроме админов)
     if (!(await isAdmin(chatId, userId))) {
         const lastTime = commandCooldowns[userId] || 0;
         if (Date.now() - lastTime < COMMAND_COOLDOWN_TIME) {
             const remaining = Math.ceil((COMMAND_COOLDOWN_TIME - (Date.now() - lastTime)) / 60000);
-            sendTimedMessage(chatId, `⏳ ${getUserName(msg.from)}, подожди ${remaining} мин. перед следующей командой!`, 5000);
+            sendTimedMessage(chatId, `⏳ ${getUserName(msg.from)}, подожди ${remaining} мин. перед следующей командой!`, 60000);
             return;
         }
         commandCooldowns[userId] = Date.now();
@@ -407,15 +417,17 @@ bot.onText(/\/help/, async (msg) => {
 
 _Я также защищаю чат от спама и проверяю новичков!_`;
 
-    bot.sendMessage(chatId, helpText, { parse_mode: 'Markdown' });
+    sendTimedMessage(chatId, helpText, 60000, { parse_mode: 'Markdown' });
 });
 
 bot.onText(/\/banword (.+)/, async (msg, match) => {
     const chatId = msg.chat.id;
     const userId = msg.from.id;
 
+    deleteMsg(chatId, msg.message_id);
+
     if (!(await isAdmin(chatId, userId))) {
-        sendTimedMessage(chatId, '⛔ У тебя нет прав админа для этой команды!', 5000);
+        sendTimedMessage(chatId, '⛔ У тебя нет прав админа для этой команды!', 60000);
         return;
     }
 
@@ -424,9 +436,9 @@ bot.onText(/\/banword (.+)/, async (msg, match) => {
 
     if (!data) {
         await supabase.from('bad_words').insert([{ chat_id: chatId, word: word }]);
-        sendTimedMessage(chatId, `✅ Слово "${word}" добавлено в бан.`);
+        sendTimedMessage(chatId, `✅ Слово "${word}" добавлено в бан.`, 60000);
     } else {
-        sendTimedMessage(chatId, `ℹ️ Слово "${word}" уже в списке.`);
+        sendTimedMessage(chatId, `ℹ️ Слово "${word}" уже в списке.`, 60000);
     }
 });
 
@@ -434,8 +446,10 @@ bot.onText(/\/unbanword (.+)/, async (msg, match) => {
     const chatId = msg.chat.id;
     const userId = msg.from.id;
 
+    deleteMsg(chatId, msg.message_id);
+
     if (!(await isAdmin(chatId, userId))) {
-        sendTimedMessage(chatId, '⛔ У тебя нет прав админа для этой команды!', 5000);
+        sendTimedMessage(chatId, '⛔ У тебя нет прав админа для этой команды!', 60000);
         return;
     }
 
@@ -443,9 +457,9 @@ bot.onText(/\/unbanword (.+)/, async (msg, match) => {
     const { error } = await supabase.from('bad_words').delete().eq('chat_id', chatId).eq('word', word);
 
     if (!error) {
-        sendTimedMessage(chatId, `✅ Слово "${word}" удалено из бана.`);
+        sendTimedMessage(chatId, `✅ Слово "${word}" удалено из бана.`, 60000);
     } else {
-        sendTimedMessage(chatId, `ℹ️ Ошибка или слово не найдено.`);
+        sendTimedMessage(chatId, `ℹ️ Ошибка или слово не найдено.`, 60000);
     }
 });
 
@@ -453,16 +467,18 @@ bot.onText(/\/listwords/, async (msg) => {
     const chatId = msg.chat.id;
     const userId = msg.from.id;
 
+    deleteMsg(chatId, msg.message_id);
+
     if (!(await isAdmin(chatId, userId))) {
-        sendTimedMessage(chatId, '⛔ У тебя нет прав админа для этой команды!', 5000);
+        sendTimedMessage(chatId, '⛔ У тебя нет прав админа для этой команды!', 60000);
         return;
     }
 
     const words = await getBadWords(chatId);
     if (words.length === 0) {
-        sendTimedMessage(chatId, 'Список пуст.');
+        sendTimedMessage(chatId, 'Список пуст.', 60000);
     } else {
-        bot.sendMessage(chatId, `🚫 Запрещенные слова:\n${words.join(', ')}`);
+        sendTimedMessage(chatId, `🚫 Запрещенные слова:\n${words.join(', ')}`, 60000);
     }
 });
 
@@ -470,12 +486,14 @@ bot.onText(/\/me/, async (msg) => {
     const chatId = msg.chat.id;
     const userId = msg.from.id;
 
+    deleteMsg(chatId, msg.message_id);
+
     // Проверка кулдауна
     if (!(await isAdmin(chatId, userId))) {
         const lastTime = commandCooldowns[userId] || 0;
         if (Date.now() - lastTime < COMMAND_COOLDOWN_TIME) {
             const remaining = Math.ceil((COMMAND_COOLDOWN_TIME - (Date.now() - lastTime)) / 60000);
-            sendTimedMessage(chatId, `⏳ ${getUserName(msg.from)}, подожди ${remaining} мин. перед следующей командой!`, 5000);
+            sendTimedMessage(chatId, `⏳ ${getUserName(msg.from)}, подожди ${remaining} мин. перед следующей командой!`, 60000);
             return;
         }
         commandCooldowns[userId] = Date.now();
@@ -495,19 +513,21 @@ bot.onText(/\/me/, async (msg) => {
         `🍪 Репутация: ${user.reputation}\n` +
         `📈 До следующего уровня: ${xpNeeded} XP`;
 
-    bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
+    sendTimedMessage(chatId, message, 60000, { parse_mode: 'Markdown' });
 });
 
 bot.onText(/\/top/, async (msg) => {
     const chatId = msg.chat.id;
     const userId = msg.from.id;
 
+    deleteMsg(chatId, msg.message_id);
+
     // Проверка кулдауна
     if (!(await isAdmin(chatId, userId))) {
         const lastTime = commandCooldowns[userId] || 0;
         if (Date.now() - lastTime < COMMAND_COOLDOWN_TIME) {
             const remaining = Math.ceil((COMMAND_COOLDOWN_TIME - (Date.now() - lastTime)) / 60000);
-            sendTimedMessage(chatId, `⏳ ${getUserName(msg.from)}, подожди ${remaining} мин. перед следующей командой!`, 5000);
+            sendTimedMessage(chatId, `⏳ ${getUserName(msg.from)}, подожди ${remaining} мин. перед следующей командой!`, 60000);
             return;
         }
         commandCooldowns[userId] = Date.now();
@@ -522,7 +542,7 @@ bot.onText(/\/top/, async (msg) => {
         .limit(10);
 
     if (!users || users.length === 0) {
-        bot.sendMessage(chatId, 'В этом чате еще нет активности.');
+        sendTimedMessage(chatId, 'В этом чате еще нет активности.', 60000);
         return;
     }
 
@@ -530,19 +550,21 @@ bot.onText(/\/top/, async (msg) => {
     users.forEach((u, index) => {
         message += `${index + 1}. ${getUserName(u)} — ${u.level} ур. (${u.reputation} 🍪)\n`;
     });
-    bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
+    sendTimedMessage(chatId, message, 60000, { parse_mode: 'Markdown' });
 });
 
 bot.onText(/\/kto (.+)/, async (msg, match) => {
     const chatId = msg.chat.id;
     const userId = msg.from.id;
 
+    deleteMsg(chatId, msg.message_id);
+
     // Проверка кулдауна
     if (!(await isAdmin(chatId, userId))) {
         const lastTime = commandCooldowns[userId] || 0;
         if (Date.now() - lastTime < COMMAND_COOLDOWN_TIME) {
             const remaining = Math.ceil((COMMAND_COOLDOWN_TIME - (Date.now() - lastTime)) / 60000);
-            sendTimedMessage(chatId, `⏳ ${getUserName(msg.from)}, подожди ${remaining} мин. перед следующей командой!`, 5000);
+            sendTimedMessage(chatId, `⏳ ${getUserName(msg.from)}, подожди ${remaining} мин. перед следующей командой!`, 60000);
             return;
         }
         commandCooldowns[userId] = Date.now();
@@ -554,12 +576,12 @@ bot.onText(/\/kto (.+)/, async (msg, match) => {
     const { data: users } = await supabase.from('users').select('*').eq('chat_id', chatId);
 
     if (!users || users.length === 0) {
-        bot.sendMessage(chatId, 'Я еще никого не знаю...');
+        sendTimedMessage(chatId, 'Я еще никого не знаю...', 60000);
         return;
     }
 
     const randomUser = users[Math.floor(Math.random() * users.length)];
-    bot.sendMessage(chatId, `🤔 Я думаю, что ${question} — это ${getUserName(randomUser)}!`);
+    sendTimedMessage(chatId, `🤔 Я думаю, что ${question} — это ${getUserName(randomUser)}!`, 60000);
 });
 
 bot.on('sticker', (msg) => {
