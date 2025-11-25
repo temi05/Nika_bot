@@ -27,29 +27,6 @@ const PORT = process.env.PORT || 3000;
 const RENDER_EXTERNAL_URL = process.env.RENDER_EXTERNAL_URL; // Render сам дает эту переменную
 
 // Главная страница (для проверки)
-app.get('/', (req, res) => {
-    res.send('Бот работает! 🤖 (Webhook Mode)');
-});
-
-// Роут для приема сообщений от Telegram
-app.post(`/bot${token}`, (req, res) => {
-    bot.processUpdate(req.body);
-    res.sendStatus(200);
-});
-
-app.listen(PORT, async () => {
-    console.log(`Веб-сервер запущен на порту ${PORT}`);
-
-    // Устанавливаем вебхук, если мы на Render
-    if (RENDER_EXTERNAL_URL) {
-        const webhookUrl = `${RENDER_EXTERNAL_URL}/bot${token}`;
-        console.log(`Ставим вебхук: ${webhookUrl}`);
-        await bot.setWebHook(webhookUrl);
-    } else {
-        console.log('Мы не на Render (нет RENDER_EXTERNAL_URL), вебхук не ставим.');
-    }
-});
-// ------------------------------
 
 // Временное хранилище авторов сообщений (для реакций)
 // Очищается при перезапуске, но это не критично
