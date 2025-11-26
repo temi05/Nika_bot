@@ -415,22 +415,31 @@ bot.on('message', async (msg) => {
 
         if (userId !== receiverId && isReceiverValid) {
             const reputationTriggers = ['+', 'спасибо', 'спс', 'thx', 'благодарю', '👍', '🔥', '❤️', 'top'];
+            const negativeTriggers = ['-', '👎', 'дизлайк', 'фу', 'bad'];
             const text = msg.text.toLowerCase();
 
-            if (reputationTriggers.some(trigger => text.includes(trigger))) {
+            const isPositive = reputationTriggers.some(trigger => text.includes(trigger));
+            const isNegative = negativeTriggers.some(trigger => text.includes(trigger));
+
+            if (isPositive || isNegative) {
                 // Проверка кулдауна
                 const cooldownKey = `${userId}_${receiverId}`;
                 const lastReactionTime = reactionCooldowns[cooldownKey] || 0;
 
                 if (Date.now() - lastReactionTime < REACTION_COOLDOWN_TIME) {
-                    sendTimedMessage(chatId, `⏳ ${getUserName(user)}, подожди минуту перед повышением репутации этому пользователю!`, 10000);
+                    sendTimedMessage(chatId, `⏳ ${getUserName(user)}, подожди минуту перед изменением репутации этому пользователю!`, 10000);
                 } else {
                     const receiver = await getUser(chatId, receiverId, msg.reply_to_message.from);
                     if (receiver) {
-                        await updateUser(receiver.id, { reputation: receiver.reputation + 1 });
+                        const change = isPositive ? 1 : -1;
+                        await updateUser(receiver.id, { reputation: receiver.reputation + change });
+
                         const senderName = getUserName(user);
                         const receiverName = getUserName(msg.reply_to_message.from);
-                        sendTimedMessage(chatId, `🌟 ${senderName} повысил репутацию ${receiverName}! (+1)`);
+                        const actionText = isPositive ? 'повысил' : 'понизил';
+                        const emoji = isPositive ? '🌟' : '📉';
+
+                        sendTimedMessage(chatId, `${emoji} ${senderName} ${actionText} репутацию ${receiverName}! (${change > 0 ? '+' : ''}${change})`);
 
                         // Обновляем таймер кулдауна
                         reactionCooldowns[cooldownKey] = Date.now();
@@ -440,8 +449,6 @@ bot.on('message', async (msg) => {
         }
     }
 });
-
-
 
 // --- РЕПУТАЦИЯ (РЕАКЦИИ) ---
 async function handleReaction(reaction) {
@@ -521,17 +528,23 @@ async function handleReaction(reaction) {
         return;
     }
 
+    // Определяем тип реакции (позитивная или негативная)
+    // new_reaction - это массив объектов. Ищем эмодзи.
+    const emoji = reaction.new_reaction[0]?.emoji;
+    const isNegative = ['👎'].includes(emoji);
+    const change = isNegative ? -1 : 1;
+
     // Начисляем репутацию автору сообщения
     const author = await getUser(chatId, authorId);
     if (author) {
-        await updateUser(author.id, { reputation: author.reputation + 1 });
-        console.log(`[REP] User ${authorId} reputation +1 (Reaction)`);
+        await updateUser(author.id, { reputation: author.reputation + change });
+        console.log(`[REP] User ${authorId} reputation ${change > 0 ? '+' : ''}${change} (Reaction: ${emoji})`);
 
         // Обновляем таймер кулдауна
         reactionCooldowns[cooldownKey] = Date.now();
     }
 }
-// Подстраховка: если библиотека все же решит сама вызвать событие
+
 bot.on('message_reaction', handleReaction);
 
 // Хранилище кулдаунов команд
