@@ -73,6 +73,7 @@ const messageAuthors = {};
 // Хранилище кулдаунов реакций (и текстовой репутации)
 const reactionCooldowns = {};
 const REACTION_COOLDOWN_TIME = 60000; // 1 минута
+const ANONYMOUS_ADMIN_ID = 1087968824; // ID GroupAnonymousBot
 
 // --- КЭШИРОВАНИЕ ---
 const userCache = {}; // { userId: { data: userObj, expires: timestamp } }
@@ -373,6 +374,9 @@ bot.on('message', async (msg) => {
     // Проверяем текст ИЛИ медиа
     const isMedia = msg.photo || msg.voice || msg.video_note || msg.sticker || msg.animation || msg.document;
 
+    // Игнорируем ботов (кроме анонимного админа)
+    if (msg.from.is_bot && msg.from.id !== ANONYMOUS_ADMIN_ID) return;
+
     if ((msg.text || isMedia) && !msg.text?.startsWith('/')) {
         const dbUser = await getUser(chatId, userId, user);
         if (dbUser) {
@@ -405,7 +409,11 @@ bot.on('message', async (msg) => {
     // --- РЕПУТАЦИЯ (ОТВЕТЫ) ---
     if (msg.reply_to_message && msg.text) {
         const receiverId = msg.reply_to_message.from.id;
-        if (userId !== receiverId && !msg.reply_to_message.from.is_bot) {
+
+        // Разрешаем репутацию, если получатель не бот ИЛИ это анонимный админ
+        const isReceiverValid = !msg.reply_to_message.from.is_bot || receiverId === ANONYMOUS_ADMIN_ID;
+
+        if (userId !== receiverId && isReceiverValid) {
             const reputationTriggers = ['+', 'спасибо', 'спс', 'thx', 'благодарю', '👍', '🔥', '❤️', 'top'];
             const text = msg.text.toLowerCase();
 
@@ -441,11 +449,23 @@ async function handleReaction(reaction) {
 
     const chatId = reaction.chat.id;
     const messageId = reaction.message_id;
-    const userWhoReacted = reaction.user; // Тот, кто поставил лайк
+    let userWhoReacted = reaction.user;
 
-    // Если лайк от канала/анонима - игнорируем (нет пользователя)
+    // Если лайк от канала/анонима (нет user, но есть actor_chat)
+    if (!userWhoReacted && reaction.actor_chat) {
+        console.log('[DEBUG] Reaction from actor_chat (Anonymous/Channel). Treating as Anonymous Admin.');
+        // Создаем фейковый объект пользователя для анонима
+        userWhoReacted = {
+            id: ANONYMOUS_ADMIN_ID,
+            first_name: reaction.actor_chat.title || 'Anonymous Admin',
+            username: reaction.actor_chat.username || 'GroupAnonymousBot',
+            is_bot: true
+        };
+    }
+
+    // Если все еще нет пользователя - игнорируем
     if (!userWhoReacted) {
-        console.log('[DEBUG] Reaction from channel/anonymous. Ignoring.');
+        console.log('[DEBUG] Reaction from unknown source. Ignoring.');
         return;
     }
 
