@@ -443,6 +443,12 @@ async function handleReaction(reaction) {
     const messageId = reaction.message_id;
     const userWhoReacted = reaction.user; // Тот, кто поставил лайк
 
+    // Если лайк от канала/анонима - игнорируем (нет пользователя)
+    if (!userWhoReacted) {
+        console.log('[DEBUG] Reaction from channel/anonymous. Ignoring.');
+        return;
+    }
+
     // Игнорируем снятие реакции (old_reaction есть, new_reaction пусто)
     if (reaction.new_reaction.length === 0) return;
 
