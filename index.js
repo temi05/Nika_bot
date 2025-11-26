@@ -70,13 +70,29 @@ app.listen(PORT, async () => {
 // Очищается при перезапуске, но это не критично
 const messageAuthors = {};
 
+// Хранилище кулдаунов реакций (и текстовой репутации)
+const reactionCooldowns = {};
+const REACTION_COOLDOWN_TIME = 60000; // 1 минута
+
+// --- КЭШИРОВАНИЕ ---
+const userCache = {}; // { userId: { data: userObj, expires: timestamp } }
+const USER_CACHE_TTL = 1000 * 60 * 5; // 5 минут
+
+const badWordsCache = {}; // { chatId: { words: [], expires: timestamp } }
+const BAD_WORDS_CACHE_TTL = 1000 * 60 * 10; // 10 минут
+
 // Хранилище таймеров верификации
 const pendingVerifications = {};
 
 // --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ БД ---
 
 async function getUser(chatId, userId, userInfo = {}) {
-    // Пытаемся найти пользователя
+    // 1. Проверяем кэш
+    if (userCache[userId] && Date.now() < userCache[userId].expires) {
+        return userCache[userId].data;
+    }
+
+    // 2. Если нет в кэше - идем в БД
     let { data: user, error } = await supabase
         .from('users')
         .select('*')
@@ -84,7 +100,7 @@ async function getUser(chatId, userId, userInfo = {}) {
         .eq('user_id', userId)
         .single();
 
-    if (error && error.code !== 'PGRST116') { // PGRST116 = не найдено
+    if (error && error.code !== 'PGRST116') {
         console.error('Ошибка получения пользователя:', error.message);
         return null;
     }
@@ -113,21 +129,45 @@ async function getUser(chatId, userId, userInfo = {}) {
             console.error('Ошибка создания пользователя:', createError.message);
             return null;
         }
-        return data;
+        user = data;
     }
+
+    // 3. Сохраняем в кэш
+    userCache[userId] = {
+        data: user,
+        expires: Date.now() + USER_CACHE_TTL
+    };
 
     return user;
 }
 
 async function updateUser(id, updates) {
+    // Обновляем БД
     const { error } = await supabase
         .from('users')
         .update(updates)
         .eq('id', id);
-    if (error) console.error('Ошибка обновления пользователя:', error);
+
+    if (error) {
+        console.error('Ошибка обновления пользователя:', error);
+        return;
+    }
+
+    // Обновляем кэш (ищем пользователя в кэше по ID записи, это неэффективно, но у нас ключ userId)
+    // Проще найти ключ кэша
+    const cacheKey = Object.keys(userCache).find(key => userCache[key].data.id === id);
+    if (cacheKey) {
+        userCache[cacheKey].data = { ...userCache[cacheKey].data, ...updates };
+        userCache[cacheKey].expires = Date.now() + USER_CACHE_TTL; // Продлеваем жизнь
+    }
 }
 
 async function getBadWords(chatId) {
+    // Проверяем кэш
+    if (badWordsCache[chatId] && Date.now() < badWordsCache[chatId].expires) {
+        return badWordsCache[chatId].words;
+    }
+
     const { data, error } = await supabase
         .from('bad_words')
         .select('word')
@@ -137,7 +177,16 @@ async function getBadWords(chatId) {
         console.error('Ошибка получения плохих слов:', error);
         return [];
     }
-    return data.map(item => item.word);
+
+    const words = data.map(item => item.word);
+
+    // Сохраняем в кэш
+    badWordsCache[chatId] = {
+        words: words,
+        expires: Date.now() + BAD_WORDS_CACHE_TTL
+    };
+
+    return words;
 }
 
 // --- ЛОГИКА БОТА ---
@@ -270,14 +319,14 @@ bot.on('message', async (msg) => {
         if (!messageAuthors[chatId]) messageAuthors[chatId] = {};
         messageAuthors[chatId][msg.message_id] = userId;
 
-        // БД для надежности
-        await supabase.from('message_logs').insert([{
+        // БД для надежности (Fire-and-Forget, без await)
+        supabase.from('message_logs').insert([{
             chat_id: chatId,
             message_id: msg.message_id,
             user_id: userId
         }]).then(({ error }) => {
             if (error) console.error('Ошибка лога сообщения:', error.message);
-            else console.log(`[DEBUG] Message ${msg.message_id} saved to DB`);
+            // else console.log(`[DEBUG] Message ${msg.message_id} saved to DB`); // Отключаем лог для скорости
         });
     }
 
@@ -361,21 +410,30 @@ bot.on('message', async (msg) => {
             const text = msg.text.toLowerCase();
 
             if (reputationTriggers.some(trigger => text.includes(trigger))) {
-                const receiver = await getUser(chatId, receiverId, msg.reply_to_message.from);
-                if (receiver) {
-                    await updateUser(receiver.id, { reputation: receiver.reputation + 1 });
-                    const senderName = getUserName(user);
-                    const receiverName = getUserName(msg.reply_to_message.from);
-                    sendTimedMessage(chatId, `🌟 ${senderName} повысил репутацию ${receiverName}! (+1)`);
+                // Проверка кулдауна
+                const cooldownKey = `${userId}_${receiverId}`;
+                const lastReactionTime = reactionCooldowns[cooldownKey] || 0;
+
+                if (Date.now() - lastReactionTime < REACTION_COOLDOWN_TIME) {
+                    sendTimedMessage(chatId, `⏳ ${getUserName(user)}, подожди минуту перед повышением репутации этому пользователю!`, 10000);
+                } else {
+                    const receiver = await getUser(chatId, receiverId, msg.reply_to_message.from);
+                    if (receiver) {
+                        await updateUser(receiver.id, { reputation: receiver.reputation + 1 });
+                        const senderName = getUserName(user);
+                        const receiverName = getUserName(msg.reply_to_message.from);
+                        sendTimedMessage(chatId, `🌟 ${senderName} повысил репутацию ${receiverName}! (+1)`);
+
+                        // Обновляем таймер кулдауна
+                        reactionCooldowns[cooldownKey] = Date.now();
+                    }
                 }
             }
         }
     }
 });
 
-// Хранилище кулдаунов реакций
-const reactionCooldowns = {};
-const REACTION_COOLDOWN_TIME = 60000; // 1 минута
+
 
 // --- РЕПУТАЦИЯ (РЕАКЦИИ) ---
 async function handleReaction(reaction) {
