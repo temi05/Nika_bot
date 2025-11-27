@@ -82,15 +82,13 @@ const USER_CACHE_TTL = 1000 * 60 * 5; // 5 минут
 const badWordsCache = {}; // { chatId: { words: [], expires: timestamp } }
 const BAD_WORDS_CACHE_TTL = 1000 * 60 * 10; // 10 минут
 
-// Хранилище таймеров верификации
-const pendingVerifications = {};
-
 // --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ БД ---
 
 async function getUser(chatId, userId, userInfo = {}) {
+    const cacheKey = `${chatId}_${userId}`;
     // 1. Проверяем кэш
-    if (userCache[userId] && Date.now() < userCache[userId].expires) {
-        return userCache[userId].data;
+    if (userCache[cacheKey] && Date.now() < userCache[cacheKey].expires) {
+        return userCache[cacheKey].data;
     }
 
     // 2. Если нет в кэше - идем в БД
@@ -134,7 +132,7 @@ async function getUser(chatId, userId, userInfo = {}) {
     }
 
     // 3. Сохраняем в кэш
-    userCache[userId] = {
+    userCache[cacheKey] = {
         data: user,
         expires: Date.now() + USER_CACHE_TTL
     };
@@ -154,8 +152,7 @@ async function updateUser(id, updates) {
         return;
     }
 
-    // Обновляем кэш (ищем пользователя в кэше по ID записи, это неэффективно, но у нас ключ userId)
-    // Проще найти ключ кэша
+    // Обновляем кэш (ищем пользователя в кэше по ID записи)
     const cacheKey = Object.keys(userCache).find(key => userCache[key].data.id === id);
     if (cacheKey) {
         userCache[cacheKey].data = { ...userCache[cacheKey].data, ...updates };
@@ -562,7 +559,7 @@ function deleteMsg(chatId, msgId, delay = 60000) {
 // --- КОМАНДЫ ---
 
 // Команда /help
-bot.onText(/\/help/, async (msg) => {
+bot.onText(/^\/help$/, async (msg) => {
     const chatId = msg.chat.id;
     const userId = msg.from.id;
 
@@ -662,7 +659,7 @@ bot.onText(/\/listwords/, async (msg) => {
     }
 });
 
-bot.onText(/\/me/, async (msg) => {
+bot.onText(/^\/me$/, async (msg) => {
     const chatId = msg.chat.id;
     const userId = msg.from.id;
 
@@ -681,7 +678,10 @@ bot.onText(/\/me/, async (msg) => {
 
     const user = await getUser(chatId, userId, msg.from);
 
-    if (!user) return;
+    if (!user) {
+        sendTimedMessage(chatId, '❌ Ошибка получения данных пользователя.', 10000);
+        return;
+    }
 
     const nextLevelXp = getNextLevelXp(user.level);
     const xpNeeded = nextLevelXp - user.xp;
@@ -696,7 +696,7 @@ bot.onText(/\/me/, async (msg) => {
     sendTimedMessage(chatId, message, 60000, { parse_mode: 'Markdown' });
 });
 
-bot.onText(/\/top/, async (msg) => {
+bot.onText(/^\/top$/, async (msg) => {
     const chatId = msg.chat.id;
     const userId = msg.from.id;
 
