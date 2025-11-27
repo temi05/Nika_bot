@@ -197,7 +197,13 @@ function getNextLevelXp(level) {
 }
 
 function getUserName(user) {
-    return user.username ? `@${user.username}` : user.first_name;
+    const name = user.username ? `@${user.username}` : user.first_name;
+    return escapeMarkdown(name);
+}
+
+function escapeMarkdown(text) {
+    if (!text) return '';
+    return text.replace(/[_*[\]()~`>#+\-=|{}.!]/g, '\\$&');
 }
 
 function sendTimedMessage(chatId, text, delay = 15000, options = {}) {
@@ -572,7 +578,7 @@ bot.onText(/^\/help$/, async (msg) => {
         const lastTime = commandCooldowns[userId] || 0;
         if (Date.now() - lastTime < COMMAND_COOLDOWN_TIME) {
             const remaining = Math.ceil((COMMAND_COOLDOWN_TIME - (Date.now() - lastTime)) / 60000);
-            sendTimedMessage(chatId, `⏳ ${getUserName(msg.from)}, подожди ${remaining} мин. перед следующей командой!`, 60000);
+            sendTimedMessage(chatId, `⏳ ${getUserName(msg.from)}, подожди ${remaining} мин. перед следующей командой!`);
             return;
         }
         commandCooldowns[userId] = Date.now();
@@ -582,20 +588,20 @@ bot.onText(/^\/help$/, async (msg) => {
 
 👤 *Для всех:*
 /me — Посмотреть свою статистику (уровень, опыт, репутация)
-/top — Топ-10 активных участников
+/top — Топ\\-10 активных участников
 /kto <вопрос> — Выбрать случайного участника (например: /kto кто сегодня платит?)
 👍 *Репутация:*
-• Повысить (+1): Ответь "спасибо", "+", "👍" или поставь любую позитивную реакцию.
-• Понизить (-1): Ответь "-", "👎", "фу" или поставь реакцию 👎, 💩, 🤮, 🤬, 😤.
+• Повысить (\\+1): Ответь "спасибо", "\\+", "👍" или поставь любую позитивную реакцию\\.
+• Понизить (\\-1): Ответь "\\-", "👎", "фу" или поставь реакцию 👎, 💩, 🤮, 🤬, 😤\\.
 
 👮‍♂️ *Для админов:*
 /banword <слово> — Запретить слово
 /unbanword <слово> — Разрешить слово
 /listwords — Список запрещенных слов
 
-_Я также защищаю чат от спама и проверяю новичков!_`;
+_Я также защищаю чат от спама и проверяю новичков\\!_`;
 
-    sendTimedMessage(chatId, helpText, 60000, { parse_mode: 'Markdown' });
+    sendTimedMessage(chatId, helpText, 60000, { parse_mode: 'MarkdownV2' });
 });
 
 bot.onText(/\/banword (.+)/, async (msg, match) => {
@@ -694,7 +700,7 @@ bot.onText(/^\/me$/, async (msg) => {
         `🍪 Репутация: ${user.reputation}\n` +
         `📈 До следующего уровня: ${xpNeeded} XP`;
 
-    sendTimedMessage(chatId, message, 60000, { parse_mode: 'Markdown' });
+    sendTimedMessage(chatId, message, 60000, { parse_mode: 'MarkdownV2' });
 });
 
 bot.onText(/^\/top$/, async (msg) => {
@@ -731,7 +737,7 @@ bot.onText(/^\/top$/, async (msg) => {
     users.forEach((u, index) => {
         message += `${index + 1}. ${getUserName(u)} — ${u.level} ур. (${u.reputation} 🍪)\n`;
     });
-    sendTimedMessage(chatId, message, 60000, { parse_mode: 'Markdown' });
+    sendTimedMessage(chatId, message, 60000, { parse_mode: 'MarkdownV2' });
 });
 
 bot.onText(/\/kto (.+)/, async (msg, match) => {
