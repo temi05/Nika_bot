@@ -742,5 +742,5 @@ bot.on('sticker', (msg) => {
     console.log(`[STICKER] ID: ${msg.sticker.file_id}`);
 });
 
-console.log('Бот запущен (Supabase Edition)...');}
-}
+console.log('Бот запущен (Supabase Edition)...');
+
