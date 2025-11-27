@@ -548,9 +548,7 @@ async function handleReaction(reaction) {
 
 bot.on('message_reaction', handleReaction);
 
-// Хранилище кулдаунов команд
-const commandCooldowns = {};
-const COMMAND_COOLDOWN_TIME = 120000; // 2 минуты
+
 
 // Вспомогательная функция для удаления сообщения
 function deleteMsg(chatId, msgId, delay = 60000) {
