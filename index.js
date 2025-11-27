@@ -412,42 +412,38 @@ bot.on('message', async (msg) => {
         }
     }
 
+
+
     // --- РЕПУТАЦИЯ (ОТВЕТЫ) ---
     if (msg.reply_to_message && msg.text) {
         const receiverId = msg.reply_to_message.from.id;
-
-        // Разрешаем репутацию, если получатель не бот ИЛИ это анонимный админ
         const isReceiverValid = !msg.reply_to_message.from.is_bot || receiverId === ANONYMOUS_ADMIN_ID;
 
         if (userId !== receiverId && isReceiverValid) {
-            const reputationTriggers = ['+', 'спасибо', 'спс', 'thx', 'благодарю', '👍', '🔥', '❤️', 'top'];
-            const negativeTriggers = ['-', '👎', 'дизлайк', 'фу', 'bad'];
-            const text = msg.text.toLowerCase();
+            const text = msg.text.trim().toLowerCase();
+            // Строгое соответствие: сообщение должно состоять ТОЛЬКО из триггера
+            const positiveTriggers = ['+', 'спасибо', 'спс', 'благодарю', '👍'];
+            const negativeTriggers = ['-', '👎', 'fu', 'дизлайк', 'фу'];
 
-            const isPositive = reputationTriggers.some(trigger => text.includes(trigger));
-            const isNegative = negativeTriggers.some(trigger => text.includes(trigger));
+            let change = 0;
+            if (positiveTriggers.includes(text)) change = 1;
+            if (negativeTriggers.includes(text)) change = -1;
 
-            if (isPositive || isNegative) {
-                // Проверка кулдауна
+            if (change !== 0) {
                 const cooldownKey = `${userId}_${receiverId}`;
                 const lastReactionTime = reactionCooldowns[cooldownKey] || 0;
 
                 if (Date.now() - lastReactionTime < REACTION_COOLDOWN_TIME) {
-                    sendTimedMessage(chatId, `⏳ ${getUserName(user)}, подожди минуту перед изменением репутации этому пользователю!`, 10000);
+                    sendTimedMessage(chatId, `⏳ ${getUserName(user)}, подожди минуту перед изменением репутации!`, 10000);
                 } else {
                     const receiver = await getUser(chatId, receiverId, msg.reply_to_message.from);
                     if (receiver) {
-                        const change = isPositive ? 1 : -1;
                         await updateUser(receiver.id, { reputation: receiver.reputation + change });
-
                         const senderName = getUserName(user);
                         const receiverName = getUserName(msg.reply_to_message.from);
-                        const actionText = isPositive ? 'повысил' : 'понизил';
-                        const emoji = isPositive ? '🌟' : '📉';
-
-                        sendTimedMessage(chatId, `${emoji} ${senderName} ${actionText} репутацию ${receiverName}! (${change > 0 ? '+' : ''}${change})`);
-
-                        // Обновляем таймер кулдауна
+                        const emoji = change > 0 ? '🌟' : '📉';
+                        // Используем MarkdownV2 и экранируем имена (они уже экранированы в getUserName)
+                        sendTimedMessage(chatId, `${emoji} ${senderName} ${change > 0 ? 'повысил' : 'понизил'} репутацию ${receiverName}! (${change > 0 ? '+' : ''}${change})`, 60000, { parse_mode: 'MarkdownV2' });
                         reactionCooldowns[cooldownKey] = Date.now();
                     }
                 }
@@ -458,94 +454,65 @@ bot.on('message', async (msg) => {
 
 // --- РЕПУТАЦИЯ (РЕАКЦИИ) ---
 async function handleReaction(reaction) {
-    console.log('[DEBUG] Reaction received:', JSON.stringify(reaction));
-
     const chatId = reaction.chat.id;
     const messageId = reaction.message_id;
-    let userWhoReacted = reaction.user;
 
-    // Если лайк от канала/анонима (нет user, но есть actor_chat)
-    if (!userWhoReacted && reaction.actor_chat) {
-        console.log('[DEBUG] Reaction from actor_chat (Anonymous/Channel). Treating as Anonymous Admin.');
-        // Создаем фейковый объект пользователя для анонима
-        userWhoReacted = {
-            id: ANONYMOUS_ADMIN_ID,
-            first_name: reaction.actor_chat.title || 'Anonymous Admin',
-            username: reaction.actor_chat.username || 'GroupAnonymousBot',
-            is_bot: true
-        };
-    }
+    // Получаем автора сообщения
+    let authorId = messageAuthors[chatId]?.[messageId];
 
-    // Если все еще нет пользователя - игнорируем
-    if (!userWhoReacted) {
-        console.log('[DEBUG] Reaction from unknown source. Ignoring.');
-        return;
-    }
-
-    // Игнорируем снятие реакции (old_reaction есть, new_reaction пусто)
-    if (reaction.new_reaction.length === 0) return;
-
-    // 1. Ищем автора сообщения (кому поставили лайк)
-    let authorId = null;
-
-    // Сначала ищем в кэше
-    if (messageAuthors[chatId] && messageAuthors[chatId][messageId]) {
-        authorId = messageAuthors[chatId][messageId];
-        console.log(`[DEBUG] Author found in cache: ${authorId}`);
-    }
-    // Если нет в кэше - ищем в БД
-    else {
-        console.log(`[DEBUG] Author not in cache, checking DB for msg ${messageId}...`);
-        const { data, error } = await supabase
+    if (!authorId) {
+        const { data } = await supabase
             .from('message_logs')
             .select('user_id')
             .eq('chat_id', chatId)
             .eq('message_id', messageId)
             .single();
-
-        if (data) {
-            authorId = data.user_id;
-            console.log(`[DEBUG] Author found in DB: ${authorId}`);
-            // Обновляем кэш
-            if (!messageAuthors[chatId]) messageAuthors[chatId] = {};
-            messageAuthors[chatId][messageId] = authorId;
-        } else {
-            console.log(`[DEBUG] Author not found in DB. Error: ${error?.message}`);
-        }
+        if (data) authorId = data.user_id;
     }
 
-    if (!authorId) {
-        console.log('[DEBUG] Could not determine message author. Ignoring.');
-        return;
+    if (!authorId) return;
+
+    // Определяем пользователя, который поставил реакцию
+    let actorId = reaction.user?.id;
+
+    // Поддержка анонимных админов (GroupAnonymousBot)
+    if (!reaction.user && reaction.actor_chat) {
+        actorId = ANONYMOUS_ADMIN_ID; // ID GroupAnonymousBot
     }
 
-    // Нельзя лайкать самого себя
-    if (userWhoReacted.id === authorId) {
-        console.log('[DEBUG] User liked themselves. Ignoring.');
-        return;
+    if (!actorId) return; // Не смогли определить кто поставил
+
+    // Нельзя менять репутацию самому себе
+    if (actorId === authorId) return;
+
+    // Проверка кулдауна
+    const cooldownKey = `${actorId}_${authorId}`;
+    if (reactionCooldowns[cooldownKey] && Date.now() - reactionCooldowns[cooldownKey] < REACTION_COOLDOWN_TIME) {
+        return; // Кулдаун
     }
 
-    // Проверка кулдауна (1 минута на пару "кто поставил - кому поставил")
-    const cooldownKey = `${userWhoReacted.id}_${authorId}`;
-    const lastReactionTime = reactionCooldowns[cooldownKey] || 0;
+    // --- ЛОГИКА ДЕЛЬТЫ ---
+    const getReactionScore = (reacts) => {
+        if (!reacts || reacts.length === 0) return 0;
+        const emoji = reacts[0]?.emoji;
+        if (!emoji) return 0;
 
-    if (Date.now() - lastReactionTime < REACTION_COOLDOWN_TIME) {
-        console.log(`[DEBUG] Reaction cooldown active for ${userWhoReacted.id} -> ${authorId}`);
-        return;
-    }
+        const negativeReactions = ['👎', '💩', '🤮', '🤬', '😤'];
+        return negativeReactions.includes(emoji) ? -1 : 1;
+    };
 
-    // Определяем тип реакции (позитивная или негативная)
-    // new_reaction - это массив объектов. Ищем эмодзи.
-    const emoji = reaction.new_reaction[0]?.emoji;
-    const negativeReactions = ['👎', '💩', '🤮', '🤬', '😤'];
-    const isNegative = negativeReactions.includes(emoji);
-    const change = isNegative ? -1 : 1;
+    const oldScore = getReactionScore(reaction.old_reaction);
+    const newScore = getReactionScore(reaction.new_reaction);
+    const delta = newScore - oldScore;
 
-    // Начисляем репутацию автору сообщения
+    if (delta === 0) return; // Репутация не изменилась
+
     const author = await getUser(chatId, authorId);
     if (author) {
-        await updateUser(author.id, { reputation: author.reputation + change });
-        console.log(`[REP] User ${authorId} reputation ${change > 0 ? '+' : ''}${change} (Reaction: ${emoji})`);
+        await updateUser(author.id, { reputation: author.reputation + delta });
+
+        const sign = delta > 0 ? '+' : '';
+        console.log(`[REP] User ${authorId} reputation ${sign}${delta} (Reaction change)`);
 
         // Обновляем таймер кулдауна
         reactionCooldowns[cooldownKey] = Date.now();
@@ -775,4 +742,5 @@ bot.on('sticker', (msg) => {
     console.log(`[STICKER] ID: ${msg.sticker.file_id}`);
 });
 
-console.log('Бот запущен (Supabase Edition)...');
+console.log('Бот запущен (Supabase Edition)...');}
+}
