@@ -75,6 +75,9 @@ const reactionCooldowns = {};
 const REACTION_COOLDOWN_TIME = 60000; // 1 минута
 const ANONYMOUS_ADMIN_ID = 1087968824; // ID GroupAnonymousBot
 
+const commandCooldowns = {};
+const COMMAND_COOLDOWN_TIME = 120000; // 2 минуты
+
 // --- КЭШИРОВАНИЕ ---
 const userCache = {}; // { userId: { data: userObj, expires: timestamp } }
 const USER_CACHE_TTL = 1000 * 60 * 5; // 5 минут
