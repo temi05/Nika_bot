@@ -77,6 +77,7 @@ const ANONYMOUS_ADMIN_ID = 1087968824; // ID GroupAnonymousBot
 
 const commandCooldowns = {};
 const COMMAND_COOLDOWN_TIME = 120000; // 2 минуты
+const pendingVerifications = {};
 
 // --- КЭШИРОВАНИЕ ---
 const userCache = {}; // { userId: { data: userObj, expires: timestamp } }
