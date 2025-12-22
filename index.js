@@ -199,12 +199,12 @@ function getNextLevelXp(level) {
 
 function getUserName(user) {
     const name = user.username ? `@${user.username}` : user.first_name;
-    return escapeMarkdown(name);
+    return name;
 }
 
 function escapeMarkdown(text) {
-    if (!text) return '';
-    return text.replace(/[_*[\]()~`>#+\-=|{}.!]/g, '\\$&');
+    if (text === undefined || text === null) return '';
+    return String(text).replace(/[_*[\]()~`>#+\-=|{}.!\\]/g, '\\$&');
 }
 
 function sendTimedMessage(chatId, text, delay = 15000, options = {}) {
@@ -440,11 +440,14 @@ bot.on('message', async (msg) => {
                     const receiver = await getUser(chatId, receiverId, msg.reply_to_message.from);
                     if (receiver) {
                         await updateUser(receiver.id, { reputation: receiver.reputation + change });
-                        const senderName = getUserName(user);
-                        const receiverName = getUserName(msg.reply_to_message.from);
+                        const senderName = escapeMarkdown(getUserName(user));
+                        const receiverName = escapeMarkdown(getUserName(msg.reply_to_message.from));
                         const emoji = change > 0 ? '🌟' : '📉';
-                        // Используем MarkdownV2 и экранируем имена (они уже экранированы в getUserName)
-                        sendTimedMessage(chatId, `${emoji} ${senderName} ${change > 0 ? 'повысил' : 'понизил'} репутацию ${receiverName}! (${change > 0 ? '+' : ''}${change})`, 60000, { parse_mode: 'MarkdownV2' });
+                        const actionText = change > 0 ? 'повысил' : 'понизил';
+                        const sign = change > 0 ? '\\+' : '';
+                        const changeVal = escapeMarkdown(change);
+
+                        sendTimedMessage(chatId, `${emoji} ${senderName} ${actionText} репутацию ${receiverName}\\! \\(${sign}${changeVal}\\)`, 60000, { parse_mode: 'MarkdownV2' });
                         reactionCooldowns[cooldownKey] = Date.now();
                     }
                 }
@@ -555,16 +558,16 @@ bot.onText(/^\/help$/, async (msg) => {
     const helpText = `🤖 *Что я умею:*
 
 👤 *Для всех:*
-/me — Посмотреть свою статистику (уровень, опыт, репутация)
+/me — Посмотреть свою статистику \\(уровень, опыт, репутация\\)
 /top — Топ\\-10 активных участников
-/kto <вопрос> — Выбрать случайного участника (например: /kto кто сегодня платит?)
+/kto <вопрос\\> — Выбрать случайного участника \\(например: /kto кто сегодня платит?\\)
 👍 *Репутация:*
-• Повысить (\\+1): Ответь "спасибо", "\\+", "👍" или поставь любую позитивную реакцию\\.
-• Понизить (\\-1): Ответь "\\-", "👎", "фу" или поставь реакцию 👎, 💩, 🤮, 🤬, 😤\\.
+• Повысить \\(\\+1\\): Ответь "спасибо", "\\+", "👍" или поставь любую позитивную реакцию\\.
+• Понизить \\(\\-1\\): Ответь "\\-", "👎", "фу" или поставь реакцию 👎, 💩, 🤮, 🤬, 😤\\.
 
 👮‍♂️ *Для админов:*
-/banword <слово> — Запретить слово
-/unbanword <слово> — Разрешить слово
+/banword <слово\> — Запретить слово
+/unbanword <слово\> — Разрешить слово
 /listwords — Список запрещенных слов
 
 _Я также защищаю чат от спама и проверяю новичков\\!_`;
@@ -662,11 +665,11 @@ bot.onText(/^\/me$/, async (msg) => {
     const xpNeeded = nextLevelXp - user.xp;
 
     const message = `📊 *Твоя статистика:*\n` +
-        `👤 Пользователь: ${getUserName(user)}\n` +
-        `⭐ Уровень: ${user.level}\n` +
-        `✨ Опыт: ${user.xp}\n` +
-        `🍪 Репутация: ${user.reputation}\n` +
-        `📈 До следующего уровня: ${xpNeeded} XP`;
+        `👤 Пользователь: ${escapeMarkdown(getUserName(user))}\n` +
+        `⭐ Уровень: ${escapeMarkdown(user.level)}\n` +
+        `✨ Опыт: ${escapeMarkdown(user.xp)}\n` +
+        `🍪 Репутация: ${escapeMarkdown(user.reputation)}\n` +
+        `📈 До следующего уровня: ${escapeMarkdown(xpNeeded)} XP`;
 
     sendTimedMessage(chatId, message, 60000, { parse_mode: 'MarkdownV2' });
 });
@@ -703,7 +706,7 @@ bot.onText(/^\/top$/, async (msg) => {
 
     let message = '🏆 *Топ активных участников:*\n';
     users.forEach((u, index) => {
-        message += `${index + 1}. ${getUserName(u)} — ${u.level} ур. (${u.reputation} 🍪)\n`;
+        message += `${index + 1}\\. ${escapeMarkdown(getUserName(u))} — ${escapeMarkdown(u.level)} ур\\. \\(${escapeMarkdown(u.reputation)} 🍪\\)\n`;
     });
     sendTimedMessage(chatId, message, 60000, { parse_mode: 'MarkdownV2' });
 });
