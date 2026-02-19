@@ -843,6 +843,63 @@ bot.onText(/\/ban(?:\s+(.+))?/, async (msg, match) => {
     }
 });
 
+bot.onText(/\/unban(?:\s+(.+))?/, async (msg, match) => {
+    const chatId = msg.chat.id;
+    const userId = msg.from.id;
+
+    deleteMsg(chatId, msg.message_id);
+
+    if (!(await isAdmin(chatId, userId))) {
+        sendTimedMessage(chatId, '⛔ Только админы могут разбанивать!', 60000);
+        return;
+    }
+
+    let targetId = null;
+    let targetName = 'Пользователь';
+
+    if (match[1]) {
+        const arg = match[1].trim();
+
+        if (/^\d+$/.test(arg)) {
+            // Это цифровой ID
+            targetId = parseInt(arg, 10);
+            targetName = `ID ${targetId}`;
+        } else if (arg.startsWith('@')) {
+            // Это юзернейм - ищем в нашей БД
+            const username = arg.substring(1).toLowerCase();
+            const { data } = await supabase
+                .from('users')
+                .select('user_id, username')
+                .eq('chat_id', chatId)
+                .ilike('username', username)
+                .limit(1)
+                .maybeSingle();
+
+            if (data) {
+                targetId = data.user_id;
+                targetName = `@${data.username || username}`;
+            } else {
+                sendTimedMessage(chatId, `❌ Пользователь ${escapeMarkdown(arg)} не найден в базе данных этого чата\\. Разбаньте по ID\\.`, 60000, { parse_mode: 'MarkdownV2' });
+                return;
+            }
+        } else {
+            sendTimedMessage(chatId, `❌ Неверный формат\\. Используйте ID или @username\\.`, 60000, { parse_mode: 'MarkdownV2' });
+            return;
+        }
+    } else {
+        sendTimedMessage(chatId, `❌ Кого разбанить? Укажите ID или @username\\.`, 60000, { parse_mode: 'MarkdownV2' });
+        return;
+    }
+
+    try {
+        await bot.unbanChatMember(chatId, targetId, { only_if_banned: true });
+        sendTimedMessage(chatId, `✅ Администратор ${escapeMarkdown(getUserName(msg.from))} разбанил ${escapeMarkdown(targetName)}\\.`, 60000, { parse_mode: 'MarkdownV2' });
+    } catch (err) {
+        sendTimedMessage(chatId, `❌ Ошибка при попытке разбанить\\. Убедитесь, что пользователь был забанен\\.`, 60000, { parse_mode: 'MarkdownV2' });
+        console.error('Unban command error:', err.message);
+    }
+});
+
 bot.on('sticker', (msg) => {
     console.log(`[STICKER] ID: ${msg.sticker.file_id}`);
 });
