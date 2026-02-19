@@ -245,7 +245,12 @@ bot.on('new_chat_members', async (msg) => {
 
         const opts = {
             reply_markup: {
-                inline_keyboard: [[{ text: '✅ Я человек', callback_data: `verify_${member.id}` }]]
+                inline_keyboard: [
+                    [
+                        { text: '✅ Я человек', callback_data: `verify_${member.id}` },
+                        { text: '🚫 В бан', callback_data: `ban_${member.id}` }
+                    ]
+                ]
             }
         };
 
@@ -270,7 +275,7 @@ bot.on('new_chat_members', async (msg) => {
     }
 });
 
-// Callback Query (Кнопка верификации)
+// Callback Query (Кнопки верификации и бана)
 bot.on('callback_query', async (query) => {
     const chatId = query.message.chat.id;
     const userId = query.from.id;
@@ -311,6 +316,27 @@ bot.on('callback_query', async (query) => {
 
         } catch (err) {
             bot.answerCallbackQuery(query.id, { text: 'Ошибка! Убедитесь, что бот — админ.', show_alert: true });
+        }
+    } else if (data.startsWith('ban_')) {
+        const targetId = parseInt(data.split('_')[1]);
+
+        if (!(await isAdmin(chatId, userId))) {
+            bot.answerCallbackQuery(query.id, { text: 'Только админы могут банить при входе! 🚫', show_alert: true });
+            return;
+        }
+
+        if (pendingVerifications[targetId]) {
+            clearTimeout(pendingVerifications[targetId]);
+            delete pendingVerifications[targetId];
+        }
+
+        try {
+            await bot.banChatMember(chatId, targetId);
+            bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
+            sendTimedMessage(chatId, `🚫 Администратор ${escapeMarkdown(query.from.first_name)} забанил пользователя при входе.`, 15000, { parse_mode: 'MarkdownV2' });
+            bot.answerCallbackQuery(query.id, { text: 'Пользователь забанен.' });
+        } catch (err) {
+            bot.answerCallbackQuery(query.id, { text: 'Ошибка! Бот не админ или цель тоже админ.', show_alert: true });
         }
     }
 });
@@ -740,6 +766,81 @@ bot.onText(/\/kto (.+)/, async (msg, match) => {
 
     const randomUser = users[Math.floor(Math.random() * users.length)];
     sendTimedMessage(chatId, `🤔 Я думаю, что ${question} — это ${getUserName(randomUser)}!`, 60000);
+});
+
+bot.onText(/\/ban(?:\s+(.+))?/, async (msg, match) => {
+    const chatId = msg.chat.id;
+    const userId = msg.from.id;
+
+    deleteMsg(chatId, msg.message_id);
+
+    if (!(await isAdmin(chatId, userId))) {
+        sendTimedMessage(chatId, '⛔ Только админы могут банить!', 60000);
+        return;
+    }
+
+    let targetId = null;
+    let targetName = 'Пользователь';
+
+    // 1. По реплаю
+    if (msg.reply_to_message) {
+        targetId = msg.reply_to_message.from.id;
+        targetName = getUserName(msg.reply_to_message.from);
+    }
+    // 2. По аргументу (ID или Username)
+    else if (match[1]) {
+        const arg = match[1].trim();
+
+        if (/^\d+$/.test(arg)) {
+            // Это цифровой ID
+            targetId = parseInt(arg, 10);
+            targetName = `ID ${targetId}`;
+        } else if (arg.startsWith('@')) {
+            // Это юзернейм - ищем в нашей БД
+            const username = arg.substring(1).toLowerCase(); // Убираем @
+            const { data } = await supabase
+                .from('users')
+                .select('user_id, username, first_name')
+                .eq('chat_id', chatId)
+                .ilike('username', username)
+                .limit(1)
+                .maybeSingle(); // maybeSingle чтобы не кидало ошибку, если пусто
+
+            if (data) {
+                targetId = data.user_id;
+                targetName = `@${data.username || username}`;
+            } else {
+                sendTimedMessage(chatId, `❌ Пользователь ${escapeMarkdown(arg)} не найден в базе данных этого чата\\. Попробуйте по ID\\.`, 60000, { parse_mode: 'MarkdownV2' });
+                return;
+            }
+        } else {
+            sendTimedMessage(chatId, `❌ Неверный формат\\. Используйте реплай, ID или @username\\.`, 60000, { parse_mode: 'MarkdownV2' });
+            return;
+        }
+    } else {
+        sendTimedMessage(chatId, `❌ Кого банить? Ответьте на сообщение или укажите ID/username\\.`, 60000, { parse_mode: 'MarkdownV2' });
+        return;
+    }
+
+    // Защита от бана анонимного админа
+    if (targetId === ANONYMOUS_ADMIN_ID) {
+        sendTimedMessage(chatId, `❌ Я не могу забанить анонимного администратора\\.`, 60000, { parse_mode: 'MarkdownV2' });
+        return;
+    }
+
+    // Проверка, не админ ли цель (если цель в чате)
+    if (await isAdmin(chatId, targetId)) {
+        sendTimedMessage(chatId, `❌ Нельзя забанить администратора\\.`, 60000, { parse_mode: 'MarkdownV2' });
+        return;
+    }
+
+    try {
+        await bot.banChatMember(chatId, targetId);
+        sendTimedMessage(chatId, `🚫 Администратор ${escapeMarkdown(getUserName(msg.from))} забанил ${escapeMarkdown(targetName)}\\.`, 60000, { parse_mode: 'MarkdownV2' });
+    } catch (err) {
+        sendTimedMessage(chatId, `❌ Ошибка при попытке забанить\\. Убедитесь, что у меня есть права администратора\\.`, 60000, { parse_mode: 'MarkdownV2' });
+        console.error('Ban command error:', err.message);
+    }
 });
 
 bot.on('sticker', (msg) => {
