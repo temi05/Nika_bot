@@ -261,8 +261,11 @@ bot.on('new_chat_members', async (msg) => {
         ).then(sentMsg => {
             const timeoutId = setTimeout(async () => {
                 try {
-                    await bot.banChatMember(chatId, member.id);
-                    await bot.unbanChatMember(chatId, member.id);
+                    // Бан на 60 секунд. Telegram сам разбанит его через минуту,
+                    // но при этом гарантированно выкинет из чата (кик)
+                    const untilDate = Math.floor(Date.now() / 1000) + 60;
+                    await bot.banChatMember(chatId, member.id, { until_date: untilDate });
+
                     bot.deleteMessage(chatId, sentMsg.message_id).catch(() => { });
                     sendTimedMessage(chatId, `🚪 ${name} не прошел проверку и был исключен.`);
                 } catch (err) {
