@@ -236,7 +236,8 @@ bot.on('new_chat_members', async (msg) => {
 
         try {
             await bot.restrictChatMember(chatId, member.id, {
-                can_send_messages: false
+                can_send_messages: false,
+                can_send_other_messages: false // Запрещает стикеры, гифки, инлайн-ботов и РЕАКЦИИ
             });
         } catch (err) {
             sendTimedMessage(chatId, `👋 Привет, ${name}! (Дайте боту права админа для верификации)`);
@@ -514,6 +515,21 @@ async function handleReaction(reaction) {
 
     // Нельзя менять репутацию самому себе
     if (actorId === authorId) return;
+
+    // --- ПРОВЕРКА ПРАВ ПОЛЬЗОВАТЕЛЯ (ЗАЩИТА ОТ БОТОВ/СПАМА) ---
+    // Не учитываем реакции от анонимных админов и ботов
+    if (actorId === ANONYMOUS_ADMIN_ID) return;
+
+    try {
+        const chatMember = await bot.getChatMember(chatId, actorId);
+        // Если пользователь в муте (restricted) или бот - игнорируем
+        if (chatMember.user.is_bot || chatMember.status === 'restricted' || chatMember.status === 'left' || chatMember.status === 'kicked') {
+            return;
+        }
+    } catch (err) {
+        console.error(`[REP] Учесть реакцию не удалось, ошибка getChatMember:`, err.message);
+        return; // Если не смогли получить статус, лучше проигнорировать
+    }
 
     // Проверка кулдауна
     const cooldownKey = `${actorId}_${authorId}`;
