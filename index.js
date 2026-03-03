@@ -290,12 +290,12 @@ bot.on('new_chat_members', async (msg) => {
             continue;
         }
 
-        const challenge = generateChallenge(member.id);
-
         const opts = {
             reply_markup: {
                 inline_keyboard: [
-                    challenge.buttons,
+                    [
+                        { text: '✅ Я человек', callback_data: `startverify_${member.id}` }
+                    ],
                     [
                         { text: '🚫 В бан (Админам)', callback_data: `ban_${member.id}` }
                     ]
@@ -304,7 +304,7 @@ bot.on('new_chat_members', async (msg) => {
         };
 
         bot.sendMessage(chatId,
-            `👋 Привет, ${name}! Добро пожаловать в чат!\nПросим пройти проверку на анти-спам.\n\n❓ ${challenge.questionText}\n(У вас есть 2 минуты)`,
+            `👋 Привет, ${name}! Добро пожаловать в чат!\nНажмите кнопку ниже, чтобы начать проверку на анти-спам.\n(У вас есть 2 минуты)`,
             opts
         ).then(sentMsg => {
             const timeoutId = setTimeout(async () => {
@@ -322,7 +322,7 @@ bot.on('new_chat_members', async (msg) => {
                 delete pendingVerifications[member.id];
             }, 120000);
 
-            pendingVerifications[member.id] = { timeoutId, correctId: challenge.correctId };
+            pendingVerifications[member.id] = { timeoutId, correctId: null };
         });
     }
 });
@@ -333,7 +333,40 @@ bot.on('callback_query', async (query) => {
     const userId = query.from.id;
     const data = query.data;
 
-    if (data.startsWith('verify_')) {
+    if (data.startsWith('startverify_')) {
+        const targetId = parseInt(data.split('_')[1]);
+
+        if (userId !== targetId) {
+            bot.answerCallbackQuery(query.id, { text: 'Это кнопка не для тебя! 🚫', show_alert: true });
+            return;
+        }
+
+        const pending = pendingVerifications[userId];
+        if (!pending) {
+            bot.answerCallbackQuery(query.id, { text: 'Время проверки вышло или вы уже верифицированы.', show_alert: true });
+            return;
+        }
+
+        const challenge = generateChallenge(userId);
+        pending.correctId = challenge.correctId;
+
+        const opts = {
+            chat_id: chatId,
+            message_id: query.message.message_id,
+            reply_markup: {
+                inline_keyboard: [
+                    challenge.buttons,
+                    [
+                        { text: '🚫 В бан (Админам)', callback_data: `ban_${userId}` }
+                    ]
+                ]
+            }
+        };
+
+        bot.editMessageText(`❓ ${challenge.questionText}\n(Ответьте правильно, чтобы войти в чат)`, opts).catch(() => { });
+        bot.answerCallbackQuery(query.id);
+        return;
+    } else if (data.startsWith('verify_')) {
         const parts = data.split('_');
         const targetId = parseInt(parts[1]);
         const answerId = parts[2] || '';
