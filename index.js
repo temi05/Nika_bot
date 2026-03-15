@@ -2,6 +2,7 @@ require('dotenv').config();
 const TelegramBot = require('node-telegram-bot-api');
 const { createClient } = require('@supabase/supabase-js');
 const express = require('express');
+const captchapng = require('captchapng');
 
 // Проверяем наличие токенов
 const token = process.env.TELEGRAM_BOT_TOKEN;
@@ -273,35 +274,33 @@ bot.on('new_chat_members', async (msg) => {
 
         try {
             await bot.restrictChatMember(chatId, member.id, {
-                can_send_messages: false,
-                can_send_other_messages: false // Запрещает стикеры, гифки, инлайн-ботов и РЕАКЦИИ
+                can_send_messages: true, // Включаем сообщения, чтобы человек мог написать код
+                can_send_other_messages: false, // Запрещает стикеры, гифки
+                can_send_media_messages: false, // Запрещает фото/видео
+                can_add_web_page_previews: false
             });
         } catch (err) {
             sendTimedMessage(chatId, `👋 Привет, ${name}! (Дайте боту права админа для верификации)`);
             continue;
         }
 
+        // Генерация капчи (цифры)
+        const captchaNumber = parseInt(Math.random() * 9000 + 1000); // 1000-9999
+        const p = new captchapng(150, 50, captchaNumber);
+        p.color(30, 30, 30, 255);  // Фон: темно-серый
+        p.color(255, 255, 255, 255); // Текст: белый
+        const img = p.getBase64();
+        const imgbase64 = Buffer.from(img, 'base64');
+
         const opts = {
-            reply_markup: {
-                inline_keyboard: [
-                    [
-                        { text: '✅ Я человек', callback_data: `startverify_${member.id}` }
-                    ],
-                    [
-                        { text: '🚫 В бан (Админам)', callback_data: `ban_${member.id}` }
-                    ]
-                ]
-            }
+            caption: `👋 Привет, ${name}! Добро пожаловать!\nПожалуйста, **напишите цифры с картинки** в чат, чтобы доказать, что вы человек.\n*(У вас есть 2 минуты)*`,
+            parse_mode: 'Markdown'
         };
 
-        bot.sendMessage(chatId,
-            `👋 Привет, ${name}! Добро пожаловать в чат!\nНажмите кнопку ниже, чтобы начать проверку на анти-спам.\n(У вас есть 2 минуты)`,
-            opts
-        ).then(sentMsg => {
+        bot.sendPhoto(chatId, imgbase64, opts).then(sentMsg => {
             const timeoutId = setTimeout(async () => {
                 try {
-                    // Бан на 60 секунд. Telegram сам разбанит его через минуту,
-                    // но при этом гарантированно выкинет из чата (кик)
+                    // Бан на 60 секунд. Telegram сам разбанит его через минуту, но выкинет из чата (кик)
                     const untilDate = Math.floor(Date.now() / 1000) + 60;
                     await bot.banChatMember(chatId, member.id, { until_date: untilDate });
 
@@ -313,60 +312,23 @@ bot.on('new_chat_members', async (msg) => {
                 delete pendingVerifications[member.id];
             }, 120000);
 
-            pendingVerifications[member.id] = { timeoutId, correctId: null };
+            // Сохраняем ожидаемый ответ и ID сообщения капчи
+            pendingVerifications[member.id] = { 
+                timeoutId, 
+                captchaNumber: captchaNumber.toString(),
+                messageId: sentMsg.message_id
+            };
         });
     }
 });
 
-// Callback Query (Кнопки верификации и бана)
+// Callback Query (Кнопки бана инвайтерами)
 bot.on('callback_query', async (query) => {
     const chatId = query.message.chat.id;
     const userId = query.from.id;
     const data = query.data;
 
-    if (data.startsWith('startverify_')) {
-        const targetId = parseInt(data.split('_')[1]);
-
-        if (userId !== targetId) {
-            bot.answerCallbackQuery(query.id, { text: 'Это кнопка не для тебя! 🚫', show_alert: true });
-            return;
-        }
-
-        const pending = pendingVerifications[userId];
-        if (!pending) {
-            bot.answerCallbackQuery(query.id, { text: 'Время проверки вышло или вы уже верифицированы.', show_alert: true });
-            return;
-        }
-
-        // Упрощенная верификация: сразу выдаем права
-        clearTimeout(pending.timeoutId);
-        delete pendingVerifications[userId];
-
-        try {
-            await bot.restrictChatMember(chatId, userId, {
-                can_send_messages: true,
-                can_send_media_messages: true,
-                can_send_polls: true,
-                can_send_other_messages: true,
-                can_add_web_page_previews: true,
-                can_invite_users: true
-            });
-
-            bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
-            sendTimedMessage(chatId, `✅ ${query.from.first_name} успешно прошел проверку!`, 10000);
-
-            const stickerUrl = 'CAACAgQAAxkBAAMFaSLQBhQRZU1oViIWgRlxI2j8G6oAAuUdAALyBzBQW_Qa2_ysFF82BA';
-            bot.sendSticker(chatId, stickerUrl).then(sentMsg => {
-                setTimeout(() => {
-                    bot.deleteMessage(chatId, sentMsg.message_id).catch(() => { });
-                }, 30000);
-            });
-            bot.answerCallbackQuery(query.id);
-        } catch (err) {
-            bot.answerCallbackQuery(query.id, { text: 'Ошибка! Убедитесь, что бот — админ.', show_alert: true });
-        }
-        return;
-    } else if (data.startsWith('ban_')) {
+    if (data.startsWith('ban_')) {
         const targetId = parseInt(data.split('_')[1]);
 
         if (!(await isAdmin(chatId, userId))) {
@@ -390,11 +352,49 @@ bot.on('callback_query', async (query) => {
     }
 });
 
-// --- ОБРАБОТКА СООБЩЕНИЙ (XP, Репутация, Фильтр) ---
+// --- ОБРАБОТКА СООБЩЕНИЙ (CAPTCHA, XP, Репутация, Фильтр) ---
 bot.on('message', async (msg) => {
     const chatId = msg.chat.id;
     const userId = msg.from.id;
     const user = msg.from;
+
+    // --- 1. ПРОВЕРКА CAPTCHA (ВВОД ЦИФР) ---
+    if (pendingVerifications[userId]) {
+        const pending = pendingVerifications[userId];
+        
+        if (msg.text && msg.text.trim() === pending.captchaNumber) {
+            // Пользователь ввел правильные цифры
+            clearTimeout(pending.timeoutId);
+            delete pendingVerifications[userId];
+            
+            try {
+                // Выдаем полные права
+                await bot.restrictChatMember(chatId, userId, {
+                    can_send_messages: true,
+                    can_send_media_messages: true,
+                    can_send_polls: true,
+                    can_send_other_messages: true,
+                    can_add_web_page_previews: true,
+                    can_invite_users: true
+                });
+
+                // Удаляем капчу и удаляем сообщение пользователя с цифрами, чтобы не засорять чат
+                bot.deleteMessage(chatId, pending.messageId).catch(() => { });
+                bot.deleteMessage(chatId, msg.message_id).catch(() => { });
+                
+                sendTimedMessage(chatId, `✅ ${user.first_name} успешно прошел проверку! Добро пожаловать!`, 10000);
+            } catch (err) {
+                console.error('Ошибка при выдаче прав после капчи:', err);
+            }
+        } else {
+            // Неправильные цифры или стикер/картинка (msg.text undefined)
+            // Удаляем сообщение, чтобы предотвратить спам до прохождения капчи
+            bot.deleteMessage(chatId, msg.message_id).catch(() => { });
+        }
+        
+        // Прерываем обработку других правил для этого пользователя (XP, плохие слова и т.д.)
+        return; 
+    }
 
     // Логируем сообщение для реакций (Persistent Reputation)
     if (msg.message_id) {
