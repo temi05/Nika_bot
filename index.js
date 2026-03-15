@@ -234,15 +234,22 @@ bot.on('new_chat_members', async (msg) => {
     for (const member of newMembers) {
         // Определяем того, кто пригласил или вошел сам
         const inviter = msg.from;
-        const inviterName = inviter.username ? `@${inviter.username}` : inviter.first_name;
+        
+        // Вспомогательная функция для имен в HTML
+        const safeName = (user) => {
+            const name = user.username ? `@${user.username}` : user.first_name;
+            return String(name).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        };
+
+        const inviterName = safeName(inviter);
 
         // --- АНТИ-БОТ ЗАЩИТА (Официальные боты) ---
         if (member.is_bot) {
             if (member.id !== botId) {
                 try {
                     await bot.banChatMember(chatId, member.id);
-                    const alertMsg = `🚨 *ОБНАРУЖЕН БОТ!* 🚨\nПользователь ${escapeMarkdown(inviterName)} (ID: \`${inviter.id}\`) добавил стороннего бота.\nБот забанен. Обратите внимание на пригласившего!`;
-                    sendTimedMessage(chatId, alertMsg, 300000, { parse_mode: 'MarkdownV2' }); // Оставляем на 5 минут
+                    const alertMsg = `🚨 <b>ОБНАРУЖЕН БОТ!</b> 🚨\nПользователь ${inviterName} (ID: <code>${inviter.id}</code>) добавил стороннего бота.\nБот забанен. Обратите внимание на пригласившего!`;
+                    sendTimedMessage(chatId, alertMsg, 300000, { parse_mode: 'HTML' }); // Оставляем на 5 минут
                     console.warn(`[ANTI-BOT] User ${inviter.id} added bot ${member.id}`);
                 } catch (err) {
                     console.error('Ошибка при бане чужого бота:', err);
@@ -255,9 +262,9 @@ bot.on('new_chat_members', async (msg) => {
         // Если ID присоединившегося НЕ совпадает с ID того, кто вызвал событие,
         // значит, его кто-то добавил (инфайт).
         if (inviter && member.id !== inviter.id && inviter.id !== botId) {
-            const memberName = member.username ? `@${member.username}` : member.first_name;
-            const inviteMsg = `👀 *Внимание модераторам!*\nПользователь ${escapeMarkdown(inviterName)} (ID: \`${inviter.id}\`) добавил в чат участника ${escapeMarkdown(memberName)} (ID: \`${member.id}\`).\nЕсли новичок начнет спамить, баньте обоих!`;
-            sendTimedMessage(chatId, inviteMsg, 300000, { parse_mode: 'MarkdownV2' }); // Висит 5 минут
+            const memberName = safeName(member);
+            const inviteMsg = `👀 <b>Внимание модераторам!</b>\nПользователь ${inviterName} (ID: <code>${inviter.id}</code>) добавил в чат участника ${memberName} (ID: <code>${member.id}</code>).\nЕсли новичок начнет спамить, баньте обоих!`;
+            sendTimedMessage(chatId, inviteMsg, 300000, { parse_mode: 'HTML' }); // Висит 5 минут
             console.log(`[ANTI-INVITER] ${inviter.id} added ${member.id}`);
         }
 
