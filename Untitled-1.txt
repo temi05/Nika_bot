@@ -1,0 +1,3 @@
+# 
+
+{"ok":true,"result":{"url":"https://nika-bot-0r40.onrender.com/bot8475053573:AAHKgYwHmaQ2_gYaigvz82HbbhJfkEI7kI8","has_custom_certificate":false,"pending_update_count":0,"max_connections":40,"ip_address":"216.24.57.7","allowed_updates":["message","callback_query","chat_member","message_reaction"]}}

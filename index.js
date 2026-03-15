@@ -224,60 +224,43 @@ async function isAdmin(chatId, userId) {
     }
 }
 
-// --- ДИНАМИЧЕСКАЯ КАПЧА ---
-const emojis = ['🍎', '🍌', '🥕', '🍕', '🚗', '⚽', '🎸', '📱', '🐱', '🐶', '🦊', '🐼'];
+// Верификация новых участников и Анти-бот Защита
 
-function generateChallenge(userId) {
-    const isMath = Math.random() > 0.5;
-    const correctId = Math.random().toString(36).substring(7);
-    let questionText = '';
-    let buttons = [];
-
-    if (isMath) {
-        const a = Math.floor(Math.random() * 10) + 1;
-        const b = Math.floor(Math.random() * 10) + 1;
-        const answer = a + b;
-        questionText = `Решите пример: ${a} + ${b} = ?`;
-
-        const options = [answer];
-        while (options.length < 4) {
-            const wrong = answer + Math.floor(Math.random() * 10) - 5;
-            if (options.indexOf(wrong) === -1 && wrong > 0) options.push(wrong);
-        }
-        options.sort(() => Math.random() - 0.5);
-
-        buttons = options.map(opt => ({
-            text: opt.toString(),
-            callback_data: opt === answer ? `verify_${userId}_${correctId}` : `verify_${userId}_wrong_${Math.random().toString(36).substring(7)}`
-        }));
-    } else {
-        const targetEmoji = emojis[Math.floor(Math.random() * emojis.length)];
-        questionText = `Выберите эмодзи: ${targetEmoji}`;
-
-        const options = [targetEmoji];
-        while (options.length < 4) {
-            const wrong = emojis[Math.floor(Math.random() * emojis.length)];
-            if (options.indexOf(wrong) === -1) options.push(wrong);
-        }
-        options.sort(() => Math.random() - 0.5);
-
-        buttons = options.map(opt => ({
-            text: opt,
-            callback_data: opt === targetEmoji ? `verify_${userId}_${correctId}` : `verify_${userId}_wrong_${Math.random().toString(36).substring(7)}`
-        }));
-    }
-
-    return { questionText, buttons, correctId };
-}
-
-// Верификация новых участников
 bot.on('new_chat_members', async (msg) => {
     const chatId = msg.chat.id;
     const newMembers = msg.new_chat_members;
 
     for (const member of newMembers) {
-        if (member.is_bot) continue;
+        // Определяем того, кто пригласил или вошел сам
+        const inviter = msg.from;
+        const inviterName = inviter.username ? `@${inviter.username}` : inviter.first_name;
 
+        // --- АНТИ-БОТ ЗАЩИТА (Официальные боты) ---
+        if (member.is_bot) {
+            if (member.id !== bot.options.id) { // Если доступен ID нашего бота, иначе просто member.is_bot
+                try {
+                    await bot.banChatMember(chatId, member.id);
+                    const alertMsg = `🚨 *ОБНАРУЖЕН БОТ!* 🚨\nПользователь ${escapeMarkdown(inviterName)} (ID: \`${inviter.id}\`) добавил стороннего бота.\nБот забанен. Обратите внимание на пригласившего!`;
+                    sendTimedMessage(chatId, alertMsg, 300000, { parse_mode: 'MarkdownV2' }); // Оставляем на 5 минут
+                    console.warn(`[ANTI-BOT] User ${inviter.id} added bot ${member.id}`);
+                } catch (err) {
+                    console.error('Ошибка при бане чужого бота:', err);
+                }
+            }
+            continue;
+        }
+
+        // --- ANTI-INVITER (Отслеживание добавления людей/юзерботов) ---
+        // Если ID присоединившегося НЕ совпадает с ID того, кто вызвал событие,
+        // значит, его кто-то добавил (инфайт).
+        if (member.id !== inviter.id) {
+            const memberName = member.username ? `@${member.username}` : member.first_name;
+            const inviteMsg = `👀 *Внимание модераторам!*\nПользователь ${escapeMarkdown(inviterName)} (ID: \`${inviter.id}\`) добавил в чат участника ${escapeMarkdown(memberName)} (ID: \`${member.id}\`).\nЕсли новичок начнет спамить, баньте обоих!`;
+            sendTimedMessage(chatId, inviteMsg, 300000, { parse_mode: 'MarkdownV2' }); // Висит 5 минут
+            console.log(`[ANTI-INVITER] ${inviter.id} added ${member.id}`);
+        }
+
+        // --- ОБЫЧНАЯ ВЕРИФИКАЦИЯ ЧЕЛОВЕКА ---
         const name = member.username ? `@${member.username}` : member.first_name;
 
         try {
@@ -347,57 +330,7 @@ bot.on('callback_query', async (query) => {
             return;
         }
 
-        const challenge = generateChallenge(userId);
-        pending.correctId = challenge.correctId;
-
-        const opts = {
-            chat_id: chatId,
-            message_id: query.message.message_id,
-            reply_markup: {
-                inline_keyboard: [
-                    challenge.buttons,
-                    [
-                        { text: '🚫 В бан (Админам)', callback_data: `ban_${userId}` }
-                    ]
-                ]
-            }
-        };
-
-        bot.editMessageText(`❓ ${challenge.questionText}\n(Ответьте правильно, чтобы войти в чат)`, opts).catch(() => { });
-        bot.answerCallbackQuery(query.id);
-        return;
-    } else if (data.startsWith('verify_')) {
-        const parts = data.split('_');
-        const targetId = parseInt(parts[1]);
-        const answerId = parts[2] || '';
-
-        if (userId !== targetId) {
-            bot.answerCallbackQuery(query.id, { text: 'Это кнопка не для тебя! 🚫', show_alert: true });
-            return;
-        }
-
-        const pending = pendingVerifications[userId];
-        if (!pending) {
-            bot.answerCallbackQuery(query.id, { text: 'Время проверки вышло или вы уже верифицированы.', show_alert: true });
-            return;
-        }
-
-        if (answerId !== pending.correctId) {
-            // Неверный ответ
-            bot.answerCallbackQuery(query.id, { text: 'Неверный ответ! Вы исключены 🚫', show_alert: true });
-            clearTimeout(pending.timeoutId);
-            delete pendingVerifications[userId];
-            bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
-
-            try {
-                const untilDate = Math.floor(Date.now() / 1000) + 60;
-                bot.banChatMember(chatId, userId, { until_date: untilDate }).catch(() => { });
-                sendTimedMessage(chatId, `🚪 ${query.from.first_name} провалил проверку (нажат неверный ответ) и был исключен.`);
-            } catch (e) { }
-            return;
-        }
-
-        // Верный ответ
+        // Упрощенная верификация: сразу выдаем права
         clearTimeout(pending.timeoutId);
         delete pendingVerifications[userId];
 
@@ -420,10 +353,11 @@ bot.on('callback_query', async (query) => {
                     bot.deleteMessage(chatId, sentMsg.message_id).catch(() => { });
                 }, 30000);
             });
-
+            bot.answerCallbackQuery(query.id);
         } catch (err) {
             bot.answerCallbackQuery(query.id, { text: 'Ошибка! Убедитесь, что бот — админ.', show_alert: true });
         }
+        return;
     } else if (data.startsWith('ban_')) {
         const targetId = parseInt(data.split('_')[1]);
 
