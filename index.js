@@ -229,6 +229,7 @@ async function isAdmin(chatId, userId) {
 bot.on('new_chat_members', async (msg) => {
     const chatId = msg.chat.id;
     const newMembers = msg.new_chat_members;
+    const botId = parseInt(token.split(':')[0]); // Извлекаем ID бота из токена
 
     for (const member of newMembers) {
         // Определяем того, кто пригласил или вошел сам
@@ -237,7 +238,7 @@ bot.on('new_chat_members', async (msg) => {
 
         // --- АНТИ-БОТ ЗАЩИТА (Официальные боты) ---
         if (member.is_bot) {
-            if (member.id !== bot.options.id) { // Если доступен ID нашего бота, иначе просто member.is_bot
+            if (member.id !== botId) {
                 try {
                     await bot.banChatMember(chatId, member.id);
                     const alertMsg = `🚨 *ОБНАРУЖЕН БОТ!* 🚨\nПользователь ${escapeMarkdown(inviterName)} (ID: \`${inviter.id}\`) добавил стороннего бота.\nБот забанен. Обратите внимание на пригласившего!`;
@@ -253,7 +254,7 @@ bot.on('new_chat_members', async (msg) => {
         // --- ANTI-INVITER (Отслеживание добавления людей/юзерботов) ---
         // Если ID присоединившегося НЕ совпадает с ID того, кто вызвал событие,
         // значит, его кто-то добавил (инфайт).
-        if (member.id !== inviter.id) {
+        if (inviter && member.id !== inviter.id && inviter.id !== botId) {
             const memberName = member.username ? `@${member.username}` : member.first_name;
             const inviteMsg = `👀 *Внимание модераторам!*\nПользователь ${escapeMarkdown(inviterName)} (ID: \`${inviter.id}\`) добавил в чат участника ${escapeMarkdown(memberName)} (ID: \`${member.id}\`).\nЕсли новичок начнет спамить, баньте обоих!`;
             sendTimedMessage(chatId, inviteMsg, 300000, { parse_mode: 'MarkdownV2' }); // Висит 5 минут
