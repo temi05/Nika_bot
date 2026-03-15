@@ -286,7 +286,8 @@ bot.on('new_chat_members', async (msg) => {
 
         // Генерация капчи (цифры)
         const captchaNumber = parseInt(Math.random() * 9000 + 1000); // 1000-9999
-        const p = new captchapng(150, 50, captchaNumber);
+        // Делаем картинку квадратной (150x150), чтобы Telegram на телефоне не обрезал превью
+        const p = new captchapng(150, 150, captchaNumber);
         p.color(30, 30, 30, 255);  // Фон: темно-серый
         p.color(255, 255, 255, 255); // Текст: белый
         const img = p.getBase64();
