@@ -549,7 +549,7 @@ bot.on('message', async (msg) => {
                     if (receiver) {
                         await updateUser(receiver.id, { reputation: receiver.reputation + change });
                         const senderName = escapeMarkdown(getUserName(user));
-                        const receiverName = escapeMarkdown(getUserName(msg.reply_to_message.from));
+                        const receiverName = escapeMarkdown(getUserName(receiverInfo));
                         const emoji = change > 0 ? '🌟' : '📉';
                         const actionText = change > 0 ? 'повысил' : 'понизил';
                         const sign = change > 0 ? '\\+' : '';
@@ -769,24 +769,57 @@ bot.onText(/\/listwords/, async (msg) => {
     }
 });
 
-bot.onText(/^\/me$/, async (msg) => {
+bot.onText(/^\/me(?:\s+(.+))?$/, async (msg, match) => {
     const chatId = msg.chat.id;
-    const { userId, user: sender } = getSenderData(msg);
+    let { userId, user: sender } = getSenderData(msg);
 
     deleteMsg(chatId, msg.message_id);
 
-    // Проверка кулдауна
-    if (!(await isAdmin(chatId, userId))) {
-        const lastTime = commandCooldowns[userId] || 0;
-        if (Date.now() - lastTime < COMMAND_COOLDOWN_TIME) {
-            const remaining = Math.ceil((COMMAND_COOLDOWN_TIME - (Date.now() - lastTime)) / 60000);
-            sendTimedMessage(chatId, `⏳ ${getUserName(sender)}, подожди ${remaining} мин. перед следующей командой!`, 60000);
-            return;
+    // 1. По реплаю
+    if (msg.reply_to_message) {
+        const replyInfo = getSenderData(msg.reply_to_message);
+        userId = replyInfo.userId;
+        sender = replyInfo.user;
+    } 
+    // 2. По аргументу (@username или ID)
+    else if (match[1]) {
+        const arg = match[1].trim();
+        if (/^\d+$/.test(arg)) {
+            userId = parseInt(arg, 10);
+            sender = { id: userId, first_name: `User ID ${userId}` };
+        } else if (arg.startsWith('@')) {
+            const username = arg.substring(1).toLowerCase();
+            const { data } = await supabase
+                .from('users')
+                .select('*')
+                .eq('chat_id', chatId)
+                .ilike('username', username)
+                .limit(1)
+                .maybeSingle();
+            
+            if (data) {
+                userId = data.user_id;
+                sender = { id: userId, username: data.username, first_name: data.first_name };
+            } else {
+                sendTimedMessage(chatId, `❌ Пользователь ${escapeMarkdown(arg)} не найден в базе этого чата.`, 60000);
+                return;
+            }
         }
-        commandCooldowns[userId] = Date.now();
     }
 
-    const user = await getUser(chatId, userId, sender);
+    // Проверка кулдауна (для запрашивающего, а не для цели)
+    const actorId = msg.from.id; // Кулдаун вешаем на того, кто нажал кнопку
+    if (!(await isAdmin(chatId, actorId))) {
+        const lastTime = commandCooldowns[actorId] || 0;
+        if (Date.now() - lastTime < COMMAND_COOLDOWN_TIME) {
+            const remaining = Math.ceil((COMMAND_COOLDOWN_TIME - (Date.now() - lastTime)) / 60000);
+            sendTimedMessage(chatId, `⏳ Подожди ${remaining} мин. перед следующей командой!`, 60000);
+            return;
+        }
+        commandCooldowns[actorId] = Date.now();
+    }
+
+    const dbUser = await getUser(chatId, userId, sender);
 
     if (!user) {
         sendTimedMessage(chatId, '❌ Ошибка получения данных пользователя.', 10000);
