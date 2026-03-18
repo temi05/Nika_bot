@@ -11,6 +11,7 @@ function getUserName(user) {
 
 function escapeMarkdown(text) {
     if (text === undefined || text === null) return '';
+    // Экранируем все спецсимволы MarkdownV2
     return String(text).replace(/[_*[\]()~`>#+\-=|{}.!\\]/g, '\\$&');
 }
 

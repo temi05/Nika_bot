@@ -5,17 +5,17 @@ function registerCommands() {
     // /help
     bot.onText(/^\/help$/, async (msg) => {
         const chatId = msg.chat.id;
-        const helpText = `🤖 *Что я умею:*
-👤 *Для всех:*
-/me — Моя статистика
-/top — Топ активных участников
-/shop — Магазин за печеньки 🍪
-/give <число> — Передать печеньки
-/kto <вопрос> — Случайный участник
-👮‍♂️ *Для админов:*
-/ban, /unban, /banword, /unbanword, /listwords
-_Я защищаю чат и проверяю новичков!_`;
-        bot.sendMessage(chatId, helpText, { parse_mode: 'Markdown' });
+        const helpText = `🤖 <b>Что я умею:</b>\n\n` +
+            `👤 <b>Для всех:</b>\n` +
+            `/me — Моя статистика\n` +
+            `/top — Топ активных участников\n` +
+            `/shop — Магазин за печеньки 🍪\n` +
+            `/give &lt;число&gt; — Передать печеньки\n` +
+            `/kto &lt;вопрос&gt; — Случайный участник\n\n` +
+            `👮‍♂️ <b>Для админов:</b>\n` +
+            `/ban, /unban, /banword, /unbanword, /listwords\n\n` +
+            `<i>Я защищаю чат и проверяю новичков!</i>`;
+        bot.sendMessage(chatId, helpText, { parse_mode: 'HTML' });
     });
 
     // /me
@@ -43,9 +43,14 @@ _Я защищаю чат и проверяю новичков!_`;
         const user = await getUser(chatId, userId, targetUser);
         if (!user) return;
         const nextXp = getNextLevelXp(user.level);
-        const message = `📊 *Статистика:*` + (userId !== requester.userId ? ` \\(профиль ${escapeMarkdown(getUserName(targetUser))}\\)` : '') + `\n` +
-            `👤 Пользователь: ${escapeMarkdown(getUserName(user))}\n⭐ Уровень: ${user.level}\n✨ Опыт: ${user.xp}\n🍪 Репутация: ${user.reputation}\n📈 До след. уровня: ${nextXp - user.xp} XP`;
-        sendTimedMessage(chatId, message, 60000, { parse_mode: 'MarkdownV2' });
+        
+        const message = `📊 <b>Статистика:</b>` + (userId !== requester.userId ? ` (профиль ${escapeMarkdown(getUserName(targetUser))})` : '') + `\n\n` +
+            `👤 Пользователь: ${escapeMarkdown(getUserName(user))}\n` +
+            `⭐ Уровень: <b>${user.level}</b>\n` +
+            `✨ Опыт: <b>${user.xp}</b>\n` +
+            `🍪 Репутация: <b>${user.reputation}</b>\n` +
+            `📈 До следующего уровня: <b>${nextXp - user.xp}</b> XP`;
+        sendTimedMessage(chatId, message, 60000, { parse_mode: 'HTML' });
     });
 
     // /top
