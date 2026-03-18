@@ -831,7 +831,7 @@ bot.onText(/^\/me(?:\s+(.+))?$/, async (msg, match) => {
     const nextLevelXp = getNextLevelXp(user.level);
     const xpNeeded = nextLevelXp - user.xp;
 
-    const message = `📊 *Статистика:*` + (userId !== actorId ? ` (профиль ${escapeMarkdown(getUserName(sender))})` : '') + `\n` +
+    const message = `📊 *Статистика:*` + (userId !== requester.userId ? ` (профиль ${escapeMarkdown(getUserName(targetUser))})` : '') + `\n` +
         `👤 Пользователь: ${escapeMarkdown(getUserName(user))}\n` +
         `⭐ Уровень: ${escapeMarkdown(user.level)}\n` +
         `✨ Опыт: ${escapeMarkdown(user.xp)}\n` +
