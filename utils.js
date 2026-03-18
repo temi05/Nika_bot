@@ -89,5 +89,6 @@ module.exports = {
     isAdmin,
     adminCache,
     token,
-    ANONYMOUS_ADMIN_ID
+    ANONYMOUS_ADMIN_ID,
+    bot
 };
