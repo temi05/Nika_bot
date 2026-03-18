@@ -23,29 +23,29 @@ app.post(`/bot${token}`, (req, res) => {
 
 app.listen(PORT, async () => {
     console.log(`🚀 Сервер запущен на порту ${PORT}`);
+    
+    // Проверка токена
+    try {
+        const me = await bot.getMe();
+        console.log(`✅ Токен валиден! Бот: @${me.username} (ID: ${me.id})`);
+    } catch (e) {
+        console.error(`❌ КРИТИЧЕСКАЯ ОШИБКА: Токен невалиден! Telegram ответил: ${e.message}`);
+        const tokenSafe = token ? `${token.substring(0, 4)}...${token.substring(token.length - 4)}` : 'NULL';
+        console.log(`ℹ️ Используемый токен: [${tokenSafe}], длина: ${token ? token.length : 0}`);
+        console.log(`⚠️ Пожалуйста, перевыпустите токен в @BotFather и обновите его в Render.`);
+    }
+
     if (RENDER_URL) {
         try {
-            // Очищаем URL от возможных двойных слэшей в конце
             const baseUrl = RENDER_URL.replace(/\/$/, '');
             const webhookUrl = `${baseUrl}/bot${token}`;
-            
-            console.log(`📡 Попытка установки вебхука на ${webhookUrl}...`);
             await bot.setWebHook(webhookUrl, {
                 allowed_updates: ['message', 'message_reaction', 'chat_member', 'callback_query']
             });
-            console.log(`✅ Вебхук успешно установлен!`);
+            console.log(`✅ Вебхук установлен: ${webhookUrl}`);
         } catch (e) {
-            console.error(`❌ Ошибка установки вебхука: ${e.message}`);
-            // Безопасный вывод метаданных токена для отладки
-            const tokenSafe = token ? `${token.substring(0, 4)}...${token.substring(token.length - 4)}` : 'NULL';
-            console.log(`ℹ️ Параметры отладки:`);
-            console.log(`   - Токен (маска): [${tokenSafe}]`);
-            console.log(`   - Длина токена: ${token ? token.length : 0} симв.`);
-            console.log(`   - RENDER_EXTERNAL_URL: ${RENDER_URL}`);
-            console.log(`⚠️ Пожалуйста, проверьте правильность TELEGRAM_BOT_TOKEN в панели Render.`);
+            console.error(`❌ Ошибка вебхука: ${e.message}`);
         }
-    } else {
-        console.log('⚠️ RENDER_EXTERNAL_URL не найден, вебхук не установлен.');
     }
 });
 
