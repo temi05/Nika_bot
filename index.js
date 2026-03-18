@@ -673,20 +673,6 @@ bot.onText(/^\/help$/, async (msg) => {
     const chatId = msg.chat.id;
     const { userId, user: sender } = getSenderData(msg);
 
-    // Удаляем команду пользователя через 1 минуту
-    deleteMsg(chatId, msg.message_id);
-
-    // Проверка кулдауна (для всех, кроме админов)
-    if (!(await isAdmin(chatId, userId))) {
-        const lastTime = commandCooldowns[userId] || 0;
-        if (Date.now() - lastTime < COMMAND_COOLDOWN_TIME) {
-            const remaining = Math.ceil((COMMAND_COOLDOWN_TIME - (Date.now() - lastTime)) / 60000);
-            sendTimedMessage(chatId, `⏳ ${getUserName(sender)}, подожди ${remaining} мин. перед следующей командой!`);
-            return;
-        }
-        commandCooldowns[userId] = Date.now();
-    }
-
     const helpText = `🤖 *Что я умею:*
 
 👤 *Для всех:*
@@ -708,7 +694,7 @@ _Я также защищаю чат от спама и проверяю нов�
 так же можете и поддержать, но и не обязательно)
 ||2200700738315406||`;
 
-    sendTimedMessage(chatId, helpText, 60000, { parse_mode: 'MarkdownV2' });
+    bot.sendMessage(chatId, helpText, { parse_mode: 'MarkdownV2' });
 });
 
 bot.onText(/\/banword (.+)/, async (msg, match) => {
@@ -1049,7 +1035,6 @@ bot.onText(/\/unban(?:\s+(.+))?/, async (msg, match) => {
 
 bot.onText(/^\/shop$/, async (msg) => {
     const chatId = msg.chat.id;
-    deleteMsg(chatId, msg.message_id);
 
     const helpText = `🛒 *Магазин печенек:*
 1\\. *Купить уровень* \\(+1 ур\\.\\) — 500 🍪
@@ -1059,7 +1044,7 @@ bot.onText(/^\/shop$/, async (msg) => {
 
 _Печеньки — это ваша репутация\\. Зарабатывайте их, помогая другим\\!_`;
 
-    sendTimedMessage(chatId, helpText, 60000, { parse_mode: 'MarkdownV2' });
+    bot.sendMessage(chatId, helpText, { parse_mode: 'MarkdownV2' });
 });
 
 bot.onText(/^\/buy (\d+)$/, async (msg, match) => {
