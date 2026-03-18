@@ -679,9 +679,9 @@ bot.onText(/^\/help$/, async (msg) => {
 /me — Моя статистика \\(ур\\., XP, печеньки\\)
 /top — Топ активных участников
 /shop — Магазин за печеньки 🍪
-/give <число\\> — Передать печеньки \\(ответ на сообщ\\.\\)
-/kto <вопрос\\> — Выбор случайного участника
-👍 *Репутация (печеньки):*
+/give \\<число\\\\\\> — Передать печеньки \\(ответ на сообщ\\.\\)
+/kto \\<вопрос\\\\\\> — Выбор случайного участника
+👍 *Репутация \\(печеньки\\):*
 • Повысить: "спасибо", "\\+", "👍" или реакция\\.
 • Понизить: "\\-", "👎", "фу" или негативная реакция\\.
 
@@ -691,7 +691,7 @@ bot.onText(/^\/help$/, async (msg) => {
 /listwords — Список запрещенных слов
 
 _Я также защищаю чат от спама и проверяю новичков\\!_
-так же можете и поддержать, но и не обязательно)
+так же можете и поддержать, но и не обязательно)\\)
 ||2200700738315406||`;
 
     bot.sendMessage(chatId, helpText, { parse_mode: 'MarkdownV2' });
@@ -821,7 +821,7 @@ bot.onText(/^\/me(?:\s+(.+))?$/, async (msg, match) => {
     const nextLevelXp = getNextLevelXp(user.level);
     const xpNeeded = nextLevelXp - user.xp;
 
-    const message = `📊 *Статистика:*` + (userId !== requester.userId ? ` (профиль ${escapeMarkdown(getUserName(targetUser))})` : '') + `\n` +
+    const message = `📊 *Статистика:*` + (userId !== requester.userId ? ` \\(профиль ${escapeMarkdown(getUserName(targetUser))}\\)` : '') + `\n` +
         `👤 Пользователь: ${escapeMarkdown(getUserName(user))}\n` +
         `⭐ Уровень: ${escapeMarkdown(user.level)}\n` +
         `✨ Опыт: ${escapeMarkdown(user.xp)}\n` +
@@ -1044,7 +1044,10 @@ bot.onText(/^\/shop$/, async (msg) => {
 
 _Печеньки — это ваша репутация\\. Зарабатывайте их, помогая другим\\!_`;
 
-    bot.sendMessage(chatId, helpText, { parse_mode: 'MarkdownV2' });
+    bot.sendMessage(chatId, helpText, { parse_mode: 'MarkdownV2' }).catch(err => {
+        console.error('[SHOP ERROR]', err.message);
+        bot.sendMessage(chatId, '❌ Ошибка отображения магазина. Сообщите администратору.');
+    });
 });
 
 bot.onText(/^\/buy (\d+)$/, async (msg, match) => {
