@@ -771,7 +771,9 @@ bot.onText(/\/listwords/, async (msg) => {
 
 bot.onText(/^\/me(?:\s+(.+))?$/, async (msg, match) => {
     const chatId = msg.chat.id;
-    let { userId, user: sender } = getSenderData(msg);
+    const requester = getSenderData(msg);
+    let userId = requester.userId;
+    let targetUser = requester.user;
 
     deleteMsg(chatId, msg.message_id);
 
@@ -779,14 +781,14 @@ bot.onText(/^\/me(?:\s+(.+))?$/, async (msg, match) => {
     if (msg.reply_to_message) {
         const replyInfo = getSenderData(msg.reply_to_message);
         userId = replyInfo.userId;
-        sender = replyInfo.user;
+        targetUser = replyInfo.user;
     } 
     // 2. По аргументу (@username или ID)
     else if (match[1]) {
         const arg = match[1].trim();
         if (/^\d+$/.test(arg)) {
             userId = parseInt(arg, 10);
-            sender = { id: userId, first_name: `User ID ${userId}` };
+            targetUser = { id: userId, first_name: `User ID ${userId}` };
         } else if (arg.startsWith('@')) {
             const username = arg.substring(1).toLowerCase();
             const { data } = await supabase
@@ -799,7 +801,7 @@ bot.onText(/^\/me(?:\s+(.+))?$/, async (msg, match) => {
             
             if (data) {
                 userId = data.user_id;
-                sender = { id: userId, username: data.username, first_name: data.first_name };
+                targetUser = { id: userId, username: data.username, first_name: data.first_name };
             } else {
                 sendTimedMessage(chatId, `❌ Пользователь ${escapeMarkdown(arg)} не найден в базе этого чата.`, 60000);
                 return;
@@ -807,19 +809,19 @@ bot.onText(/^\/me(?:\s+(.+))?$/, async (msg, match) => {
         }
     }
 
-    // Проверка кулдауна (для запрашивающего, а не для цели)
-    const actorId = msg.from.id; // Кулдаун вешаем на того, кто нажал кнопку
-    if (!(await isAdmin(chatId, actorId))) {
-        const lastTime = commandCooldowns[actorId] || 0;
+    // Проверка кулдауна (для того, кто запрашивает)
+    const requesterId = requester.userId;
+    if (!(await isAdmin(chatId, requesterId))) {
+        const lastTime = commandCooldowns[requesterId] || 0;
         if (Date.now() - lastTime < COMMAND_COOLDOWN_TIME) {
             const remaining = Math.ceil((COMMAND_COOLDOWN_TIME - (Date.now() - lastTime)) / 60000);
             sendTimedMessage(chatId, `⏳ Подожди ${remaining} мин. перед следующей командой!`, 60000);
             return;
         }
-        commandCooldowns[actorId] = Date.now();
+        commandCooldowns[requesterId] = Date.now();
     }
 
-    const dbUser = await getUser(chatId, userId, sender);
+    const user = await getUser(chatId, userId, targetUser);
 
     if (!user) {
         sendTimedMessage(chatId, '❌ Ошибка получения данных пользователя.', 10000);
@@ -829,7 +831,7 @@ bot.onText(/^\/me(?:\s+(.+))?$/, async (msg, match) => {
     const nextLevelXp = getNextLevelXp(user.level);
     const xpNeeded = nextLevelXp - user.xp;
 
-    const message = `📊 *Твоя статистика:*\n` +
+    const message = `📊 *Статистика:*` + (userId !== actorId ? ` (профиль ${escapeMarkdown(getUserName(sender))})` : '') + `\n` +
         `👤 Пользователь: ${escapeMarkdown(getUserName(user))}\n` +
         `⭐ Уровень: ${escapeMarkdown(user.level)}\n` +
         `✨ Опыт: ${escapeMarkdown(user.xp)}\n` +
