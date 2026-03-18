@@ -208,6 +208,24 @@ function escapeMarkdown(text) {
     return String(text).replace(/[_*[\]()~`>#+\-=|{}.!\\]/g, '\\$&');
 }
 
+function getSenderData(msg) {
+    if (msg.sender_chat) {
+        return {
+            userId: msg.sender_chat.id,
+            user: {
+                id: msg.sender_chat.id,
+                first_name: msg.sender_chat.title,
+                username: msg.sender_chat.username || '',
+                is_channel: true
+            }
+        };
+    }
+    return {
+        userId: msg.from.id,
+        user: msg.from
+    };
+}
+
 function sendTimedMessage(chatId, text, delay = 15000, options = {}) {
     bot.sendMessage(chatId, text, options).then(sentMsg => {
         setTimeout(() => {
@@ -217,6 +235,9 @@ function sendTimedMessage(chatId, text, delay = 15000, options = {}) {
 }
 
 async function isAdmin(chatId, userId) {
+    // Анонимные админы и каналы в группах считаются админами
+    if (userId === ANONYMOUS_ADMIN_ID || userId < 0) return true;
+    
     try {
         const member = await bot.getChatMember(chatId, userId);
         return ['creator', 'administrator'].includes(member.status);
@@ -356,8 +377,7 @@ bot.on('callback_query', async (query) => {
 // --- ОБРАБОТКА СООБЩЕНИЙ (CAPTCHA, XP, Репутация, Фильтр) ---
 bot.on('message', async (msg) => {
     const chatId = msg.chat.id;
-    const userId = msg.from.id;
-    const user = msg.from;
+    const { userId, user } = getSenderData(msg);
 
     // --- 1. ПРОВЕРКА CAPTCHA (ВВОД ЦИФР) ---
     if (pendingVerifications[userId]) {
@@ -457,8 +477,8 @@ bot.on('message', async (msg) => {
     // Проверяем текст ИЛИ медиа
     const isMedia = msg.photo || msg.voice || msg.video_note || msg.sticker || msg.animation || msg.document;
 
-    // Игнорируем ботов (кроме анонимного админа)
-    if (msg.from.is_bot && msg.from.id !== ANONYMOUS_ADMIN_ID) return;
+    // Игнорируем обычных ботов (но пропускаем анонимных админов и каналы)
+    if (msg.from.is_bot && !msg.sender_chat && msg.from.id !== ANONYMOUS_ADMIN_ID) return;
 
     if ((msg.text || isMedia) && !msg.text?.startsWith('/')) {
         const dbUser = await getUser(chatId, userId, user);
@@ -493,8 +513,20 @@ bot.on('message', async (msg) => {
 
     // --- РЕПУТАЦИЯ (ОТВЕТЫ) ---
     if (msg.reply_to_message && msg.text) {
-        const receiverId = msg.reply_to_message.from.id;
-        const isReceiverValid = !msg.reply_to_message.from.is_bot || receiverId === ANONYMOUS_ADMIN_ID;
+        let receiverId = msg.reply_to_message.from.id;
+        let receiverInfo = msg.reply_to_message.from;
+
+        if (msg.reply_to_message.sender_chat) {
+            receiverId = msg.reply_to_message.sender_chat.id;
+            receiverInfo = {
+                id: msg.reply_to_message.sender_chat.id,
+                first_name: msg.reply_to_message.sender_chat.title,
+                username: msg.reply_to_message.sender_chat.username || '',
+                is_channel: true
+            };
+        }
+
+        const isReceiverValid = !receiverInfo.is_bot || receiverId === ANONYMOUS_ADMIN_ID || receiverInfo.is_channel;
 
         if (userId !== receiverId && isReceiverValid) {
             const text = msg.text.trim().toLowerCase();
@@ -552,12 +584,19 @@ async function handleReaction(reaction) {
 
     if (!authorId) return;
 
-    // Определяем пользователя, который поставил реакцию
+    // Определяем пользователя, который поставил реакцию (актор)
     let actorId = reaction.user?.id;
+    let actorInfo = reaction.user;
 
-    // Поддержка анонимных админов (GroupAnonymousBot)
+    // Поддержка анонимных админов и каналов через actor_chat
     if (!reaction.user && reaction.actor_chat) {
-        actorId = ANONYMOUS_ADMIN_ID; // ID GroupAnonymousBot
+        actorId = reaction.actor_chat.id;
+        actorInfo = {
+            id: reaction.actor_chat.id,
+            first_name: reaction.actor_chat.title,
+            username: reaction.actor_chat.username || '',
+            is_channel: true
+        };
     }
 
     if (!actorId) return; // Не смогли определить кто поставил
@@ -566,18 +605,20 @@ async function handleReaction(reaction) {
     if (actorId === authorId) return;
 
     // --- ПРОВЕРКА ПРАВ ПОЛЬЗОВАТЕЛЯ (ЗАЩИТА ОТ БОТОВ/СПАМА) ---
-    // Не учитываем реакции от анонимных админов и ботов
-    if (actorId === ANONYMOUS_ADMIN_ID) return;
+    // Игнорируем обычных ботов, но разрешаем каналы и анонимных админов
+    if (actorInfo?.is_bot && !actorInfo?.is_channel && actorId !== ANONYMOUS_ADMIN_ID) return;
 
     try {
-        const chatMember = await bot.getChatMember(chatId, actorId);
-        // Если пользователь в муте (restricted) или бот - игнорируем
-        if (chatMember.user.is_bot || chatMember.status === 'restricted' || chatMember.status === 'left' || chatMember.status === 'kicked') {
-            return;
+        // Если это обычный пользователь, проверяем его статус в чате
+        if (!actorInfo?.is_channel && actorId !== ANONYMOUS_ADMIN_ID) {
+            const chatMember = await bot.getChatMember(chatId, actorId);
+            if (chatMember.status === 'restricted' || chatMember.status === 'left' || chatMember.status === 'kicked') {
+                return;
+            }
         }
     } catch (err) {
         console.error(`[REP] Учесть реакцию не удалось, ошибка getChatMember:`, err.message);
-        return; // Если не смогли получить статус, лучше проигнорировать
+        return;
     }
 
     // Проверка кулдауна
@@ -630,7 +671,7 @@ function deleteMsg(chatId, msgId, delay = 60000) {
 // Команда /help
 bot.onText(/^\/help$/, async (msg) => {
     const chatId = msg.chat.id;
-    const userId = msg.from.id;
+    const { userId, user: sender } = getSenderData(msg);
 
     // Удаляем команду пользователя через 1 минуту
     deleteMsg(chatId, msg.message_id);
@@ -640,7 +681,7 @@ bot.onText(/^\/help$/, async (msg) => {
         const lastTime = commandCooldowns[userId] || 0;
         if (Date.now() - lastTime < COMMAND_COOLDOWN_TIME) {
             const remaining = Math.ceil((COMMAND_COOLDOWN_TIME - (Date.now() - lastTime)) / 60000);
-            sendTimedMessage(chatId, `⏳ ${getUserName(msg.from)}, подожди ${remaining} мин. перед следующей командой!`);
+            sendTimedMessage(chatId, `⏳ ${getUserName(sender)}, подожди ${remaining} мин. перед следующей командой!`);
             return;
         }
         commandCooldowns[userId] = Date.now();
@@ -730,7 +771,7 @@ bot.onText(/\/listwords/, async (msg) => {
 
 bot.onText(/^\/me$/, async (msg) => {
     const chatId = msg.chat.id;
-    const userId = msg.from.id;
+    const { userId, user: sender } = getSenderData(msg);
 
     deleteMsg(chatId, msg.message_id);
 
@@ -739,13 +780,13 @@ bot.onText(/^\/me$/, async (msg) => {
         const lastTime = commandCooldowns[userId] || 0;
         if (Date.now() - lastTime < COMMAND_COOLDOWN_TIME) {
             const remaining = Math.ceil((COMMAND_COOLDOWN_TIME - (Date.now() - lastTime)) / 60000);
-            sendTimedMessage(chatId, `⏳ ${getUserName(msg.from)}, подожди ${remaining} мин. перед следующей командой!`, 60000);
+            sendTimedMessage(chatId, `⏳ ${getUserName(sender)}, подожди ${remaining} мин. перед следующей командой!`, 60000);
             return;
         }
         commandCooldowns[userId] = Date.now();
     }
 
-    const user = await getUser(chatId, userId, msg.from);
+    const user = await getUser(chatId, userId, sender);
 
     if (!user) {
         sendTimedMessage(chatId, '❌ Ошибка получения данных пользователя.', 10000);
@@ -767,7 +808,7 @@ bot.onText(/^\/me$/, async (msg) => {
 
 bot.onText(/^\/top$/, async (msg) => {
     const chatId = msg.chat.id;
-    const userId = msg.from.id;
+    const { userId, user: sender } = getSenderData(msg);
 
     deleteMsg(chatId, msg.message_id);
 
@@ -776,7 +817,7 @@ bot.onText(/^\/top$/, async (msg) => {
         const lastTime = commandCooldowns[userId] || 0;
         if (Date.now() - lastTime < COMMAND_COOLDOWN_TIME) {
             const remaining = Math.ceil((COMMAND_COOLDOWN_TIME - (Date.now() - lastTime)) / 60000);
-            sendTimedMessage(chatId, `⏳ ${getUserName(msg.from)}, подожди ${remaining} мин. перед следующей командой!`, 60000);
+            sendTimedMessage(chatId, `⏳ ${getUserName(sender)}, подожди ${remaining} мин. перед следующей командой!`, 60000);
             return;
         }
         commandCooldowns[userId] = Date.now();
@@ -804,7 +845,7 @@ bot.onText(/^\/top$/, async (msg) => {
 
 bot.onText(/\/kto (.+)/, async (msg, match) => {
     const chatId = msg.chat.id;
-    const userId = msg.from.id;
+    const { userId, user: sender } = getSenderData(msg);
 
     deleteMsg(chatId, msg.message_id);
 
@@ -813,7 +854,7 @@ bot.onText(/\/kto (.+)/, async (msg, match) => {
         const lastTime = commandCooldowns[userId] || 0;
         if (Date.now() - lastTime < COMMAND_COOLDOWN_TIME) {
             const remaining = Math.ceil((COMMAND_COOLDOWN_TIME - (Date.now() - lastTime)) / 60000);
-            sendTimedMessage(chatId, `⏳ ${getUserName(msg.from)}, подожди ${remaining} мин. перед следующей командой!`, 60000);
+            sendTimedMessage(chatId, `⏳ ${getUserName(sender)}, подожди ${remaining} мин. перед следующей командой!`, 60000);
             return;
         }
         commandCooldowns[userId] = Date.now();
@@ -835,7 +876,7 @@ bot.onText(/\/kto (.+)/, async (msg, match) => {
 
 bot.onText(/\/ban(?:\s+(.+))?/, async (msg, match) => {
     const chatId = msg.chat.id;
-    const userId = msg.from.id;
+    const { userId, user: sender } = getSenderData(msg);
 
     deleteMsg(chatId, msg.message_id);
 
@@ -901,7 +942,7 @@ bot.onText(/\/ban(?:\s+(.+))?/, async (msg, match) => {
 
     try {
         await bot.banChatMember(chatId, targetId);
-        sendTimedMessage(chatId, `🚫 Администратор ${escapeMarkdown(getUserName(msg.from))} забанил ${escapeMarkdown(targetName)}\\.`, 60000, { parse_mode: 'MarkdownV2' });
+        sendTimedMessage(chatId, `🚫 Администратор ${escapeMarkdown(getUserName(sender))} забанил ${escapeMarkdown(targetName)}\\.`, 60000, { parse_mode: 'MarkdownV2' });
     } catch (err) {
         sendTimedMessage(chatId, `❌ Ошибка при попытке забанить\\. Убедитесь, что у меня есть права администратора\\.`, 60000, { parse_mode: 'MarkdownV2' });
         console.error('Ban command error:', err.message);
@@ -910,7 +951,7 @@ bot.onText(/\/ban(?:\s+(.+))?/, async (msg, match) => {
 
 bot.onText(/\/unban(?:\s+(.+))?/, async (msg, match) => {
     const chatId = msg.chat.id;
-    const userId = msg.from.id;
+    const { userId, user: sender } = getSenderData(msg);
 
     deleteMsg(chatId, msg.message_id);
 
@@ -958,7 +999,7 @@ bot.onText(/\/unban(?:\s+(.+))?/, async (msg, match) => {
 
     try {
         await bot.unbanChatMember(chatId, targetId, { only_if_banned: true });
-        sendTimedMessage(chatId, `✅ Администратор ${escapeMarkdown(getUserName(msg.from))} разбанил ${escapeMarkdown(targetName)}\\.`, 60000, { parse_mode: 'MarkdownV2' });
+        sendTimedMessage(chatId, `✅ Администратор ${escapeMarkdown(getUserName(sender))} разбанил ${escapeMarkdown(targetName)}\\.`, 60000, { parse_mode: 'MarkdownV2' });
     } catch (err) {
         sendTimedMessage(chatId, `❌ Ошибка при попытке разбанить\\. Убедитесь, что пользователь был забанен\\.`, 60000, { parse_mode: 'MarkdownV2' });
         console.error('Unban command error:', err.message);
