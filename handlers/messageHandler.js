@@ -77,6 +77,7 @@ function registerMessageHandlers() {
                 
                 const receiver = await getUser(chatId, rId, rInfo);
                 if (receiver) {
+                    console.log(`[REP DEBUG] Изменение репутации для ${rId} (${rInfo.first_name}): ${receiver.reputation} -> ${receiver.reputation + change}`);
                     await updateUser(receiver.id, { reputation: receiver.reputation + change });
                     sendTimedMessage(chatId, `${change > 0 ? '🌟' : '📉'} ${escapeMarkdown(getUserName(user))} ${change > 0 ? 'повысил' : 'понизил'} репутацию ${escapeMarkdown(getUserName(rInfo))}\\!`, 60000, { parse_mode: 'MarkdownV2' });
                     reactionCooldowns[cooldownKey] = Date.now();

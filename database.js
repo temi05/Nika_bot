@@ -23,6 +23,10 @@ async function getUser(chatId, userId, userInfo = {}) {
         .eq('chat_id', chatId)
         .eq('user_id', userId)
         .single();
+    
+    if (user) {
+        // console.log(`[DB DEBUG] getUser FOUND: userId ${userId} -> dbId ${user.id}`);
+    }
 
     if (error && error.code !== 'PGRST116') {
         console.error('[DB ERROR] getUser:', error.message);
@@ -53,7 +57,7 @@ async function getUser(chatId, userId, userInfo = {}) {
 }
 
 async function updateUser(id, updates) {
-    // console.log(`[DB DEBUG] updateUser ID:${id}`, updates);
+    console.log(`[DB DEBUG] updateUser (DB_ID: ${id}) updates:`, updates);
     const { error } = await supabase.from('users').update(updates).eq('id', id);
     if (error) {
         console.error('[DB ERROR] updateUser:', error.message);
