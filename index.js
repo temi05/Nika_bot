@@ -22,15 +22,30 @@ app.post(`/bot${token}`, (req, res) => {
 });
 
 app.listen(PORT, async () => {
-    console.log(`Сервер запущен на порту ${PORT}`);
+    console.log(`🚀 Сервер запущен на порту ${PORT}`);
     if (RENDER_URL) {
-        const webhookUrl = `${RENDER_URL}/bot${token}`;
-        await bot.setWebHook(webhookUrl, {
-            allowed_updates: ['message', 'message_reaction', 'chat_member', 'callback_query']
-        });
-        console.log(`✅ Вебхук установлен: ${webhookUrl}`);
+        try {
+            // Очищаем URL от возможных двойных слэшей в конце
+            const baseUrl = RENDER_URL.replace(/\/$/, '');
+            const webhookUrl = `${baseUrl}/bot${token}`;
+            
+            console.log(`📡 Попытка установки вебхука на ${webhookUrl}...`);
+            await bot.setWebHook(webhookUrl, {
+                allowed_updates: ['message', 'message_reaction', 'chat_member', 'callback_query']
+            });
+            console.log(`✅ Вебхук успешно установлен!`);
+        } catch (e) {
+            console.error(`❌ Ошибка установки вебхука: ${e.message}`);
+            // Безопасный вывод метаданных токена для отладки
+            const tokenSafe = token ? `${token.substring(0, 4)}...${token.substring(token.length - 4)}` : 'NULL';
+            console.log(`ℹ️ Параметры отладки:`);
+            console.log(`   - Токен (маска): [${tokenSafe}]`);
+            console.log(`   - Длина токена: ${token ? token.length : 0} симв.`);
+            console.log(`   - RENDER_EXTERNAL_URL: ${RENDER_URL}`);
+            console.log(`⚠️ Пожалуйста, проверьте правильность TELEGRAM_BOT_TOKEN в панели Render.`);
+        }
     } else {
-        console.log('RENDER_EXTERNAL_URL не найден, вебхук не установлен.');
+        console.log('⚠️ RENDER_EXTERNAL_URL не найден, вебхук не установлен.');
     }
 });
 
