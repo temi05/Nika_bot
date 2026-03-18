@@ -237,7 +237,7 @@ function sendTimedMessage(chatId, text, delay = 15000, options = {}) {
 async function isAdmin(chatId, userId) {
     // Анонимные админы и каналы в группах считаются админами
     if (userId === ANONYMOUS_ADMIN_ID || userId < 0) return true;
-    
+
     try {
         const member = await bot.getChatMember(chatId, userId);
         return ['creator', 'administrator'].includes(member.status);
@@ -256,7 +256,7 @@ bot.on('new_chat_members', async (msg) => {
     for (const member of newMembers) {
         // Определяем того, кто пригласил или вошел сам
         const inviter = msg.from;
-        
+
         // Вспомогательная функция для имен в HTML
         const safeName = (user) => {
             const name = user.username ? `@${user.username}` : user.first_name;
@@ -335,8 +335,8 @@ bot.on('new_chat_members', async (msg) => {
             }, 120000);
 
             // Сохраняем ожидаемый ответ и ID сообщения капчи
-            pendingVerifications[member.id] = { 
-                timeoutId, 
+            pendingVerifications[member.id] = {
+                timeoutId,
                 captchaNumber: captchaNumber.toString(),
                 messageId: sentMsg.message_id
             };
@@ -382,12 +382,12 @@ bot.on('message', async (msg) => {
     // --- 1. ПРОВЕРКА CAPTCHA (ВВОД ЦИФР) ---
     if (pendingVerifications[userId]) {
         const pending = pendingVerifications[userId];
-        
+
         if (msg.text && msg.text.trim() === pending.captchaNumber) {
             // Пользователь ввел правильные цифры
             clearTimeout(pending.timeoutId);
             delete pendingVerifications[userId];
-            
+
             try {
                 // Выдаем полные права
                 await bot.restrictChatMember(chatId, userId, {
@@ -402,7 +402,7 @@ bot.on('message', async (msg) => {
                 // Удаляем капчу и удаляем сообщение пользователя с цифрами, чтобы не засорять чат
                 bot.deleteMessage(chatId, pending.messageId).catch(() => { });
                 bot.deleteMessage(chatId, msg.message_id).catch(() => { });
-                
+
                 sendTimedMessage(chatId, `✅ ${user.first_name} успешно прошел проверку! Добро пожаловать!`, 10000);
             } catch (err) {
                 console.error('Ошибка при выдаче прав после капчи:', err);
@@ -412,9 +412,9 @@ bot.on('message', async (msg) => {
             // Удаляем сообщение, чтобы предотвратить спам до прохождения капчи
             bot.deleteMessage(chatId, msg.message_id).catch(() => { });
         }
-        
+
         // Прерываем обработку других правил для этого пользователя (XP, плохие слова и т.д.)
-        return; 
+        return;
     }
 
     // Логируем сообщение для реакций (Persistent Reputation)
@@ -690,19 +690,23 @@ bot.onText(/^\/help$/, async (msg) => {
     const helpText = `🤖 *Что я умею:*
 
 👤 *Для всех:*
-/me — Посмотреть свою статистику \\(уровень, опыт, репутация\\)
-/top — Топ\\-10 активных участников
-/kto <вопрос\\> — Выбрать случайного участника \\(например: /kto кто сегодня платит?\\)
-👍 *Репутация:*
-• Повысить \\(\\+1\\): Ответь "спасибо", "\\+", "👍" или поставь любую позитивную реакцию\\.
-• Понизить \\(\\-1\\): Ответь "\\-", "👎", "фу" или поставь реакцию 👎, 💩, 🤮, 🤬, 😤\\.
+/me — Моя статистика \\(ур\\., XP, печеньки\\)
+/top — Топ активных участников
+/shop — Магазин за печеньки 🍪
+/give <число\\> — Передать печеньки \\(ответ на сообщ\\.\\)
+/kto <вопрос\\> — Выбор случайного участника
+👍 *Репутация (печеньки):*
+• Повысить: "спасибо", "\\+", "👍" или реакция\\.
+• Понизить: "\\-", "👎", "фу" или негативная реакция\\.
 
 👮‍♂️ *Для админов:*
 /banword <слово\\> — Запретить слово
 /unbanword <слово\\> — Разрешить слово
 /listwords — Список запрещенных слов
 
-_Я также защищаю чат от спама и проверяю новичков\\!_`;
+_Я также защищаю чат от спама и проверяю новичков\\!_
+так же можете и поддержать, но и не обязательно)
+||2200700738315406||`;
 
     sendTimedMessage(chatId, helpText, 60000, { parse_mode: 'MarkdownV2' });
 });
@@ -782,7 +786,7 @@ bot.onText(/^\/me(?:\s+(.+))?$/, async (msg, match) => {
         const replyInfo = getSenderData(msg.reply_to_message);
         userId = replyInfo.userId;
         targetUser = replyInfo.user;
-    } 
+    }
     // 2. По аргументу (@username или ID)
     else if (match[1]) {
         const arg = match[1].trim();
@@ -798,7 +802,7 @@ bot.onText(/^\/me(?:\s+(.+))?$/, async (msg, match) => {
                 .ilike('username', username)
                 .limit(1)
                 .maybeSingle();
-            
+
             if (data) {
                 userId = data.user_id;
                 targetUser = { id: userId, username: data.username, first_name: data.first_name };
@@ -1039,6 +1043,107 @@ bot.onText(/\/unban(?:\s+(.+))?/, async (msg, match) => {
         sendTimedMessage(chatId, `❌ Ошибка при попытке разбанить\\. Убедитесь, что пользователь был забанен\\.`, 60000, { parse_mode: 'MarkdownV2' });
         console.error('Unban command error:', err.message);
     }
+});
+
+// --- МАГАЗИН И ПЕРЕВОДЫ ---
+
+bot.onText(/^\/shop$/, async (msg) => {
+    const chatId = msg.chat.id;
+    deleteMsg(chatId, msg.message_id);
+
+    const helpText = `🛒 *Магазин печенек:*
+1\\. *Купить уровень* \\(+1 ур\\.\\) — 500 🍪
+   Команда: \`/buy 1\`
+2\\. *Снять варны* \\(в 0\\) — 200 🍪
+   Команда: \`/buy 2\`
+
+_Печеньки — это ваша репутация\\. Зарабатывайте их, помогая другим\\!_`;
+
+    sendTimedMessage(chatId, helpText, 60000, { parse_mode: 'MarkdownV2' });
+});
+
+bot.onText(/^\/buy (\d+)$/, async (msg, match) => {
+    const chatId = msg.chat.id;
+    const { userId, user: senderInfo } = getSenderData(msg);
+    const itemId = parseInt(match[1]);
+
+    deleteMsg(chatId, msg.message_id);
+
+    const user = await getUser(chatId, userId, senderInfo);
+    if (!user) return;
+
+    if (itemId === 1) { // Купить уровень
+        const cost = 500;
+        if (user.reputation < cost) {
+            sendTimedMessage(chatId, `❌ ${getUserName(senderInfo)}, недостаточно печенек! Нужно ${cost}, а у тебя ${user.reputation}.`, 15000);
+            return;
+        }
+
+        const newLevel = user.level + 1;
+        await updateUser(user.id, {
+            level: newLevel,
+            xp: 0,
+            reputation: user.reputation - cost
+        });
+
+        sendTimedMessage(chatId, `✨ ${getUserName(senderInfo)} купил уровень! Теперь твой уровень: ${newLevel}.`, 30000);
+    }
+    else if (itemId === 2) { // Снять варны
+        const cost = 200;
+        if (user.reputation < cost) {
+            sendTimedMessage(chatId, `❌ ${getUserName(senderInfo)}, недостаточно печенек! Нужно ${cost}, а у тебя ${user.reputation}.`, 15000);
+            return;
+        }
+
+        await updateUser(user.id, {
+            warns: 0,
+            reputation: user.reputation - cost
+        });
+
+        sendTimedMessage(chatId, `✅ ${getUserName(senderInfo)}, твои предупреждения успешно сняты!`, 30000);
+    } else {
+        sendTimedMessage(chatId, `❌ Товар с ID ${itemId} не найден.`, 15000);
+    }
+});
+
+bot.onText(/^\/give (\d+)$/, async (msg, match) => {
+    const chatId = msg.chat.id;
+    const { userId: senderId, user: senderInfo } = getSenderData(msg);
+    const amount = parseInt(match[1]);
+
+    deleteMsg(chatId, msg.message_id);
+
+    if (amount <= 0) {
+        sendTimedMessage(chatId, `❌ Сумма должна быть больше 0!`, 10000);
+        return;
+    }
+
+    if (!msg.reply_to_message) {
+        sendTimedMessage(chatId, `❌ Эту команду нужно использовать в ответ на сообщение!`, 15000);
+        return;
+    }
+
+    const { userId: receiverId, user: receiverInfo } = getSenderData(msg.reply_to_message);
+
+    if (senderId === receiverId) {
+        sendTimedMessage(chatId, `❌ Нельзя передавать печеньки самому себе!`, 15000);
+        return;
+    }
+
+    const sender = await getUser(chatId, senderId, senderInfo);
+    const receiver = await getUser(chatId, receiverId, receiverInfo);
+
+    if (!sender || !receiver) return;
+
+    if (sender.reputation < amount) {
+        sendTimedMessage(chatId, `❌ У тебя недостаточно печенек! (У тебя ${sender.reputation} 🍪)`, 15000);
+        return;
+    }
+
+    await updateUser(sender.id, { reputation: sender.reputation - amount });
+    await updateUser(receiver.id, { reputation: receiver.reputation + amount });
+
+    sendTimedMessage(chatId, `🍪 ${getUserName(senderInfo)} передал ${amount} печенек ${getUserName(receiverInfo)}!`, 60000);
 });
 
 bot.on('sticker', (msg) => {
