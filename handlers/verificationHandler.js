@@ -60,12 +60,27 @@ function registerVerificationHandlers() {
 
     bot.on('callback_query', async (query) => {
         if (query.data.startsWith('ban_')) {
+            const chatId = query.message.chat.id;
             const targetId = parseInt(query.data.split('_')[1]);
-            if (!(await isAdmin(query.message.chat.id, query.from.id))) return bot.answerCallbackQuery(query.id, { text: 'Нет прав!' });
+            
+            // Проверка прав (учитываем анонимных админов)
+            const actorId = query.from.id;
+            const chatActorId = query.message.sender_chat?.id; // Если админ анонимный
+            
+            if (!(await isAdmin(chatId, actorId)) && !(chatActorId && await isAdmin(chatId, chatActorId))) {
+                return bot.answerCallbackQuery(query.id, { text: '⛔ У вас нет прав!' });
+            }
+
             const v = pendingVerifications[targetId];
             if (v) { clearTimeout(v.timer); delete pendingVerifications[targetId]; }
-            await bot.banChatMember(query.message.chat.id, targetId);
-            bot.deleteMessage(query.message.chat.id, query.message.message_id).catch(() => {});
+            
+            try {
+                await bot.banChatMember(chatId, targetId);
+                bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
+                bot.answerCallbackQuery(query.id, { text: '✅ Пользователь забанен.' });
+            } catch (e) {
+                bot.answerCallbackQuery(query.id, { text: '❌ Ошибка при бане.' });
+            }
         }
     });
 }

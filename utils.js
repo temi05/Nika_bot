@@ -16,19 +16,31 @@ function escapeMarkdown(text) {
 
 function getSenderData(msg) {
     if (msg.sender_chat) {
+        // Если сообщение от имени канала в группе
         return {
             userId: msg.sender_chat.id,
             user: {
                 id: msg.sender_chat.id,
-                first_name: msg.sender_chat.title,
+                first_name: msg.sender_chat.title || 'Канал',
                 username: msg.sender_chat.username || '',
                 is_channel: true
             }
         };
     }
+    
+    const fromId = msg.from ? msg.from.id : null;
+    
+    // Если это тех. аккаунт анонимного админа (но нет sender_chat, что странно, но бывает)
+    if (fromId === ANONYMOUS_ADMIN_ID && !msg.sender_chat) {
+        return {
+            userId: ANONYMOUS_ADMIN_ID,
+            user: { id: ANONYMOUS_ADMIN_ID, first_name: 'Анонимный админ', username: '' }
+        };
+    }
+
     return {
-        userId: msg.from.id,
-        user: msg.from
+        userId: fromId,
+        user: msg.from || { id: 0, first_name: 'Инкогнито' }
     };
 }
 

@@ -53,6 +53,7 @@ async function getUser(chatId, userId, userInfo = {}) {
 }
 
 async function updateUser(id, updates) {
+    // console.log(`[DB DEBUG] updateUser ID:${id}`, updates);
     const { error } = await supabase.from('users').update(updates).eq('id', id);
     if (error) {
         console.error('[DB ERROR] updateUser:', error.message);

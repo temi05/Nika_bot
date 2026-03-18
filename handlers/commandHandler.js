@@ -1,5 +1,5 @@
 const { bot, escapeMarkdown, getUserName, getSenderData, sendTimedMessage, deleteMsg, isAdmin } = require('../utils');
-const { getUser, updateUser, getBadWords, supabase, commandCooldowns, ANONYMOUS_ADMIN_ID } = require('../database');
+const { getUser, updateUser, getBadWords, supabase, commandCooldowns, getNextLevelXp, ANONYMOUS_ADMIN_ID } = require('../database');
 
 function registerCommands() {
     // /help
@@ -171,7 +171,8 @@ _Я защищаю чат и проверяю новичков!_`;
     // /banword, /unbanword, /listwords
     bot.onText(/\/banword (.+)/, async (msg, match) => {
         const chatId = msg.chat.id;
-        if (!(await isAdmin(chatId, msg.from.id))) return;
+        const { userId } = getSenderData(msg);
+        if (!(await isAdmin(chatId, userId))) return;
         const word = match[1].trim();
         await supabase.from('bad_words').insert([{ chat_id: chatId, word: word }]);
         sendTimedMessage(chatId, `✅ Слово "${word}" в бане.`, 60000);
@@ -179,7 +180,8 @@ _Я защищаю чат и проверяю новичков!_`;
 
     bot.onText(/\/unbanword (.+)/, async (msg, match) => {
         const chatId = msg.chat.id;
-        if (!(await isAdmin(chatId, msg.from.id))) return;
+        const { userId } = getSenderData(msg);
+        if (!(await isAdmin(chatId, userId))) return;
         const word = match[1].trim();
         await supabase.from('bad_words').delete().eq('chat_id', chatId).eq('word', word);
         sendTimedMessage(chatId, `✅ Слово "${word}" удалено.`, 60000);
@@ -187,7 +189,8 @@ _Я защищаю чат и проверяю новичков!_`;
 
     bot.onText(/\/listwords/, async (msg) => {
         const chatId = msg.chat.id;
-        if (!(await isAdmin(chatId, msg.from.id))) return;
+        const { userId } = getSenderData(msg);
+        if (!(await isAdmin(chatId, userId))) return;
         const { data } = await supabase.from('bad_words').select('word').eq('chat_id', chatId);
         const words = data?.map(i => i.word) || [];
         sendTimedMessage(chatId, words.length ? `🚫 Запрещенные слова:\n${words.join(', ')}` : 'Список пуст.', 60000);
