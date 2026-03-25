@@ -26,11 +26,11 @@ function registerCommands() {
         const url = `${baseUrl}/miniapp/index.html`;
         
         const opts = {
-            reply_markup: {
+            reply_markup: JSON.stringify({
                 inline_keyboard: [
                     [{ text: "🖥 Открыть Dashboard", web_app: { url: url } }]
                 ]
-            }
+            })
         };
         bot.sendMessage(chatId, "✨ Нажми на кнопку ниже, чтобы открыть панель управления профилем и сервером Aternos:", opts);
     });
