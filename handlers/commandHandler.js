@@ -30,7 +30,7 @@ function registerCommands() {
                 const opts = {
                     reply_markup: {
                         inline_keyboard: [
-                            [{ text: "🖥 Открыть в личных сообщениях", url: `https://t.me/${botInfo.username}?start=db_${chatId}` }]
+                            [{ text: "🖥 Открыть в личных сообщениях", url: `https://t.me/${botInfo.username}?start=db_${chatId}_u${userId}` }]
                         ]
                     }
                 };
@@ -64,8 +64,13 @@ function registerCommands() {
         let url = `${baseUrl}/miniapp/index.html`;
 
         if (arg.startsWith('db_')) {
-            const targetChatId = arg.substring(3); // Извлекаем ID чата
+            // Формат: db_CHATID или db_CHATID_uUSERID
+            const parts = arg.split('_u');
+            const targetChatId = parts[0].substring(3);
+            const targetUserId = parts[1] || null;
+
             url += `?chat_id=${targetChatId}`;
+            if (targetUserId) url += `&as_user=${targetUserId}`;
             
             const opts = {
                 reply_markup: {

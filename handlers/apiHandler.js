@@ -44,12 +44,9 @@ function validateTelegramWebAppData(req, res, next) {
 // Получение профиля пользователя
 router.get('/profile', validateTelegramWebAppData, async (req, res) => {
     try {
-        const userId = req.tgUser.id;
-        // Мы берем данные из БД пользователя. У нас может быть один и тот же user_id в разных чатах.
-        // Для dashboard мы можем либо взять статистику из конкретного чата (переданного в query), либо общую.
-        // Пока берем первую попавшуюся запись
-        
+        const userId = req.query.user_id || req.tgUser.id;
         const chatId = req.query.chat_id;
+        
         let query = supabase.from('users').select('*').eq('user_id', userId);
         if (chatId) query = query.eq('chat_id', chatId);
         
@@ -58,6 +55,12 @@ router.get('/profile', validateTelegramWebAppData, async (req, res) => {
         if (error || !data) {
             return res.json({ level: 1, xp: 0, reputation: 0, warns: 0, is_admin: false });
         }
+
+        // Обновляем photo_url, если он пришел из Mini App и отличается от базы
+        const photoUrl = req.tgUser.photo_url;
+        if (photoUrl && photoUrl !== data.photo_url) {
+            await supabase.from('users').update({ photo_url: photoUrl }).eq('id', data.id);
+        }
         
         // Проверяем, админ ли он в этом чате
         let is_admin = false;
@@ -65,7 +68,7 @@ router.get('/profile', validateTelegramWebAppData, async (req, res) => {
             is_admin = await isAdmin(chatId, userId);
         }
         
-        res.json({ ...data, is_admin });
+        res.json({ ...data, is_admin, photo_url: photoUrl || data.photo_url });
     } catch (e) {
         res.status(500).json({ error: 'Server error' });
     }
@@ -81,7 +84,7 @@ router.get('/leaderboard', validateTelegramWebAppData, async (req, res) => {
 
         const { data, error } = await supabase
             .from('users')
-            .select('user_id, username, first_name, level, reputation')
+            .select('user_id, username, first_name, level, reputation, photo_url')
             .eq('chat_id', chatId)
             .order(type === 'reputation' ? 'reputation' : 'level', { ascending: false })
             .limit(10);

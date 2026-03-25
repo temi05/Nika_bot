@@ -16,6 +16,7 @@ const btnAddWord = document.getElementById('btn-add-word');
 const navSettings = document.getElementById('nav-settings');
 
 let currentChatId = null;
+let viewAsUserId = null; // Если зашли от лица канала
 let isAdminUser = false;
 
 // Tabs Logic
@@ -61,21 +62,31 @@ function showToast(message, type = 'info') {
 
 // Загрузка профиля пользователя
 async function loadUserProfile() {
-    if (user) {
-        document.getElementById('user-name').textContent = user.first_name + (user.last_name ? ` ${user.last_name}` : '');
-        document.getElementById('user-id').textContent = `@${user.username || user.id}`;
-        
-        // Установка аватарки, если она есть в Telegram
-        if (user.photo_url) {
-            document.getElementById('user-avatar').src = user.photo_url;
-        }
+    // Определяем какой ID использовать (свой или канала)
+    const effectiveUserId = viewAsUserId || user?.id;
 
+    if (effectiveUserId) {
+        // Если смотрим чужой профиль (канал), подставим базовое имя из URL или потом из БД
+        if (viewAsUserId) {
+             document.getElementById('user-name').textContent = "Загрузка профиля...";
+        } else if (user) {
+             document.getElementById('user-name').textContent = user.first_name + (user.last_name ? ` ${user.last_name}` : '');
+             document.getElementById('user-id').textContent = `@${user.username || user.id}`;
+             if (user.photo_url) document.getElementById('user-avatar').src = user.photo_url;
+        }
+        
         try {
-            const res = await fetch(`/api/profile${currentChatId ? `?chat_id=${currentChatId}` : ''}`, {
+            const res = await fetch(`/api/profile?user_id=${effectiveUserId}${currentChatId ? `&chat_id=${currentChatId}` : ''}`, {
                 headers: { 'x-tg-init-data': tg.initData }
             });
             if (res.ok) {
                 const data = await res.json();
+                
+                // Обновляем имя и фото (особенно важно для каналов)
+                document.getElementById('user-name').textContent = (data.user_id < 0 ? '📢 ' : '') + (data.first_name || 'Инкогнито');
+                document.getElementById('user-id').textContent = data.username ? `@${data.username}` : `ID: ${data.user_id}`;
+                if (data.photo_url) document.getElementById('user-avatar').src = data.photo_url;
+
                 document.getElementById('user-level').textContent = data.level || 1;
                 document.getElementById('user-rep').textContent = data.reputation || 0;
                 document.getElementById('user-warns').textContent = data.warns || 0;
@@ -141,12 +152,16 @@ async function loadLeaderboard(type = 'level') {
                 
                 const valText = type === 'level' ? `${user.level} ур.` : `${user.reputation} 🍪`;
                 
+                const avatar = user.photo_url || `https://ui-avatars.com/api/?name=${encodeURIComponent(user.first_name)}&background=random&color=fff`;
+                const isChannel = user.user_id < 0;
+                const nameDisplay = isChannel ? `<i class="fas fa-bullhorn" style="font-size: 0.8em; opacity: 0.7;"></i> ${user.first_name}` : user.first_name;
+
                 lbContainer.innerHTML += `
                     <div class="lb-item">
                         <div class="lb-rank ${rankClass}">${index + 1}</div>
-                        <img class="lb-avatar" src="https://via.placeholder.com/40" alt="${user.first_name}">
+                        <img class="lb-avatar" src="${avatar}" alt="${user.first_name}">
                         <div class="lb-info">
-                            <div class="lb-name">${user.first_name || 'Без Имени'}</div>
+                            <div class="lb-name">${nameDisplay}</div>
                             <div class="lb-val"><i class="fas fa-${type === 'level' ? 'star text-yellow' : 'heart text-red'}"></i> ${valText}</div>
                         </div>
                     </div>
@@ -290,17 +305,18 @@ document.addEventListener('DOMContentLoaded', () => {
     // Получаем chat_id из URL (он передается туда из WebApp) или из initData
     const urlParams = new URLSearchParams(window.location.search);
     currentChatId = urlParams.get('chat_id') || (tg.initDataUnsafe?.chat?.id) || null;
+    viewAsUserId = urlParams.get('as_user') || null;
 
-    loadUserProfile();
-    loadLeaderboard('level');
-
-    // Кнопка открытия внешней панели
-    const btnOpenPanel = document.getElementById('btn-open-panel');
-    if (btnOpenPanel) {
-        btnOpenPanel.addEventListener('click', () => {
-            tg.openLink('https://aternos.org/server/');
-        });
+    // Если открыто из группы, сразу идем на вкладку рейтинга
+    if (currentChatId) {
+        navItems.forEach(n => n.classList.remove('active'));
+        tabContents.forEach(t => t.classList.remove('active'));
+        
+        document.querySelector('[data-tab="tab-leaderboard"]').classList.add('active');
+        document.getElementById('tab-leaderboard').classList.add('active');
+        loadLeaderboard('level');
     }
 
+    loadUserProfile();
     tg.ready();
 });

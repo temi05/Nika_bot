@@ -44,6 +44,7 @@ async function getUser(chatId, userId, userInfo = {}) {
             user_id: userId,
             username: userInfo.username || '',
             first_name: name,
+            photo_url: userInfo.photo_url || '',
             xp: 0, level: 1, reputation: 0, warns: 0, last_message_time: 0
         };
         const { data, error: createError } = await supabase
