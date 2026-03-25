@@ -22,17 +22,59 @@ function registerCommands() {
     // /dashboard
     bot.onText(/^\/dashboard$/, async (msg) => {
         const chatId = msg.chat.id;
-        const baseUrl = process.env.RENDER_EXTERNAL_URL ? process.env.RENDER_EXTERNAL_URL.replace(/\/$/, '') : 'https://google.com'; // ВРЕМЕННО для локальных тестов, в проде Render Url
+        try {
+            const botInfo = await bot.getMe();
+            
+            // Telegram запрещает web_app кнопки в групповых чатах
+            if (msg.chat.type !== 'private') {
+                const opts = {
+                    reply_markup: {
+                        inline_keyboard: [
+                            [{ text: "🖥 Открыть в личных сообщениях", url: `https://t.me/${botInfo.username}?start=dashboard` }]
+                        ]
+                    }
+                };
+                return bot.sendMessage(chatId, "✨ Управление профилем и сервером Aternos доступно только в личных сообщениях с ботом!", opts);
+            }
+
+            const baseUrl = process.env.RENDER_EXTERNAL_URL ? process.env.RENDER_EXTERNAL_URL.replace(/\/$/, '') : 'https://google.com';
+            const url = `${baseUrl}/miniapp/index.html`;
+            
+            const opts = {
+                reply_markup: {
+                    inline_keyboard: [
+                        [{ text: "🖥 Открыть Dashboard", web_app: { url: url } }]
+                    ]
+                }
+            };
+            bot.sendMessage(chatId, "✨ Нажми на кнопку ниже, чтобы открыть панель управления профилем и сервером Aternos:", opts);
+        } catch (error) {
+            console.error('Ошибка в /dashboard:', error);
+        }
+    });
+
+    // /start (для обработки перехода по ссылке из группового чата)
+    bot.onText(/^\/start(.*)/, async (msg, match) => {
+        if (msg.chat.type !== 'private') return;
+        const chatId = msg.chat.id;
+        const arg = match[1] ? match[1].trim() : '';
+
+        const baseUrl = process.env.RENDER_EXTERNAL_URL ? process.env.RENDER_EXTERNAL_URL.replace(/\/$/, '') : 'https://google.com';
         const url = `${baseUrl}/miniapp/index.html`;
         
         const opts = {
-            reply_markup: JSON.stringify({
+            reply_markup: {
                 inline_keyboard: [
                     [{ text: "🖥 Открыть Dashboard", web_app: { url: url } }]
                 ]
-            })
+            }
         };
-        bot.sendMessage(chatId, "✨ Нажми на кнопку ниже, чтобы открыть панель управления профилем и сервером Aternos:", opts);
+
+        if (arg === 'dashboard') {
+            bot.sendMessage(chatId, "✨ Нажми на кнопку ниже, чтобы открыть панель управления:", opts);
+        } else {
+            bot.sendMessage(chatId, "👋 Привет! Я бот для управления группой.\n\n✨ Нажми на кнопку ниже, чтобы открыть свою панель управления:", opts);
+        }
     });
 
     // /me
