@@ -28,14 +28,17 @@ function registerCommands() {
             
             // Telegram запрещает web_app кнопки в групповых чатах
             if (msg.chat.type !== 'private') {
+                // Если юзер — обычный, ссылка общая (db_CHATID). Если канал — персональная (_uUSERID)
+                const startParam = userId < 0 ? `db_${chatId}_u${userId}` : `db_${chatId}`;
                 const opts = {
                     reply_markup: {
                         inline_keyboard: [
-                            [{ text: "🖥 Открыть в личных сообщениях", url: `https://t.me/${botInfo.username}?start=db_${chatId}_u${userId}` }]
+                            [{ text: "🖥 Открыть в личных сообщениях", url: `https://t.me/${botInfo.username}?start=${startParam}` }]
                         ]
                     }
                 };
-                return bot.sendMessage(chatId, "✨ Управление профилем и сервером Aternos доступно только в личных сообщениях с ботом!", opts);
+                return bot.sendMessage(chatId, "✨ Управление профилем и сервером Aternos доступно только в личных сообщениях с ботом!", opts)
+                    .then(sentMsg => deleteMsg(chatId, sentMsg.message_id, 60000));
             }
 
             const baseUrl = process.env.RENDER_EXTERNAL_URL ? process.env.RENDER_EXTERNAL_URL.replace(/\/$/, '') : 'https://google.com';
