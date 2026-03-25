@@ -30,7 +30,7 @@ function registerCommands() {
                 const opts = {
                     reply_markup: {
                         inline_keyboard: [
-                            [{ text: "🖥 Открыть в личных сообщениях", url: `https://t.me/${botInfo.username}?start=dashboard` }]
+                            [{ text: "🖥 Открыть в личных сообщениях", url: `https://t.me/${botInfo.username}?start=db_${chatId}` }]
                         ]
                     }
                 };
@@ -60,20 +60,38 @@ function registerCommands() {
         const arg = match[1] ? match[1].trim() : '';
 
         const baseUrl = process.env.RENDER_EXTERNAL_URL ? process.env.RENDER_EXTERNAL_URL.replace(/\/$/, '') : 'https://google.com';
-        const url = `${baseUrl}/miniapp/index.html`;
         
-        const opts = {
-            reply_markup: {
-                inline_keyboard: [
-                    [{ text: "🖥 Открыть Dashboard", web_app: { url: url } }]
-                ]
-            }
-        };
+        let url = `${baseUrl}/miniapp/index.html`;
 
-        if (arg === 'dashboard') {
+        if (arg.startsWith('db_')) {
+            const targetChatId = arg.substring(3); // Извлекаем ID чата
+            url += `?chat_id=${targetChatId}`;
+            
+            const opts = {
+                reply_markup: {
+                    inline_keyboard: [
+                        [{ text: "🖥 Открыть Dashboard", web_app: { url: url } }]
+                    ]
+                }
+            };
+            bot.sendMessage(chatId, "✨ Нажми на кнопку ниже, чтобы открыть панель управления конкретным чатом:", opts);
+        } else if (arg === 'dashboard') {
+            const opts = {
+                reply_markup: {
+                    inline_keyboard: [
+                        [{ text: "🖥 Открыть Dashboard", web_app: { url: url } }]
+                    ]
+                }
+            };
             bot.sendMessage(chatId, "✨ Нажми на кнопку ниже, чтобы открыть панель управления:", opts);
         } else {
-            bot.sendMessage(chatId, "👋 Привет! Я бот для управления группой.\n\n✨ Нажми на кнопку ниже, чтобы открыть свою панель управления:", opts);
+            bot.sendMessage(chatId, "👋 Привет! Я бот для общения. Добавь меня в группу или жми на кнопки ниже:", {
+                reply_markup: {
+                    inline_keyboard: [
+                        [{ text: "🖥 Мой профиль", web_app: { url: url } }]
+                    ]
+                }
+            });
         }
     });
 

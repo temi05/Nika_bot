@@ -65,6 +65,11 @@ async function loadUserProfile() {
         document.getElementById('user-name').textContent = user.first_name + (user.last_name ? ` ${user.last_name}` : '');
         document.getElementById('user-id').textContent = `@${user.username || user.id}`;
         
+        // Установка аватарки, если она есть в Telegram
+        if (user.photo_url) {
+            document.getElementById('user-avatar').src = user.photo_url;
+        }
+
         try {
             const res = await fetch(`/api/profile${currentChatId ? `?chat_id=${currentChatId}` : ''}`, {
                 headers: { 'x-tg-init-data': tg.initData }
@@ -288,5 +293,14 @@ document.addEventListener('DOMContentLoaded', () => {
 
     loadUserProfile();
     loadLeaderboard('level');
+
+    // Кнопка открытия внешней панели
+    const btnOpenPanel = document.getElementById('btn-open-panel');
+    if (btnOpenPanel) {
+        btnOpenPanel.addEventListener('click', () => {
+            tg.openLink('https://aternos.org/server/');
+        });
+    }
+
     tg.ready();
 });
