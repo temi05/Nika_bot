@@ -24,6 +24,7 @@ function registerCommands() {
         const chatId = msg.chat.id;
         try {
             const botInfo = await bot.getMe();
+            const { userId } = getSenderData(msg);
             
             // Telegram запрещает web_app кнопки в групповых чатах
             if (msg.chat.type !== 'private') {
