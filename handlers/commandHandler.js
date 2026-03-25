@@ -11,11 +11,28 @@ function registerCommands() {
             `/top — Топ активных участников\n` +
             `/shop — Магазин за печеньки 🍪\n` +
             `/give &lt;число&gt; — Передать печеньки\n` +
-            `/kto &lt;вопрос&gt; — Случайный участник\n\n` +
+            `/kto &lt;вопрос&gt; — Случайный участник\n` +
+            `/dashboard — Панель управления (Mini App)\n\n` +
             `👮‍♂️ <b>Для админов:</b>\n` +
             `/ban, /unban, /banword, /unbanword, /listwords\n\n` +
             `<i>Я защищаю чат и проверяю новичков!</i>`;
         bot.sendMessage(chatId, helpText, { parse_mode: 'HTML' });
+    });
+
+    // /dashboard
+    bot.onText(/^\/dashboard$/, async (msg) => {
+        const chatId = msg.chat.id;
+        const baseUrl = process.env.RENDER_EXTERNAL_URL ? process.env.RENDER_EXTERNAL_URL.replace(/\/$/, '') : 'https://google.com'; // ВРЕМЕННО для локальных тестов, в проде Render Url
+        const url = `${baseUrl}/miniapp/index.html`;
+        
+        const opts = {
+            reply_markup: {
+                inline_keyboard: [
+                    [{ text: "🖥 Открыть Dashboard", web_app: { url: url } }]
+                ]
+            }
+        };
+        bot.sendMessage(chatId, "✨ Нажми на кнопку ниже, чтобы открыть панель управления профилем и сервером Aternos:", opts);
     });
 
     // /me

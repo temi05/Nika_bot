@@ -1,8 +1,10 @@
 const express = require('express');
+const path = require('path');
 const { bot, token } = require('./config');
 const { registerCommands } = require('./handlers/commandHandler');
 const { registerMessageHandlers, handleReaction } = require('./handlers/messageHandler');
 const { registerVerificationHandlers } = require('./handlers/verificationHandler');
+const apiRouter = require('./handlers/apiHandler');
 
 // 1. Настройка Express и Webhook
 const app = express();
@@ -10,6 +12,9 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
 const RENDER_URL = process.env.RENDER_EXTERNAL_URL;
+
+app.use('/miniapp', express.static(path.join(__dirname, 'miniapp')));
+app.use('/api', apiRouter);
 
 app.get('/', (req, res) => res.send('Бот работает! 🤖 (Modular Edition)'));
 
