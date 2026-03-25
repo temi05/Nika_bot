@@ -1,3 +1,4 @@
+const express = require('express');
 const { supabase } = require('../database');
 const { bot, token, isAdmin } = require('../utils');
 const AternosAPI = require('./aternosHandler');
