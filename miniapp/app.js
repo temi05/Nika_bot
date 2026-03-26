@@ -185,6 +185,10 @@ const startBtn = document.getElementById('btn-start-server');
 const dot = document.getElementById('status-dot');
 const statusTxt = document.getElementById('server-status');
 
+document.getElementById('btn-open-panel').addEventListener('click', () => {
+    tg.openLink('https://aternos.org/servers/');
+});
+
 async function updateAternosStatus() {
     try {
         const res = await fetch(`/api/aternos/status`, {
