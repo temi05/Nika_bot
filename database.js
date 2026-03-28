@@ -104,6 +104,63 @@ function cleanupStores() {
 }
 setInterval(cleanupStores, 3600000);
 
+async function claimDailyBonus(chatId, userId) {
+    const user = await getUser(chatId, userId);
+    if (!user) return { success: false, message: 'Пользователь не найден' };
+
+    const now = new Date();
+    // Проверяем кулдаун в 24 часа
+    if (user.last_daily_claim) {
+        const lastClaim = new Date(user.last_daily_claim);
+        const diffHours = (now - lastClaim) / (1000 * 60 * 60);
+        if (diffHours < 24) {
+            const remaining = 24 - diffHours;
+            const hours = Math.floor(remaining);
+            const minutes = Math.floor((remaining - hours) * 60);
+            return { success: false, timeRemaining: { hours, minutes }, message: `⏳ Бонус будет доступен через ${hours} ч. ${minutes} мин.` };
+        }
+    }
+
+    // Вычисляем бонус: 50-150 XP, 10% шанс на +1 к репе.
+    const bonusXp = Math.floor(Math.random() * 101) + 50; 
+    const isRepGained = Math.random() < 0.10;
+    
+    // Подготовка обновлений. Проверяем повышение уровня в messageHandler, либо здесь.
+    // Удобнее просто вернуть новый статус, а левелап проверять при следующем сообщении, или прямо тут.
+    // Сделаем тут проверку:
+    let newXp = (user.xp || 0) + bonusXp;
+    let newLevel = user.level || 1;
+    let nextXp = getNextLevelXp(newLevel);
+    let levelUp = false;
+
+    while (newXp >= nextXp) {
+        newLevel++;
+        nextXp = getNextLevelXp(newLevel);
+        levelUp = true;
+    }
+
+    const updates = { 
+        xp: newXp,
+        level: newLevel,
+        last_daily_claim: now.toISOString()
+    };
+    if (isRepGained) {
+        updates.reputation = (user.reputation || 0) + 1;
+    }
+
+    await updateUser(user.id, updates);
+
+    return { 
+        success: true, 
+        bonusXp, 
+        isRepGained, 
+        newXp, 
+        newLevel, 
+        levelUp,
+        newReputation: updates.reputation || user.reputation
+    };
+}
+
 function getNextLevelXp(level) {
     return 50 * level * level + 50 * level;
 }
@@ -111,7 +168,7 @@ function getNextLevelXp(level) {
 const { ANONYMOUS_ADMIN_ID } = require('./config');
 
 module.exports = {
-    getUser, updateUser, getBadWords, getNextLevelXp,
+    getUser, updateUser, getBadWords, getNextLevelXp, claimDailyBonus,
     messageAuthors, reactionCooldowns, commandCooldowns, userCache,
     supabase, ANONYMOUS_ADMIN_ID, pendingVerifications
 };

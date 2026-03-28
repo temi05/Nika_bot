@@ -25,11 +25,13 @@ function registerMessageHandlers() {
             const badWords = await getBadWords(chatId);
             const isPromo = text.includes('t.me/') || text.includes('telegram.me/');
 
-            const foundBadWord = badWords.find(word => {
-                const escapedWord = word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-                const regex = new RegExp(`(^|\\s|[.,!?;:()"])${escapedWord}($|\\s|[.,!?;:()"])`, 'i');
-                return regex.test(text);
-            });
+            // Кешируем регулярку для чата if needed, но достаточно собрать за один раз
+            let foundBadWord = false;
+            if (badWords.length > 0) {
+                const escapedWords = badWords.map(word => word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+                const regex = new RegExp(`(^|\\s|[.,!?;:()"])(${escapedWords.join('|')})($|\\s|[.,!?;:()"])`, 'i');
+                foundBadWord = regex.test(text);
+            }
 
             if (foundBadWord || isPromo) {
                 bot.deleteMessage(chatId, msg.message_id).catch(() => { });
@@ -40,10 +42,10 @@ function registerMessageHandlers() {
                     await updateUser(dbUser.id, { warns: 0 });
                     const untilDate = Math.floor(Date.now() / 1000) + 3600;
                     bot.restrictChatMember(chatId, userId, { until_date: untilDate, can_send_messages: false })
-                        .then(() => bot.sendMessage(chatId, `⛔ ${getUserName(user)} получил мут на 1 час.`))
-                        .catch(() => sendTimedMessage(chatId, `⚠️ ${getUserName(user)} нарушает, но я не могу дать мут!`));
+                        .then(() => bot.sendMessage(chatId, `⛔ <b>${escapeMarkdown(getUserName(user))}</b> получил мут на 1 час за повторные нарушения.`, { parse_mode: 'HTML' }))
+                        .catch(() => sendTimedMessage(chatId, `⚠️ <b>${escapeMarkdown(getUserName(user))}</b> нарушает, но у меня нет прав выдать мут!`, 15000, { parse_mode: 'HTML' }));
                 } else {
-                    sendTimedMessage(chatId, `⚠️ ${getUserName(user)}, нарушение! Предупреждение ${newWarns}/3.`, 15000);
+                    sendTimedMessage(chatId, `⚠️ <b>${escapeMarkdown(getUserName(user))}</b>, нарушение! Выдано предупреждение <code>${newWarns} / 3</code>.`, 15000, { parse_mode: 'HTML' });
                 }
                 return;
             }
@@ -55,17 +57,22 @@ function registerMessageHandlers() {
             const now = Date.now();
             if (now - dbUser.last_message_time >= 60000) {
                 const xpGain = Math.floor(Math.random() * 11) + 15;
-                const nextXp = 50 * dbUser.level * dbUser.level + 50 * dbUser.level;
+                const { getNextLevelXp } = require('../database');
+                const nextXp = getNextLevelXp(dbUser.level);
                 const newLevel = dbUser.xp + xpGain >= nextXp ? dbUser.level + 1 : dbUser.level;
                 await updateUser(dbUser.id, { xp: dbUser.xp + xpGain, level: newLevel, last_message_time: now });
-                if (newLevel > dbUser.level) sendTimedMessage(chatId, `🎉 ${getUserName(user)} достиг уровня ${newLevel}!`, 30000);
+                if (newLevel > dbUser.level) {
+                   const levelUpMsg = `🎉 Поздравляем!\n` + 
+                                      `👤 <b>${escapeMarkdown(getUserName(user))}</b> достиг <b>${newLevel} уровня</b>! 🌟`;
+                   sendTimedMessage(chatId, levelUpMsg, 30000, { parse_mode: 'HTML' });
+                }
             }
         }
 
         // 4. РЕПУТАЦИЯ (ОТВЕТЫ)
         if (msg.reply_to_message && msg.text) {
             const text = msg.text.trim().toLowerCase();
-            const positive = ['+', 'спасибо', '👍'];
+            const positive = ['+', 'спасибо', '👍', 'спс'];
             const negative = ['-', '👎', 'фу'];
             let change = positive.includes(text) ? 1 : (negative.includes(text) ? -1 : 0);
 
@@ -73,13 +80,14 @@ function registerMessageHandlers() {
                 const { userId: rId, user: rInfo } = getSenderData(msg.reply_to_message);
                 if (userId === rId) return;
                 const cooldownKey = `${userId}_${rId}`;
-                if (Date.now() - (reactionCooldowns[cooldownKey] || 0) < 60000) return sendTimedMessage(chatId, '⏳ Подожди минуту!', 10000);
+                if (Date.now() - (reactionCooldowns[cooldownKey] || 0) < 60000) return sendTimedMessage(chatId, '⏳ Подожди минуту перед следующей оценкой!', 10000);
                 
                 const receiver = await getUser(chatId, rId, rInfo);
                 if (receiver) {
-                    console.log(`[REP DEBUG] Изменение репутации для ${rId} (${rInfo.first_name}): ${receiver.reputation} -> ${receiver.reputation + change}`);
                     await updateUser(receiver.id, { reputation: receiver.reputation + change });
-                    const text = `${change > 0 ? '🌟' : '📉'} <b>${getUserName(user)}</b> ${change > 0 ? 'повысил' : 'понизил'} репутацию <b>${getUserName(rInfo)}</b>!`;
+                    const text = change > 0 
+                        ? `🌟 <b>${escapeMarkdown(getUserName(user))}</b> передал печеньку <b>${escapeMarkdown(getUserName(rInfo))}</b>!\n└ Теперь у него <code>${receiver.reputation + change} 🍪</code>`
+                        : `📉 <b>${escapeMarkdown(getUserName(user))}</b> отнял печеньку у <b>${escapeMarkdown(getUserName(rInfo))}</b>!\n└ Теперь у него <code>${receiver.reputation + change} 🍪</code>`;
                     sendTimedMessage(chatId, text, 60000, { parse_mode: 'HTML' });
                     reactionCooldowns[cooldownKey] = Date.now();
                 }

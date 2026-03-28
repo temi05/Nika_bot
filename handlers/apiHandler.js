@@ -47,6 +47,7 @@ router.get('/profile', validateTelegramWebAppData, async (req, res) => {
         const userId = req.query.user_id || req.tgUser.id;
         const chatId = req.query.chat_id;
         
+        // ... (код профиля ниже)
         let query = supabase.from('users').select('*').eq('user_id', userId);
         if (chatId) query = query.eq('chat_id', chatId);
         
@@ -70,6 +71,24 @@ router.get('/profile', validateTelegramWebAppData, async (req, res) => {
         
         res.json({ ...data, is_admin, photo_url: photoUrl || data.photo_url });
     } catch (e) {
+        res.status(500).json({ error: 'Server error' });
+    }
+});
+
+const { claimDailyBonus } = require('../database');
+
+// Получение ежедневного бонуса
+router.post('/daily', validateTelegramWebAppData, async (req, res) => {
+    try {
+        const chatId = req.body.chat_id;
+        const userId = req.tgUser.id;
+        
+        if (!chatId) return res.status(400).json({ error: 'chat_id required' });
+
+        const result = await claimDailyBonus(chatId, userId);
+        res.json(result);
+    } catch (e) {
+        console.error(e);
         res.status(500).json({ error: 'Server error' });
     }
 });

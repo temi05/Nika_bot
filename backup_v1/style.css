@@ -31,19 +31,10 @@ body {
     color: var(--text-color);
     /* Генерируем красивый фон с радиальными градиентами (имитация blur) */
     background-image: 
-        radial-gradient(circle at 15% 50%, rgba(90, 75, 218, 0.25), transparent 40%),
-        radial-gradient(circle at 85% 30%, rgba(142, 68, 173, 0.25), transparent 40%),
-        radial-gradient(circle at 50% 90%, rgba(241, 196, 15, 0.1), transparent 50%);
+        radial-gradient(circle at 15% 50%, rgba(90, 75, 218, 0.15), transparent 25%),
+        radial-gradient(circle at 85% 30%, rgba(142, 68, 173, 0.15), transparent 25%);
     background-attachment: fixed;
-    background-size: 200% 200%;
-    animation: gradientShift 15s ease infinite alternate;
     padding-bottom: 80px; /* Отступ под навигацию */
-}
-
-@keyframes gradientShift {
-    0% { background-position: 0% 50%; }
-    50% { background-position: 100% 50%; }
-    100% { background-position: 0% 50%; }
 }
 
 /* Утилиты текста */
@@ -54,22 +45,16 @@ body {
 
 /* Glassmorphism Classes */
 .glass {
-    background: linear-gradient(135deg, rgba(255, 255, 255, 0.1), rgba(255, 255, 255, 0.03));
-    backdrop-filter: blur(16px);
-    -webkit-backdrop-filter: blur(16px);
-    border: 1px solid rgba(255, 255, 255, 0.15);
-    border-radius: 20px;
-    padding: 20px;
-    box-shadow: 0 4px 30px rgba(0, 0, 0, 0.1);
-    transition: transform 0.3s ease, box-shadow 0.3s ease;
+    background: var(--glass-bg);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border: 1px solid var(--glass-border);
+    border-radius: 16px;
+    padding: 16px;
 }
 
 .box-glow {
-    box-shadow: 0 8px 32px 0 rgba(90, 75, 218, 0.15);
-}
-.box-glow:hover {
-    transform: translateY(-2px);
-    box-shadow: 0 12px 40px 0 rgba(90, 75, 218, 0.25);
+    box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.2);
 }
 
 .header {
@@ -176,38 +161,20 @@ body {
     background: var(--button-color);
     color: var(--button-text-color);
     border: none;
-    border-radius: 14px;
+    border-radius: 12px;
     padding: 14px 24px;
     font-size: 16px;
     font-weight: 600;
     cursor: pointer;
-    transition: all 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+    transition: all 0.2s;
     width: 100%;
     display: flex;
     align-items: center;
     justify-content: center;
     gap: 10px;
-    position: relative;
-    overflow: hidden;
 }
-.action-btn::after {
-    content: '';
-    position: absolute;
-    top: 0; left: -100%; width: 50%; height: 100%;
-    background: linear-gradient(90deg, transparent, rgba(255,255,255,0.2), transparent);
-    transition: 0.5s;
-}
-.action-btn:hover::after {
-    left: 100%;
-}
-.action-btn:active { transform: scale(0.95); }
-.glowing-btn { 
-    box-shadow: 0 4px 15px rgba(90, 75, 218, 0.4); 
-}
-.glowing-btn:hover {
-    box-shadow: 0 6px 20px rgba(90, 75, 218, 0.6);
-    transform: translateY(-2px);
-}
+.action-btn:active { transform: scale(0.96); }
+.glowing-btn { box-shadow: 0 4px 15px rgba(90, 75, 218, 0.4); }
 
 /* Leaderboard */
 .tab-switcher {

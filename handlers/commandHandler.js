@@ -1,21 +1,24 @@
 const { bot, escapeMarkdown, getUserName, getSenderData, sendTimedMessage, deleteMsg, isAdmin } = require('../utils');
-const { getUser, updateUser, getBadWords, supabase, commandCooldowns, getNextLevelXp, ANONYMOUS_ADMIN_ID } = require('../database');
+const { getUser, updateUser, getBadWords, supabase, commandCooldowns, getNextLevelXp, ANONYMOUS_ADMIN_ID, claimDailyBonus } = require('../database');
 
 function registerCommands() {
-    // /help
     bot.onText(/^\/help$/, async (msg) => {
         const chatId = msg.chat.id;
-        const helpText = `🤖 <b>Что я умею:</b>\n\n` +
-            `👤 <b>Для всех:</b>\n` +
-            `/me — Моя статистика\n` +
-            `/top — Топ активных участников\n` +
-            `/shop — Магазин за печеньки 🍪\n` +
-            `/give &lt;число&gt; — Передать печеньки\n` +
-            `/kto &lt;вопрос&gt; — Случайный участник\n` +
-            `/dashboard — Панель управления (Mini App)\n\n` +
-            `👮‍♂️ <b>Для админов:</b>\n` +
-            `/ban, /unban, /banword, /unbanword, /listwords\n\n` +
-            `<i>Я защищаю чат и проверяю новичков!</i>`;
+        const helpText = `💎 <b>ГЛАВНОЕ МЕНЮ БОТА</b>\n` +
+            `━━━━━━━━━━━━━━━━━━\n\n` +
+            `👤 <b>Для пользователей:</b>\n` +
+            `🔹 <code>/me</code> — Мой профиль и статистика\n` +
+            `🔹 <code>/top</code> — Рейтинг самых активных\n` +
+            `🔹 <code>/shop</code> — Магазин за печеньки 🍪\n` +
+            `🔹 <code>/daily</code> — Ежедневный бонус 🎁\n` +
+            `🔹 <code>/give &lt;кол-во&gt;</code> — Передать печеньки (реплай)\n` +
+            `🔹 <code>/kto &lt;текст&gt;</code> — Узнать, кто...\n` +
+            `🔹 <code>/dashboard</code> — Панель управления (Mini App)\n\n` +
+            `🛡 <b>Управление (Админ):</b>\n` +
+            `🔸 <code>/ban</code>, <code>/unban</code> — Управление доступом\n` +
+            `🔸 <code>/banword</code>, <code>/unbanword</code>, <code>/listwords</code> — Фильтр мата\n\n` +
+            `━━━━━━━━━━━━━━━━━━\n` +
+            `<i>Я защищаю этот чат и помогаю общаться!</i>`;
         bot.sendMessage(chatId, helpText, { parse_mode: 'HTML' });
     });
 
@@ -104,7 +107,44 @@ function registerCommands() {
         }
     });
 
-    // /me
+    // /daily (Ежедневный бонус)
+    bot.onText(/^\/daily$/, async (msg) => {
+        const chatId = msg.chat.id;
+        const { userId, user } = getSenderData(msg);
+        deleteMsg(chatId, msg.message_id);
+
+        try {
+            const result = await claimDailyBonus(chatId, userId);
+            if (!result.success) {
+                if (result.timeRemaining) {
+                    sendTimedMessage(chatId, `⏳ <b>${escapeMarkdown(getUserName(user))}</b>, твой следующий бонус будет доступен через <code>${result.timeRemaining.hours} ч. ${result.timeRemaining.minutes} мин.</code>`, 30000, { parse_mode: 'HTML' });
+                } else {
+                    sendTimedMessage(chatId, `❌ Ошибка: ${result.message}`, 10000, { parse_mode: 'HTML' });
+                }
+                return;
+            }
+
+            let msgText = `🎁 <b>ЕЖЕДНЕВНЫЙ БОНУС</b>\n━━━━━━━━━━━━━━━━━━\n` +
+                          `👤 <code>${escapeMarkdown(getUserName(user))}</code> открыл сундук и получил:\n` +
+                          `✨ <b>+${result.bonusXp} XP</b>\n`;
+
+            if (result.isRepGained) {
+                msgText += `🍪 <b>+1 Печеньку (Репутация)!</b> Ого, повезло!\n`;
+            }
+
+            if (result.levelUp) {
+                msgText += `🎉 <b>НОВЫЙ УРОВЕНЬ!</b> Теперь ты <b>${result.newLevel}</b> ур.\n`;
+            }
+            msgText += `━━━━━━━━━━━━━━━━━━\n<i>Возвращайся завтра за новой наградой!</i>`;
+
+            bot.sendMessage(chatId, msgText, { parse_mode: 'HTML' });
+        } catch (error) {
+            console.error('Ошибка в /daily:', error);
+            sendTimedMessage(chatId, `❌ Ошибка при получении бонуса.`, 10000);
+        }
+    });
+
+    // /me (Профиль)
     bot.onText(/^\/me(?:\s+(.+))?$/, async (msg, match) => {
         const chatId = msg.chat.id;
         const requester = getSenderData(msg);
@@ -112,6 +152,13 @@ function registerCommands() {
         let targetUser = requester.user;
 
         deleteMsg(chatId, msg.message_id);
+
+        let processMsgId = null;
+        try {
+            const processMsg = await bot.sendMessage(chatId, "⏳ <i>Загрузка профиля...</i>", { parse_mode: 'HTML' });
+            processMsgId = processMsg.message_id;
+        } catch (e) { }
+
         if (msg.reply_to_message) {
             const replyInfo = getSenderData(msg.reply_to_message);
             userId = replyInfo.userId; targetUser = replyInfo.user;
@@ -122,45 +169,102 @@ function registerCommands() {
             } else if (arg.startsWith('@')) {
                 const { data } = await supabase.from('users').select('*').eq('chat_id', chatId).ilike('username', arg.substring(1)).maybeSingle();
                 if (data) { userId = data.user_id; targetUser = data; }
-                else return sendTimedMessage(chatId, `❌ Пользователь ${arg} не найден.`);
+                else {
+                    if (processMsgId) deleteMsg(chatId, processMsgId);
+                    return sendTimedMessage(chatId, `❌ Пользователь ${escapeMarkdown(arg)} не найден в базе.`);
+                }
             }
         }
 
         const user = await getUser(chatId, userId, targetUser);
-        if (!user) return;
-        const nextXp = getNextLevelXp(user.level);
+        if (!user) {
+            if (processMsgId) deleteMsg(chatId, processMsgId);
+            return;
+        }
         
-        const message = `📊 <b>Статистика:</b>` + (userId !== requester.userId ? ` (профиль ${escapeMarkdown(getUserName(targetUser))})` : '') + `\n\n` +
-            `👤 Пользователь: ${escapeMarkdown(getUserName(user))}\n` +
-            `⭐ Уровень: <b>${user.level}</b>\n` +
-            `✨ Опыт: <b>${user.xp}</b>\n` +
-            `🍪 Репутация: <b>${user.reputation}</b>\n` +
-            `📈 До следующего уровня: <b>${nextXp - user.xp}</b> XP`;
+        if (processMsgId) deleteMsg(chatId, processMsgId);
+
+        const nextXp = getNextLevelXp(user.level);
+        const prevLevelXp = user.level === 1 ? 0 : getNextLevelXp(user.level - 1);
+        const levelRange = nextXp - prevLevelXp;
+        const currentProgress = user.xp - prevLevelXp;
+        
+        // Рисуем стилизованный прогресс-бар: [██████░░░░]
+        const progressPercent = Math.max(0, Math.min(100, (currentProgress / levelRange) * 100));
+        const filledBars = Math.floor(progressPercent / 10);
+        const emptyBars = 10 - filledBars;
+        const progressBar = `[${'█'.repeat(filledBars)}${'░'.repeat(emptyBars)}]`;
+
+        let roleText = userId === ANONYMOUS_ADMIN_ID ? "👻 Анонимный Админ" : (await isAdmin(chatId, userId) ? "🛡 Администратор" : "👤 Пользователь");
+        
+        const isSelf = userId === requester.userId;
+        const headerTitle = isSelf ? "МОЙ ПРОФИЛЬ" : "ПРОФИЛЬ ПОЛЬЗОВАТЕЛЯ";
+        
+        let message = `💠 <b>${headerTitle}</b>\n` +
+            `━━━━━━━━━━━━━━━━━━\n` +
+            `📝 <b>Имя:</b> <code>${escapeMarkdown(getUserName(targetUser))}</code>\n` +
+            `🎖 <b>Роль:</b> <i>${roleText}</i>\n` +
+            `🌟 <b>Уровень:</b> <b>${user.level}</b>\n` +
+            `📊 <b>Прогресс:</b> <code>${progressBar}</code> ${Math.floor(progressPercent)}%\n\n`;
+            
+        message += `✨ <b>Опыт:</b> <code>${user.xp.toLocaleString()} / ${nextXp.toLocaleString()} XP</code>\n` +
+            `🍪 <b>Печеньки:</b> <code>${user.reputation.toLocaleString()} шт.</code>\n`;
+            
+        if (user.warns > 0) {
+            message += `⚠️ <b>Предупреждения:</b> <code>${user.warns} / 3</code>\n`;
+        }
+            
+        message += `━━━━━━━━━━━━━━━━━━\n` +
+            `<i>До следующего уровня осталось ${nextXp - user.xp} XP</i>`;
+
         sendTimedMessage(chatId, message, 60000, { parse_mode: 'HTML' });
     });
 
-    // /top
+    // /top (Рейтинг)
     bot.onText(/^\/top$/, async (msg) => {
         const chatId = msg.chat.id;
-        const { userId } = getSenderData(msg);
         deleteMsg(chatId, msg.message_id);
 
-        const { data: users } = await supabase.from('users').select('*').eq('chat_id', chatId).order('level', { ascending: false }).limit(10);
-        if (!users || users.length === 0) return sendTimedMessage(chatId, 'Нет активности.');
-        let text = '🏆 *Топ активных участников:*\n';
-        users.forEach((u, i) => text += `${i + 1}\\. ${escapeMarkdown(getUserName(u))} — ${u.level} ур\\. \\(${u.reputation} 🍪\\)\n`);
-        sendTimedMessage(chatId, text, 60000, { parse_mode: 'MarkdownV2' });
+        let processMsgId = null;
+        try {
+            const processMsg = await bot.sendMessage(chatId, "⏳ <i>Собираю статистику...</i>", { parse_mode: 'HTML' });
+            processMsgId = processMsg.message_id;
+        } catch (e) { }
+
+        const { data: users } = await supabase.from('users').select('*').eq('chat_id', chatId).order('level', { ascending: false }).order('xp', { ascending: false }).limit(10);
+        
+        if (processMsgId) deleteMsg(chatId, processMsgId);
+
+        if (!users || users.length === 0) return sendTimedMessage(chatId, '📭 В этом чате пока нет активности.');
+        
+        let text = '🏆 <b>ТОП-10 АКТИВНЫХ УЧАСТНИКОВ</b>\n━━━━━━━━━━━━━━━━━━\n\n';
+        
+        const medals = ['🥇', '🥈', '🥉'];
+        
+        users.forEach((u, i) => {
+            const placeIndex = i < 3 ? medals[i] : `<b>${i + 1}.</b>`;
+            const warnsMarker = u.warns > 0 ? '⚠️' : '';
+            text += `${placeIndex} <code>${escapeMarkdown(getUserName(u))}</code>\n   └ <b>Ур. ${u.level}</b> | 🍪 ${u.reputation} ${warnsMarker}\n`;
+        });
+        
+        text += '\n━━━━━━━━━━━━━━━━━━\n<i>Чем больше общаетесь, тем выше уровень!</i>';
+        sendTimedMessage(chatId, text, 60000, { parse_mode: 'HTML' });
     });
 
     // /shop
     bot.onText(/^\/shop$/, async (msg) => {
         const chatId = msg.chat.id;
-        const helpText = `🛒 *Магазин печенек:*
-1. *Купить уровень* (+1 ур.) — 500 🍪
-   Команда: /buy 1
-2. *Снять варны* (в 0) — 200 🍪
-   Команда: /buy 2`;
-        bot.sendMessage(chatId, helpText, { parse_mode: 'Markdown' });
+        const helpText = `🏪 <b>МАГАЗИН ПЕЧЕНЕК</b> 🍪\n` +
+            `━━━━━━━━━━━━━━━━━━\n\n` +
+            `🥇 <b>Купить 1 уровень</b>\n` +
+            `└ Стоимость: <code>500 🍪</code>\n` +
+            `└ Команда: <code>/buy 1</code>\n\n` +
+            `🧹 <b>Снять все предупреждения</b> (варны)\n` +
+            `└ Стоимость: <code>200 🍪</code>\n` +
+            `└ Команда: <code>/buy 2</code>\n\n` +
+            `━━━━━━━━━━━━━━━━━━\n` +
+            `<i>Печеньки можно зарабатывать, получая "спасибо" или "+" в ответ на сообщения!</i>`;
+        bot.sendMessage(chatId, helpText, { parse_mode: 'HTML' });
     });
 
     // /buy
@@ -216,76 +320,7 @@ function registerCommands() {
         sendTimedMessage(chatId, `🤔 Я думаю, что ${match[1]} — это ${getUserName(randomUser)}!`, 60000);
     });
 
-    // /ban, /unban
-    bot.onText(/\/ban(?:\s+(.+))?/, async (msg, match) => {
-        const chatId = msg.chat.id;
-        const { userId, user: sender } = getSenderData(msg);
-        deleteMsg(chatId, msg.message_id);
-        if (!(await isAdmin(chatId, userId))) return sendTimedMessage(chatId, '⛔ Нет прав!', 30000);
 
-        let targetId, targetName;
-        if (msg.reply_to_message) {
-            targetId = msg.reply_to_message.from.id; targetName = getUserName(msg.reply_to_message.from);
-        } else if (match[1]) {
-            const arg = match[1].trim();
-            if (/^\d+$/.test(arg)) { targetId = parseInt(arg); targetName = `ID ${targetId}`; }
-            else if (arg.startsWith('@')) {
-                const { data } = await supabase.from('users').select('user_id, username').eq('chat_id', chatId).ilike('username', arg.substring(1)).maybeSingle();
-                if (data) { targetId = data.user_id; targetName = `@${data.username}`; }
-            }
-        }
-        if (!targetId || targetId === ANONYMOUS_ADMIN_ID || (await isAdmin(chatId, targetId))) return sendTimedMessage(chatId, '❌ Нельзя забанить!', 30000);
-        try { await bot.banChatMember(chatId, targetId); sendTimedMessage(chatId, `🚫 ${getUserName(sender)} забанил ${targetName}.`, 60000); }
-        catch (e) { sendTimedMessage(chatId, '❌ Ошибка бана.', 30000); }
-    });
-
-    bot.onText(/\/unban(?:\s+(.+))?/, async (msg, match) => {
-        const chatId = msg.chat.id;
-        const { userId, user: sender } = getSenderData(msg);
-        deleteMsg(chatId, msg.message_id);
-        if (!(await isAdmin(chatId, userId))) return;
-
-        let targetId, targetName;
-        if (match[1]) {
-            const arg = match[1].trim();
-            if (/^\d+$/.test(arg)) { targetId = parseInt(arg); targetName = `ID ${targetId}`; }
-            else if (arg.startsWith('@')) {
-                const { data } = await supabase.from('users').select('user_id, username').eq('chat_id', chatId).ilike('username', arg.substring(1)).maybeSingle();
-                if (data) { targetId = data.user_id; targetName = `@${data.username}`; }
-            }
-        }
-        if (!targetId) return;
-        try { await bot.unbanChatMember(chatId, targetId, { only_if_banned: true }); sendTimedMessage(chatId, `✅ ${getUserName(sender)} разбанил ${targetName}.`, 60000); }
-        catch (e) { sendTimedMessage(chatId, '❌ Ошибка разбана.', 30000); }
-    });
-
-    // /banword, /unbanword, /listwords
-    bot.onText(/\/banword (.+)/, async (msg, match) => {
-        const chatId = msg.chat.id;
-        const { userId } = getSenderData(msg);
-        if (!(await isAdmin(chatId, userId))) return;
-        const word = match[1].trim();
-        await supabase.from('bad_words').insert([{ chat_id: chatId, word: word }]);
-        sendTimedMessage(chatId, `✅ Слово "${word}" в бане.`, 60000);
-    });
-
-    bot.onText(/\/unbanword (.+)/, async (msg, match) => {
-        const chatId = msg.chat.id;
-        const { userId } = getSenderData(msg);
-        if (!(await isAdmin(chatId, userId))) return;
-        const word = match[1].trim();
-        await supabase.from('bad_words').delete().eq('chat_id', chatId).eq('word', word);
-        sendTimedMessage(chatId, `✅ Слово "${word}" удалено.`, 60000);
-    });
-
-    bot.onText(/\/listwords/, async (msg) => {
-        const chatId = msg.chat.id;
-        const { userId } = getSenderData(msg);
-        if (!(await isAdmin(chatId, userId))) return;
-        const { data } = await supabase.from('bad_words').select('word').eq('chat_id', chatId);
-        const words = data?.map(i => i.word) || [];
-        sendTimedMessage(chatId, words.length ? `🚫 Запрещенные слова:\n${words.join(', ')}` : 'Список пуст.', 60000);
-    });
 }
 
 module.exports = { registerCommands };
