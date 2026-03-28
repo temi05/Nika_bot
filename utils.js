@@ -15,6 +15,16 @@ function escapeMarkdown(text) {
     return String(text).replace(/[_*[\]()~`>#+\-=|{}.!\\]/g, '\\$&');
 }
 
+function escapeHTML(text) {
+    if (text === undefined || text === null) return '';
+    return String(text)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+}
+
 function getSenderData(msg) {
     if (msg.sender_chat) {
         // Если сообщение от имени канала в группе
@@ -96,6 +106,7 @@ async function isAdmin(chatId, userId) {
 module.exports = {
     getUserName,
     escapeMarkdown,
+    escapeHTML,
     getSenderData,
     sendTimedMessage,
     deleteMsg,

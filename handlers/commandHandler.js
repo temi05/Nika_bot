@@ -1,4 +1,4 @@
-const { bot, escapeMarkdown, getUserName, getSenderData, sendTimedMessage, deleteMsg, isAdmin } = require('../utils');
+const { bot, escapeHTML, getUserName, getSenderData, sendTimedMessage, deleteMsg, isAdmin } = require('../utils');
 const { getUser, updateUser, getBadWords, supabase, commandCooldowns, getNextLevelXp, ANONYMOUS_ADMIN_ID, claimDailyBonus } = require('../database');
 
 function registerCommands() {
@@ -117,7 +117,7 @@ function registerCommands() {
             const result = await claimDailyBonus(chatId, userId);
             if (!result.success) {
                 if (result.timeRemaining) {
-                    sendTimedMessage(chatId, `⏳ <b>${escapeMarkdown(getUserName(user))}</b>, твой следующий бонус будет доступен через <code>${result.timeRemaining.hours} ч. ${result.timeRemaining.minutes} мин.</code>`, 30000, { parse_mode: 'HTML' });
+                    sendTimedMessage(chatId, `⏳ <b>${escapeHTML(getUserName(user))}</b>, твой следующий бонус будет доступен через <code>${result.timeRemaining.hours} ч. ${result.timeRemaining.minutes} мин.</code>`, 30000, { parse_mode: 'HTML' });
                 } else {
                     sendTimedMessage(chatId, `❌ Ошибка: ${result.message}`, 10000, { parse_mode: 'HTML' });
                 }
@@ -125,7 +125,7 @@ function registerCommands() {
             }
 
             let msgText = `🎁 <b>ЕЖЕДНЕВНЫЙ БОНУС</b>\n━━━━━━━━━━━━━━━━━━\n` +
-                          `👤 <code>${escapeMarkdown(getUserName(user))}</code> открыл сундук и получил:\n` +
+                          `👤 <code>${escapeHTML(getUserName(user))}</code> открыл сундук и получил:\n` +
                           `✨ <b>+${result.bonusXp} XP</b>\n`;
 
             if (result.isRepGained) {
@@ -171,7 +171,7 @@ function registerCommands() {
                 if (data) { userId = data.user_id; targetUser = data; }
                 else {
                     if (processMsgId) deleteMsg(chatId, processMsgId);
-                    return sendTimedMessage(chatId, `❌ Пользователь ${escapeMarkdown(arg)} не найден в базе.`);
+                    return sendTimedMessage(chatId, `❌ Пользователь ${escapeHTML(arg)} не найден в базе.`);
                 }
             }
         }
@@ -202,7 +202,7 @@ function registerCommands() {
         
         let message = `💠 <b>${headerTitle}</b>\n` +
             `━━━━━━━━━━━━━━━━━━\n` +
-            `📝 <b>Имя:</b> <code>${escapeMarkdown(getUserName(targetUser))}</code>\n` +
+            `📝 <b>Имя:</b> <code>${escapeHTML(getUserName(targetUser))}</code>\n` +
             `🎖 <b>Роль:</b> <i>${roleText}</i>\n` +
             `🌟 <b>Уровень:</b> <b>${user.level}</b>\n` +
             `📊 <b>Прогресс:</b> <code>${progressBar}</code> ${Math.floor(progressPercent)}%\n\n`;
@@ -244,7 +244,7 @@ function registerCommands() {
         users.forEach((u, i) => {
             const placeIndex = i < 3 ? medals[i] : `<b>${i + 1}.</b>`;
             const warnsMarker = u.warns > 0 ? '⚠️' : '';
-            text += `${placeIndex} <code>${escapeMarkdown(getUserName(u))}</code>\n   └ <b>Ур. ${u.level}</b> | 🍪 ${u.reputation} ${warnsMarker}\n`;
+            text += `${placeIndex} <code>${escapeHTML(getUserName(u))}</code>\n   └ <b>Ур. ${u.level}</b> | 🍪 ${u.reputation} ${warnsMarker}\n`;
         });
         
         text += '\n━━━━━━━━━━━━━━━━━━\n<i>Чем больше общаетесь, тем выше уровень!</i>';

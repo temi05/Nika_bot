@@ -1,5 +1,5 @@
 const captchapng = require('captchapng');
-const { bot, token, escapeMarkdown, sendTimedMessage, isAdmin } = require('../utils');
+const { bot, token, escapeHTML, sendTimedMessage, isAdmin } = require('../utils');
 const { pendingVerifications } = require('../database');
 
 function registerVerificationHandlers() {
@@ -12,7 +12,7 @@ function registerVerificationHandlers() {
             if (member.is_bot) {
                 if (member.id !== botId) {
                     await bot.banChatMember(chatId, member.id);
-                    sendTimedMessage(chatId, `🚨 <b>ОБНАРУЖЕН БОТ!</b> Пригласил: ${inviter.first_name}`, 300000, { parse_mode: 'HTML' });
+                    sendTimedMessage(chatId, `🚨 <b>ОБНАРУЖЕН БОТ!</b> Пригласил: ${escapeHTML(inviter.first_name)}`, 300000, { parse_mode: 'HTML' });
                 }
                 continue;
             }
@@ -30,7 +30,7 @@ function registerVerificationHandlers() {
 
             bot.sendPhoto(chatId, img, {
                 caption: `👋 Привет! Напиши цифры с картинки за 2 минуты.`,
-                parse_mode: 'Markdown'
+                parse_mode: 'HTML'
             }).then(sentMsg => {
                 const timer = setTimeout(async () => {
                     await bot.banChatMember(chatId, member.id, { until_date: Math.floor(Date.now() / 1000) + 60 });
@@ -51,7 +51,7 @@ function registerVerificationHandlers() {
                 await bot.restrictChatMember(msg.chat.id, msg.from.id, { can_send_messages: true, can_send_other_messages: true, can_send_media_messages: true });
                 bot.deleteMessage(msg.chat.id, v.msgId).catch(() => {});
                 bot.deleteMessage(msg.chat.id, msg.message_id).catch(() => {});
-                sendTimedMessage(msg.chat.id, `✅ ${msg.from.first_name} прошел проверку!`, 10000);
+                sendTimedMessage(msg.chat.id, `✅ <b>${escapeHTML(msg.from.first_name)}</b> прошел проверку!`, 10000, { parse_mode: 'HTML' });
             } else {
                 bot.deleteMessage(msg.chat.id, msg.message_id).catch(() => {});
             }

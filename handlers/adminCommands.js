@@ -1,4 +1,4 @@
-const { bot, escapeMarkdown, getUserName, getSenderData, sendTimedMessage, deleteMsg, isAdmin } = require('../utils');
+const { bot, escapeHTML, getUserName, getSenderData, sendTimedMessage, deleteMsg, isAdmin } = require('../utils');
 const { supabase, ANONYMOUS_ADMIN_ID } = require('../database');
 
 function registerAdminCommands() {
@@ -34,7 +34,7 @@ function registerAdminCommands() {
         
         try { 
             await bot.banChatMember(chatId, targetId); 
-            sendTimedMessage(chatId, `🚫 <b>${escapeMarkdown(getUserName(sender))}</b> выдал бан пользователю <b>${escapeMarkdown(targetName)}</b>.`, 60000, { parse_mode: 'HTML' }); 
+            sendTimedMessage(chatId, `🚫 <b>${escapeHTML(getUserName(sender))}</b> выдал бан пользователю <b>${escapeHTML(targetName)}</b>.`, 60000, { parse_mode: 'HTML' }); 
         } catch (e) { 
             sendTimedMessage(chatId, '❌ Ошибка: не удалось забанить.', 30000); 
         }
@@ -67,7 +67,7 @@ function registerAdminCommands() {
         
         try { 
             await bot.unbanChatMember(chatId, targetId, { only_if_banned: true }); 
-            sendTimedMessage(chatId, `✅ <b>${escapeMarkdown(getUserName(sender))}</b> разбанил пользователя <b>${escapeMarkdown(targetName)}</b>.`, 60000, { parse_mode: 'HTML' }); 
+            sendTimedMessage(chatId, `✅ <b>${escapeHTML(getUserName(sender))}</b> разбанил пользователя <b>${escapeHTML(targetName)}</b>.`, 60000, { parse_mode: 'HTML' }); 
         } catch (e) { 
             sendTimedMessage(chatId, '❌ Ошибка: не удалось разбанить.', 30000); 
         }
@@ -83,7 +83,7 @@ function registerAdminCommands() {
         const word = match[1].trim().toLowerCase();
         await supabase.from('bad_words').insert([{ chat_id: chatId, word: word }]);
         
-        sendTimedMessage(chatId, `✅ Слово "<b>${escapeMarkdown(word)}</b>" заблокировано.`, 60000, { parse_mode: 'HTML' });
+        sendTimedMessage(chatId, `✅ Слово "<b>${escapeHTML(word)}</b>" заблокировано.`, 60000, { parse_mode: 'HTML' });
     });
 
     // /unbanword
@@ -96,7 +96,7 @@ function registerAdminCommands() {
         const word = match[1].trim().toLowerCase();
         await supabase.from('bad_words').delete().eq('chat_id', chatId).eq('word', word);
         
-        sendTimedMessage(chatId, `✅ Слово "<b>${escapeMarkdown(word)}</b>" удалено из фильтра.`, 60000, { parse_mode: 'HTML' });
+        sendTimedMessage(chatId, `✅ Слово "<b>${escapeHTML(word)}</b>" удалено из фильтра.`, 60000, { parse_mode: 'HTML' });
     });
 
     // /listwords
@@ -107,7 +107,7 @@ function registerAdminCommands() {
         if (!(await isAdmin(chatId, userId))) return;
         
         const { data } = await supabase.from('bad_words').select('word').eq('chat_id', chatId);
-        const words = data?.map(i => escapeMarkdown(i.word)) || [];
+        const words = data?.map(i => escapeHTML(i.word)) || [];
         
         const text = words.length 
             ? `🚫 <b>Запрещенные слова в чате:</b>\n\n<code>${words.join(', ')}</code>` 

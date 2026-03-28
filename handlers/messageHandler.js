@@ -1,4 +1,4 @@
-const { bot, escapeMarkdown, getUserName, getSenderData, sendTimedMessage } = require('../utils');
+const { bot, escapeHTML, getUserName, getSenderData, sendTimedMessage } = require('../utils');
 const { getUser, updateUser, getBadWords, messageAuthors, reactionCooldowns, ANONYMOUS_ADMIN_ID, pendingVerifications } = require('../database');
 
 function registerMessageHandlers() {
@@ -42,10 +42,10 @@ function registerMessageHandlers() {
                     await updateUser(dbUser.id, { warns: 0 });
                     const untilDate = Math.floor(Date.now() / 1000) + 3600;
                     bot.restrictChatMember(chatId, userId, { until_date: untilDate, can_send_messages: false })
-                        .then(() => bot.sendMessage(chatId, `⛔ <b>${escapeMarkdown(getUserName(user))}</b> получил мут на 1 час за повторные нарушения.`, { parse_mode: 'HTML' }))
-                        .catch(() => sendTimedMessage(chatId, `⚠️ <b>${escapeMarkdown(getUserName(user))}</b> нарушает, но у меня нет прав выдать мут!`, 15000, { parse_mode: 'HTML' }));
+                        .then(() => bot.sendMessage(chatId, `⛔ <b>${escapeHTML(getUserName(user))}</b> получил мут на 1 час за повторные нарушения.`, { parse_mode: 'HTML' }))
+                        .catch(() => sendTimedMessage(chatId, `⚠️ <b>${escapeHTML(getUserName(user))}</b> нарушает, но у меня нет прав выдать мут!`, 15000, { parse_mode: 'HTML' }));
                 } else {
-                    sendTimedMessage(chatId, `⚠️ <b>${escapeMarkdown(getUserName(user))}</b>, нарушение! Выдано предупреждение <code>${newWarns} / 3</code>.`, 15000, { parse_mode: 'HTML' });
+                    sendTimedMessage(chatId, `⚠️ <b>${escapeHTML(getUserName(user))}</b>, нарушение! Выдано предупреждение <code>${newWarns} / 3</code>.`, 15000, { parse_mode: 'HTML' });
                 }
                 return;
             }
@@ -63,7 +63,7 @@ function registerMessageHandlers() {
                 await updateUser(dbUser.id, { xp: dbUser.xp + xpGain, level: newLevel, last_message_time: now });
                 if (newLevel > dbUser.level) {
                    const levelUpMsg = `🎉 Поздравляем!\n` + 
-                                      `👤 <b>${escapeMarkdown(getUserName(user))}</b> достиг <b>${newLevel} уровня</b>! 🌟`;
+                                      `👤 <b>${escapeHTML(getUserName(user))}</b> достиг <b>${newLevel} уровня</b>! 🌟`;
                    sendTimedMessage(chatId, levelUpMsg, 30000, { parse_mode: 'HTML' });
                 }
             }
@@ -86,8 +86,8 @@ function registerMessageHandlers() {
                 if (receiver) {
                     await updateUser(receiver.id, { reputation: receiver.reputation + change });
                     const text = change > 0 
-                        ? `🌟 <b>${escapeMarkdown(getUserName(user))}</b> передал печеньку <b>${escapeMarkdown(getUserName(rInfo))}</b>!\n└ Теперь у него <code>${receiver.reputation + change} 🍪</code>`
-                        : `📉 <b>${escapeMarkdown(getUserName(user))}</b> отнял печеньку у <b>${escapeMarkdown(getUserName(rInfo))}</b>!\n└ Теперь у него <code>${receiver.reputation + change} 🍪</code>`;
+                        ? `🌟 <b>${escapeHTML(getUserName(user))}</b> передал печеньку <b>${escapeHTML(getUserName(rInfo))}</b>!\n└ Теперь у него <code>${receiver.reputation + change} 🍪</code>`
+                        : `📉 <b>${escapeHTML(getUserName(user))}</b> отнял печеньку у <b>${escapeHTML(getUserName(rInfo))}</b>!\n└ Теперь у него <code>${receiver.reputation + change} 🍪</code>`;
                     sendTimedMessage(chatId, text, 60000, { parse_mode: 'HTML' });
                     reactionCooldowns[cooldownKey] = Date.now();
                 }
