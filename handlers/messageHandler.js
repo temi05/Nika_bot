@@ -1,5 +1,5 @@
-const { bot, escapeHTML, getUserName, getSenderData, sendTimedMessage } = require('../utils');
-const { getUser, updateUser, getBadWords, messageAuthors, reactionCooldowns, ANONYMOUS_ADMIN_ID, pendingVerifications } = require('../database');
+const { bot, escapeHTML, getUserName, getSenderData, sendTimedMessage, isAdmin } = require('../utils');
+const { getUser, updateUser, getBadWords, messageAuthors, reactionCooldowns, ANONYMOUS_ADMIN_ID, pendingVerifications, getChatSettings } = require('../database');
 
 function registerMessageHandlers() {
     bot.on('message', async (msg) => {
@@ -33,7 +33,20 @@ function registerMessageHandlers() {
                 foundBadWord = regex.test(text);
             }
 
-            if (foundBadWord || isPromo) {
+            // Для ссылок: проверяем настройку чата и права пользователя
+            let isPromoBlocked = false;
+            if (isPromo) {
+                const chatSettings = await getChatSettings(chatId);
+                if (chatSettings.link_filter_enabled) {
+                    // Фильтр включён: проверяем, является ли отправитель админом
+                    const senderIsAdmin = await isAdmin(chatId, userId);
+                    if (!senderIsAdmin) {
+                        isPromoBlocked = true; // Не админ — блокируем
+                    }
+                }
+            }
+
+            if (foundBadWord || isPromoBlocked) {
                 bot.deleteMessage(chatId, msg.message_id).catch(() => { });
                 const newWarns = dbUser.warns + 1;
                 await updateUser(dbUser.id, { warns: newWarns });

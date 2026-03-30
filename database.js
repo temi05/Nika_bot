@@ -5,6 +5,9 @@ const USER_CACHE_TTL = 300000; // 5 минут
 const badWordsCache = {}; // { chatId: { words: [], expires: timestamp } }
 const BAD_WORDS_CACHE_TTL = 600000; // 10 минут
 
+const chatSettingsCache = {}; // { chatId: { settings: {}, expires: timestamp } }
+const CHAT_SETTINGS_CACHE_TTL = 300000; // 5 минут
+
 // Хранилища для очистки
 const messageAuthors = {};
 const reactionCooldowns = {};
@@ -82,6 +85,57 @@ async function getBadWords(chatId) {
     return words;
 }
 
+async function getChatSettings(chatId) {
+    if (chatSettingsCache[chatId] && Date.now() < chatSettingsCache[chatId].expires) {
+        return chatSettingsCache[chatId].settings;
+    }
+
+    let { data, error } = await supabase
+        .from('chats')
+        .select('*')
+        .eq('chat_id', chatId)
+        .maybeSingle();
+
+    if (error) {
+        console.error('[DB ERROR] getChatSettings:', error.message);
+        // Возвращаем настройки по умолчанию в случае ошибки
+        return { link_filter_enabled: true };
+    }
+
+    if (!data) {
+        // Если настроек нет — создаём запись с дефолтными значениями
+        const { data: newData, error: insertError } = await supabase
+            .from('chats')
+            .insert([{ chat_id: chatId, link_filter_enabled: true }])
+            .select()
+            .single();
+        if (insertError) return { link_filter_enabled: true };
+        data = newData;
+    }
+
+    chatSettingsCache[chatId] = { settings: data, expires: Date.now() + CHAT_SETTINGS_CACHE_TTL };
+    return data;
+}
+
+async function updateChatSettings(chatId, updates) {
+    // Убеждаемся, что запись существует
+    await getChatSettings(chatId);
+
+    const { error } = await supabase
+        .from('chats')
+        .update({ ...updates, updated_at: new Date().toISOString() })
+        .eq('chat_id', chatId);
+
+    if (error) {
+        console.error('[DB ERROR] updateChatSettings:', error.message);
+        return false;
+    }
+
+    // Сброс кэша для этого чата
+    delete chatSettingsCache[chatId];
+    return true;
+}
+
 function cleanupStores() {
     const now = Date.now();
     const oneDay = 24 * 60 * 60 * 1000;
@@ -95,7 +149,7 @@ function cleanupStores() {
     }
 
     // Очистка кулдаунов и кэша пользователей
-    [reactionCooldowns, commandCooldowns, userCache].forEach(store => {
+    [reactionCooldowns, commandCooldowns, userCache, chatSettingsCache].forEach(store => {
         for (const key in store) {
             const time = store[key].expires || store[key];
             if (now - time > oneDay) delete store[key];
@@ -169,6 +223,7 @@ const { ANONYMOUS_ADMIN_ID } = require('./config');
 
 module.exports = {
     getUser, updateUser, getBadWords, getNextLevelXp, claimDailyBonus,
+    getChatSettings, updateChatSettings,
     messageAuthors, reactionCooldowns, commandCooldowns, userCache,
     supabase, ANONYMOUS_ADMIN_ID, pendingVerifications
 };

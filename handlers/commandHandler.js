@@ -1,5 +1,5 @@
 const { bot, escapeHTML, getUserName, getSenderData, sendTimedMessage, deleteMsg, isAdmin } = require('../utils');
-const { getUser, updateUser, getBadWords, supabase, commandCooldowns, getNextLevelXp, ANONYMOUS_ADMIN_ID, claimDailyBonus } = require('../database');
+const { getUser, updateUser, getBadWords, supabase, commandCooldowns, getNextLevelXp, ANONYMOUS_ADMIN_ID, claimDailyBonus, getChatSettings, updateChatSettings } = require('../database');
 
 function registerCommands() {
     bot.onText(/^\/help$/, async (msg) => {
@@ -16,7 +16,8 @@ function registerCommands() {
             `🔹 <code>/dashboard</code> — Панель управления (Mini App)\n\n` +
             `🛡 <b>Управление (Админ):</b>\n` +
             `🔸 <code>/ban</code>, <code>/unban</code> — Управление доступом\n` +
-            `🔸 <code>/banword</code>, <code>/unbanword</code>, <code>/listwords</code> — Фильтр мата\n\n` +
+            `🔸 <code>/banword</code>, <code>/unbanword</code>, <code>/listwords</code> — Фильтр мата\n` +
+            `🔸 <code>/linkfilter [on|off]</code> — 🔗 Разрешить/запретить ссылки t.me\n\n` +
             `━━━━━━━━━━━━━━━━━━\n` +
             `<i>Я защищаю этот чат и помогаю общаться!</i>`;
         bot.sendMessage(chatId, helpText, { parse_mode: 'HTML' });
@@ -143,6 +144,50 @@ function registerCommands() {
             sendTimedMessage(chatId, `❌ Ошибка при получении бонуса.`, 10000);
         }
     });
+
+    // /linkfilter [on|off] (Управление фильтром ссылок)
+    bot.onText(/^\/linkfilter(?:\s+(on|off))?$/, async (msg, match) => {
+        const chatId = msg.chat.id;
+        const { userId } = getSenderData(msg);
+        deleteMsg(chatId, msg.message_id);
+
+        // Проверяем, что пользователь — админ
+        const adminCheck = await isAdmin(chatId, userId);
+        if (!adminCheck) {
+            return sendTimedMessage(chatId, '🚫 <b>Эта команда только для администраторов.</b>', 10000, { parse_mode: 'HTML' });
+        }
+
+        const arg = match[1]; // 'on', 'off', или undefined
+
+        if (!arg) {
+            // Показываем текущий статус
+            const settings = await getChatSettings(chatId);
+            const status = settings.link_filter_enabled ? '🔴 Включён (ссылки запрещены для всех, кроме админов)' : '🟢 Выключен (все могут отправлять ссылки)';
+            return sendTimedMessage(chatId,
+                `🔗 <b>Фильтр Telegram-ссылок</b>\n` +
+                `━━━━━━━━━━━━━━━━━━\n` +
+                `Статус: ${status}\n\n` +
+                `Для изменения:\n` +
+                `<code>/linkfilter on</code> — запретить ссылки\n` +
+                `<code>/linkfilter off</code> — разрешить ссылки`,
+                30000, { parse_mode: 'HTML' });
+        }
+
+        const enable = arg === 'on';
+        const success = await updateChatSettings(chatId, { link_filter_enabled: enable });
+
+        if (success) {
+            const statusMsg = enable
+                ? '🔴 <b>Фильтр ссылок включён.</b> Теперь обычные пользователи не могут отправлять t.me ссылки.'
+                : '🟢 <b>Фильтр ссылок выключен.</b> Теперь все могут отправлять t.me ссылки.';
+            sendTimedMessage(chatId, statusMsg, 20000, { parse_mode: 'HTML' });
+        } else {
+            sendTimedMessage(chatId, '❌ Ошибка при обновлении настроек.', 10000);
+        }
+    });
+
+    // <help>в /help добавим упоминание о /linkfilter - обновляем текст /help
+
 
     // /me (Профиль)
     bot.onText(/^\/me(?:\s+(.+))?$/, async (msg, match) => {
