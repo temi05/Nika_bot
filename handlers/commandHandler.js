@@ -415,11 +415,26 @@ function registerCommands() {
     // /kto
     bot.onText(/\/kto (.+)/, async (msg, match) => {
         const chatId = msg.chat.id;
+        
+        // Проверка общего кулдауна на весь чат (60 секунд)
+        const now = Date.now();
+        const cooldown = 60000;
+        if (!commandCooldowns[chatId]) commandCooldowns[chatId] = {};
+        
+        if (commandCooldowns[chatId].kto && (now - commandCooldowns[chatId].kto < cooldown)) {
+            const remaining = Math.ceil((cooldown - (now - commandCooldowns[chatId].kto)) / 1000);
+            deleteMsg(chatId, msg.message_id);
+            return sendTimedMessage(chatId, `⏳ Команда /kto на перезарядке! Подождите еще <code>${remaining} сек.</code> для всех.`, 10000, { parse_mode: 'HTML' });
+        }
+
+        commandCooldowns[chatId].kto = now;
         deleteMsg(chatId, msg.message_id);
+        
         const { data: users } = await supabase.from('users').select('*').eq('chat_id', chatId);
         if (!users || users.length === 0) return;
+        
         const randomUser = users[Math.floor(Math.random() * users.length)];
-        sendTimedMessage(chatId, `🤔 Я думаю, что ${match[1]} — это ${getUserName(randomUser)}!`, 60000);
+        sendTimedMessage(chatId, `🤔 Я думаю, что <b>${match[1]}</b> — это <b>${escapeHTML(getUserName(randomUser))}</b>!`, 60000, { parse_mode: 'HTML' });
     });
 
 

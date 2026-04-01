@@ -118,12 +118,16 @@ async function handleAIChat(msg) {
         if (!messageCount[chatId]) messageCount[chatId] = 0;
         messageCount[chatId]++;
 
-        if (messageCount[chatId] >= 10) {
-            // Раз в 10 сообщений обновляем дневник в БД
+        console.log(`[AI Memory] Сообщений в чате ${chatId}: ${messageCount[chatId]}/5`);
+
+        if (messageCount[chatId] >= 5) {
+            console.log(`[AI Memory] Запуск обновления дневника для чата ${chatId}...`);
+            // Раз в 5 сообщений обновляем дневник в БД
             await summarizeMemory(chatId, chatHistory[chatId], longTermMemory);
             messageCount[chatId] = 0;
             // Очищаем локальную историю (оставляем только последние 2 для плавности)
             chatHistory[chatId] = chatHistory[chatId].slice(-2);
+            console.log(`[AI Memory] Дневник чата ${chatId} успешно обновлен в БД.`);
         }
 
     } catch (error) {
