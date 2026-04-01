@@ -235,6 +235,26 @@ async function setBio(chatId, userId, bio) {
     return true;
 }
 
+async function setBioByUsernameOrName(chatId, queryName, bio) {
+    if (!queryName) return null;
+    let cleanName = queryName.replace('@', ''); // Убираем @ если есть
+    
+    // Ищем по username или first_name
+    const { data, error } = await supabase
+        .from('users')
+        .select('id, first_name')
+        .eq('chat_id', chatId)
+        .or(`username.ilike.%${cleanName}%,first_name.ilike.%${cleanName}%`)
+        .limit(1)
+        .maybeSingle();
+
+    if (!data || error) return null;
+
+    await updateUser(data.id, { bio });
+    return data.first_name; // Возвращаем имя того, кому поменяли
+}
+
+
 async function getBirthdaysToday(chatId) {
     const today = new Date();
     const day = String(today.getDate()).padStart(2, '0');
@@ -272,7 +292,7 @@ async function updateChatMemory(chatId, memory) {
 module.exports = {
     getUser, updateUser, getBadWords, getNextLevelXp, claimDailyBonus,
     getChatSettings, updateChatSettings,
-    setBirthday, setBio, getBirthdaysToday,
+    setBirthday, setBio, getBirthdaysToday, setBioByUsernameOrName,
     getChatMemory, updateChatMemory,
     messageAuthors, reactionCooldowns, commandCooldowns, userCache,
     supabase, ANONYMOUS_ADMIN_ID, pendingVerifications

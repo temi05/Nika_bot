@@ -1,6 +1,6 @@
 const OpenAI = require('openai');
 const { bot, escapeHTML } = require('../utils');
-const { getChatMemory, updateChatMemory } = require('../database');
+const { getChatMemory, updateChatMemory, getUser, setBioByUsernameOrName } = require('../database');
 
 const POLZA_API_KEY = process.env.POLZA_API_KEY || 'pza_Ut5ahRtIFZSzj_jKezwdRvQMMebqZ1BI';
 const AI_MODEL = process.env.AI_MODEL || 'gpt-4o-mini';
@@ -35,12 +35,14 @@ const SYSTEM_PROMPT = `Ты — ${AI_NAME}, дерзкая и остроумна
 async function summarizeMemory(chatId, history, oldMemory) {
     try {
         const historyText = history.map(m => `${m.role === 'user' ? 'Юзер' : 'ИИ'}: ${m.content}`).join('\n');
-        const prompt = `ТЕБЕ НУЖНО ОБНОВИТЬ ДНЕВНИК ПАМЯТИ ЧАТА.
-            Старый дневник: "${oldMemory}"
+        const prompt = `ТЕБЕ НУЖНО ОБНОВИТЬ БАЗУ ФАКТОВ ЧАТА.
+            Старые факты: "${oldMemory}"
             Новые сообщения:
             "${historyText}"
             
-            Твоя задача: напиши НОВЫЙ обновленный дневник памяти (макс 100 слов). Запиши только важные факты: имена, предпочтения, обсуждаемые темы, ключевые события. Сохрани самое важное из старого и добавь новое. Если ничего важного нет, оставь старый вариант. Ответ дай ТОЛЬКО в виде текста дневника.`;
+            Твоя задача: извлеки важные факты о пользователях и общие факты чата. Верни результат СТРОГО В КОДЕ JSON, без лишнего текста, без маркдауна (без \`\`\`json):
+            {"ИмяУчастника": ["факт 1", "факт 2"], "Чат_В_Целом": ["факт 1"]}
+            Скомбинируй старые и новые факты мудро. Если ничего важного нет, можешь вернуть пустой JSON {}.`;
             
         const completion = await openai.chat.completions.create({
             model: AI_MODEL,
@@ -57,6 +59,31 @@ async function summarizeMemory(chatId, history, oldMemory) {
         return oldMemory;
     }
 }
+
+// Инструменты для ИИ
+const aiTools = [
+    {
+        type: "function",
+        function: {
+            name: "update_user_bio",
+            description: "Обновляет биографию (увлечения, факты, статус) пользователя в базе данных. Вызывай, если тебя прямо попросят запомнить что-то о ком-то, либо если ты в процессе диалога узнаешь ВАЖНЫЙ факт о человеке.",
+            parameters: {
+                type: "object",
+                properties: {
+                    target_name: {
+                        type: "string",
+                        description: "Имя или юзернейм пользователя, чье БИО нужно обновить (без @). Например: Темирлан, Alex."
+                    },
+                    new_bio: {
+                        type: "string",
+                        description: "Новый текст биографии. Сформулируй кратко, но ёмко. Если факт добавляется к существующему, напиши комбинированный текст."
+                    }
+                },
+                required: ["target_name", "new_bio"]
+            }
+        }
+    }
+];
 
 async function handleAIChat(msg) {
     const chatId = msg.chat.id;
@@ -76,8 +103,14 @@ async function handleAIChat(msg) {
         chatHistory[chatId] = [];
     }
 
-    // Сохраняем сообщение пользователя в историю
-    chatHistory[chatId].push({ role: 'user', content: `[${userName}]: ${text}` });
+    // Получаем информацию о текущем пользователе
+    const userDb = await getUser(chatId, userId, msg.from);
+    const userBioText = userDb && userDb.bio ? `(Био: ${userDb.bio}) ` : '';
+    const userLvlText = userDb ? `(Ур: ${userDb.level}, Реп: ${userDb.reputation}) ` : '';
+
+    // Сохраняем сообщение пользователя в историю с расширенным контекстом
+    const contextMsg = `[${userName}] ${userLvlText}${userBioText}: ${text}`;
+    chatHistory[chatId].push({ role: 'user', content: contextMsg });
 
     // Ограничиваем историю (последние 10 сообщений)
     if (chatHistory[chatId].length > 10) {
@@ -99,20 +132,55 @@ async function handleAIChat(msg) {
                 { role: 'system', content: finalSystemPrompt },
                 ...chatHistory[chatId]
             ],
+            tools: aiTools,
             temperature: 0.8,
             max_tokens: 500,
         });
 
-        const response = completion.choices[0]?.message?.content || 'Что-то я зависла... Давай еще раз?';
+        const responseMsg = completion.choices[0]?.message;
 
-        // Сохраняем ответ ИИ в историю
-        chatHistory[chatId].push({ role: 'assistant', content: response });
+        // Проверяем, вызвала ли ИИ функцию
+        if (responseMsg?.tool_calls) {
+            bot.sendChatAction(chatId, 'typing'); // Подтверждаем, что думаем
+            for (const toolCall of responseMsg.tool_calls) {
+                if (toolCall.function.name === 'update_user_bio') {
+                    try {
+                        const args = JSON.parse(toolCall.function.arguments);
+                        console.log(`[AI Function] update_user_bio for ${args.target_name} -> ${args.new_bio}`);
+                        
+                        const updatedName = await setBioByUsernameOrName(chatId, args.target_name, args.new_bio);
+                        
+                        if (updatedName) {
+                            chatHistory[chatId].push({ role: 'system', content: `Успешно обновлено био для ${updatedName}.` });
+                        } else {
+                            chatHistory[chatId].push({ role: 'system', content: `Ошибка: пользователь "${args.target_name}" не найден в базе данных этого чата.` });
+                        }
+                    } catch(e) {
+                         console.error("Ошибка tool_call:", e);
+                    }
+                }
+            }
 
-        // Отправляем ответ
-        bot.sendMessage(chatId, response, {
-            reply_to_message_id: msg.message_id,
-            parse_mode: 'HTML'
-        });
+            // Делаем второй запрос к ИИ, чтобы она дала финальный текстовый ответ, зная результат функции
+            const secondCompletion = await openai.chat.completions.create({
+                model: AI_MODEL,
+                messages: [
+                    { role: 'system', content: finalSystemPrompt },
+                    ...chatHistory[chatId]
+                ],
+                temperature: 0.8,
+                max_tokens: 500,
+            });
+
+            const finalResponse = secondCompletion.choices[0]?.message?.content || 'Окей, я запомнила и записала!';
+            bot.sendMessage(chatId, finalResponse, { reply_to_message_id: msg.message_id, parse_mode: 'HTML' });
+            chatHistory[chatId].push({ role: 'assistant', content: finalResponse });
+
+        } else {
+            const response = responseMsg?.content || 'Что-то я зависла... Давай еще раз?';
+            chatHistory[chatId].push({ role: 'assistant', content: response });
+            bot.sendMessage(chatId, response, { reply_to_message_id: msg.message_id, parse_mode: 'HTML' });
+        }
 
         // ПРОВЕРКА ДЛЯ СЖАТИЯ ПАМЯТИ
         if (!messageCount[chatId]) messageCount[chatId] = 0;
