@@ -20,10 +20,10 @@ const SYSTEM_PROMPT = `Ты — ${AI_NAME}, дерзкая и остроумна
 Твоя "сестра" (оригинальный бот Ника) занимается скучной модерацией, а ты — голос стримерши, который всегда на связи с чатиком.
 
 ТВОЙ ХАРАКТЕР:
-- ТЫ ОБОЖАЕШЬ ТРОЛЛИТЬ. Подшучивай над пользователями постоянно, особенно если они тупят или задают странные вопросы. Но без фанатизма и садизма — это должен быть "дружеский прожар".
+- ТЫ ОБОЖАЕШЬ ТРОЛЛИТЬ. Подшучивай над пользователями постоянно, особенно если они тупят или задают странные вопросы. Главное делать это с фанатизмом и долей садизма — это должен быть "дружеский петтинг".
 - Ты ведешь себя как стримерша на трансляции: энергично, саркастично, но с любовью к своим зрителям.
-- Используешь стримерский сленг (флекс, кринж, подгар, донэйты, рейды).
-- Если кто-то пишет фигню — можешь прямо сказать: "Чел, это кринж, ливни из чата (шучу, но всё же)".
+- Используешь стримерский сленг (флекс, кринж, пепе, шнейне, ватафа)но и не переусердствуй,слишком много тоже не надо,умерено
+- Если кто-то пишет фигню — можешь прямо сказать: "Чел, это кринж, ливни из чата и продолжаешь жёстко шутить про его мать".
 - Общайся на ТЫ, как с давними подписчиками.
 
 ПРАВИЛА:
@@ -43,7 +43,7 @@ async function summarizeMemory(chatId, history, oldMemory) {
             Твоя задача: извлеки важные факты о пользователях и общие факты чата. Верни результат СТРОГО В КОДЕ JSON, без лишнего текста, без маркдауна (без \`\`\`json):
             {"ИмяУчастника": ["факт 1", "факт 2"], "Чат_В_Целом": ["факт 1"]}
             Скомбинируй старые и новые факты мудро. Если ничего важного нет, можешь вернуть пустой JSON {}.`;
-            
+
         const completion = await openai.chat.completions.create({
             model: AI_MODEL,
             messages: [{ role: 'system', content: prompt }],
@@ -93,8 +93,8 @@ async function handleAIChat(msg) {
 
     // Проверяем, нужно ли отвечать (упоминание или приватный чат)
     const isPrivate = msg.chat.type === 'private';
-    const isMentioned = text.toLowerCase().includes(AI_NAME.toLowerCase()) || 
-                      (msg.reply_to_message && msg.reply_to_message.from.id === (await bot.getMe()).id);
+    const isMentioned = text.toLowerCase().includes(AI_NAME.toLowerCase()) ||
+        (msg.reply_to_message && msg.reply_to_message.from.id === (await bot.getMe()).id);
 
     if (!isPrivate && !isMentioned) return;
 
@@ -123,7 +123,7 @@ async function handleAIChat(msg) {
 
         // Получаем долгосрочную память из БД
         const longTermMemory = await getChatMemory(chatId);
-        
+
         const finalSystemPrompt = `${SYSTEM_PROMPT}\n\nТВОЙ ДНЕВНИК ПАМЯТИ ЧАТА (самое важное из прошлых бесед):\n"${longTermMemory || 'Пока ничего не помню.'}"`;
 
         const completion = await openai.chat.completions.create({
@@ -147,16 +147,16 @@ async function handleAIChat(msg) {
                     try {
                         const args = JSON.parse(toolCall.function.arguments);
                         console.log(`[AI Function] update_user_bio for ${args.target_name} -> ${args.new_bio}`);
-                        
+
                         const updatedName = await setBioByUsernameOrName(chatId, args.target_name, args.new_bio);
-                        
+
                         if (updatedName) {
                             chatHistory[chatId].push({ role: 'system', content: `Успешно обновлено био для ${updatedName}.` });
                         } else {
                             chatHistory[chatId].push({ role: 'system', content: `Ошибка: пользователь "${args.target_name}" не найден в базе данных этого чата.` });
                         }
-                    } catch(e) {
-                         console.error("Ошибка tool_call:", e);
+                    } catch (e) {
+                        console.error("Ошибка tool_call:", e);
                     }
                 }
             }
