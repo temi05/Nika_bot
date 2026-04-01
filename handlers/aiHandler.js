@@ -1,5 +1,6 @@
 const OpenAI = require('openai');
 const { bot, escapeHTML } = require('../utils');
+const { getChatMemory, updateChatMemory } = require('../database');
 
 const POLZA_API_KEY = process.env.POLZA_API_KEY || 'pza_Ut5ahRtIFZSzj_jKezwdRvQMMebqZ1BI';
 const AI_MODEL = process.env.AI_MODEL || 'gpt-4o-mini';
@@ -10,8 +11,9 @@ const openai = new OpenAI({
     baseURL: 'https://polza.ai/api/v1',
 });
 
-// История диалогов в памяти (можно ограничить количество сообщений)
+// История диалогов в памяти (RAM — последние несколько сообщений для текущей беседы)
 const chatHistory = {}; // { chatId: [{role, content}] }
+const messageCount = {}; // { chatId: counter }
 
 const SYSTEM_PROMPT = `Ты — ${AI_NAME}, дерзкая и остроумная ИИ-версия Ники в групповом чате Telegram.
 Твоя "сестра" Ника занимается скучными делами (XP, модерация), а ты здесь для живого и весёлого общения.
@@ -28,6 +30,32 @@ const SYSTEM_PROMPT = `Ты — ${AI_NAME}, дерзкая и остроумна
 - Если просят что-то серьезное — отвечай, но добавь щепотку иронии.
 - Общайся на ТЫ, если не просят иначе.
 `;
+
+async function summarizeMemory(chatId, history, oldMemory) {
+    try {
+        const historyText = history.map(m => `${m.role === 'user' ? 'Юзер' : 'ИИ'}: ${m.content}`).join('\n');
+        const prompt = `ТЕБЕ НУЖНО ОБНОВИТЬ ДНЕВНИК ПАМЯТИ ЧАТА.
+            Старый дневник: "${oldMemory}"
+            Новые сообщения:
+            "${historyText}"
+            
+            Твоя задача: напиши НОВЫЙ обновленный дневник памяти (макс 100 слов). Запиши только важные факты: имена, предпочтения, обсуждаемые темы, ключевые события. Сохрани самое важное из старого и добавь новое. Если ничего важного нет, оставь старый вариант. Ответ дай ТОЛЬКО в виде текста дневника.`;
+            
+        const completion = await openai.chat.completions.create({
+            model: AI_MODEL,
+            messages: [{ role: 'system', content: prompt }],
+            max_tokens: 300,
+            temperature: 0.5,
+        });
+
+        const newMemory = completion.choices[0]?.message?.content || oldMemory;
+        await updateChatMemory(chatId, newMemory);
+        return newMemory;
+    } catch (e) {
+        console.error('Ошибка суммаризации:', e);
+        return oldMemory;
+    }
+}
 
 async function handleAIChat(msg) {
     const chatId = msg.chat.id;
@@ -59,10 +87,15 @@ async function handleAIChat(msg) {
         // Показываем статус "печатает"
         bot.sendChatAction(chatId, 'typing');
 
+        // Получаем долгосрочную память из БД
+        const longTermMemory = await getChatMemory(chatId);
+        
+        const finalSystemPrompt = `${SYSTEM_PROMPT}\n\nТВОЙ ДНЕВНИК ПАМЯТИ ЧАТА (самое важное из прошлых бесед):\n"${longTermMemory || 'Пока ничего не помню.'}"`;
+
         const completion = await openai.chat.completions.create({
             model: AI_MODEL,
             messages: [
-                { role: 'system', content: SYSTEM_PROMPT },
+                { role: 'system', content: finalSystemPrompt },
                 ...chatHistory[chatId]
             ],
             temperature: 0.8,
@@ -79,6 +112,18 @@ async function handleAIChat(msg) {
             reply_to_message_id: msg.message_id,
             parse_mode: 'HTML'
         });
+
+        // ПРОВЕРКА ДЛЯ СЖАТИЯ ПАМЯТИ
+        if (!messageCount[chatId]) messageCount[chatId] = 0;
+        messageCount[chatId]++;
+
+        if (messageCount[chatId] >= 10) {
+            // Раз в 10 сообщений обновляем дневник в БД
+            await summarizeMemory(chatId, chatHistory[chatId], longTermMemory);
+            messageCount[chatId] = 0;
+            // Очищаем локальную историю (оставляем только последние 2 для плавности)
+            chatHistory[chatId] = chatHistory[chatId].slice(-2);
+        }
 
     } catch (error) {
         console.error('Ошибка ИИ (Polza):', error.message);

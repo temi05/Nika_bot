@@ -253,10 +253,27 @@ async function getBirthdaysToday(chatId) {
 
 const { ANONYMOUS_ADMIN_ID } = require('./config');
 
+async function getChatMemory(chatId) {
+    const { data } = await supabase
+        .from('chats')
+        .select('ai_memory')
+        .eq('chat_id', chatId)
+        .single();
+    return data?.ai_memory || '';
+}
+
+async function updateChatMemory(chatId, memory) {
+    await supabase
+        .from('chats')
+        .update({ ai_memory: memory })
+        .eq('chat_id', chatId);
+}
+
 module.exports = {
     getUser, updateUser, getBadWords, getNextLevelXp, claimDailyBonus,
     getChatSettings, updateChatSettings,
     setBirthday, setBio, getBirthdaysToday,
+    getChatMemory, updateChatMemory,
     messageAuthors, reactionCooldowns, commandCooldowns, userCache,
     supabase, ANONYMOUS_ADMIN_ID, pendingVerifications
 };
