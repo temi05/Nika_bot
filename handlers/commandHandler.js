@@ -9,8 +9,9 @@ function registerCommands() {
             `👤 <b>Для пользователей:</b>\n` +
             `🔹 <code>/me</code> — Мой профиль и статистика\n` +
             `🔹 <code>/top</code> — Рейтинг самых активных\n` +
-            `🔹 <code>/shop</code> — Магазин за печеньки 🍪\n` +
             `🔹 <code>/daily</code> — Ежедневный бонус 🎁\n` +
+            `🔹 <code>/mybirthday DD.MM</code> — Твой день рождения\n` +
+            `🔹 <code>/bio &lt;текст&gt;</code> — Кратко о себе\n` +
             `🔹 <code>/give &lt;кол-во&gt;</code> — Передать печеньки (реплай)\n` +
             `🔹 <code>/kto &lt;текст&gt;</code> — Узнать, кто...\n` +
             `🔹 <code>/dashboard</code> — Панель управления (Mini App)\n\n` +
@@ -105,6 +106,42 @@ function registerCommands() {
                     ]
                 }
             });
+        }
+    });
+
+    // /mybirthday DD.MM или DD.MM.YYYY
+    bot.onText(/^\/mybirthday\s+(\d{2}\.\d{2}(?:\.\d{4})?)$/, async (msg, match) => {
+        const chatId = msg.chat.id;
+        const { userId, user } = getSenderData(msg);
+        const birthday = match[1];
+        deleteMsg(chatId, msg.message_id);
+
+        const { setBirthday } = require('../database');
+        const success = await setBirthday(chatId, userId, birthday);
+
+        if (success) {
+            sendTimedMessage(chatId, `✅ <b>${escapeHTML(getUserName(user))}</b>, я запомнила! Твой день рождения <code>${birthday}</code>. Обязательно поздравлю! 🥳`, 15000, { parse_mode: 'HTML' });
+        } else {
+            sendTimedMessage(chatId, `❌ Ошибка при сохранении даты рождения.`, 10000);
+        }
+    });
+
+    // /bio <текст>
+    bot.onText(/^\/bio\s+(.+)$/, async (msg, match) => {
+        const chatId = msg.chat.id;
+        const { userId, user } = getSenderData(msg);
+        let bio = match[1].trim();
+        deleteMsg(chatId, msg.message_id);
+
+        if (bio.length > 100) bio = bio.substring(0, 97) + '...';
+
+        const { setBio } = require('../database');
+        const success = await setBio(chatId, userId, bio);
+
+        if (success) {
+            sendTimedMessage(chatId, `✅ <b>${escapeHTML(getUserName(user))}</b>, твоё био обновлено! Проверь его в <code>/me</code>.`, 15000, { parse_mode: 'HTML' });
+        } else {
+            sendTimedMessage(chatId, `❌ Ошибка при сохранении био.`, 10000);
         }
     });
 
@@ -242,17 +279,37 @@ function registerCommands() {
 
         let roleText = userId === ANONYMOUS_ADMIN_ID ? "👻 Анонимный Админ" : (await isAdmin(chatId, userId) ? "🛡 Администратор" : "👤 Пользователь");
         
+        // Определение ранга
+        const getRank = (level) => {
+            if (level >= 50) return "🌌 Легенда";
+            if (level >= 30) return "💎 Элита";
+            if (level >= 20) return "🔥 Мастер";
+            if (level >= 10) return "🌟 Опытный";
+            if (level >= 5) return "🌱 Активный";
+            return "👶 Новичок";
+        };
+
         const isSelf = userId === requester.userId;
         const headerTitle = isSelf ? "МОЙ ПРОФИЛЬ" : "ПРОФИЛЬ ПОЛЬЗОВАТЕЛЯ";
         
         let message = `💠 <b>${headerTitle}</b>\n` +
             `━━━━━━━━━━━━━━━━━━\n` +
             `📝 <b>Имя:</b> <code>${escapeHTML(getUserName(targetUser))}</code>\n` +
-            `🎖 <b>Роль:</b> <i>${roleText}</i>\n` +
+            `🏅 <b>Ранг:</b> <i>${getRank(user.level)}</i>\n` +
+            `🎖 <b>Роль:</b> <i>${roleText}</i>\n`;
+
+        if (user.birthday) {
+            message += `🎂 <b>День рождения:</b> <code>${user.birthday}</code>\n`;
+        }
+
+        if (user.bio) {
+            message += `💬 <b>О себе:</b> <i>${escapeHTML(user.bio)}</i>\n`;
+        }
+
+        message += `━━━━━━━━━━━━━━━━━━\n` +
             `🌟 <b>Уровень:</b> <b>${user.level}</b>\n` +
-            `📊 <b>Прогресс:</b> <code>${progressBar}</code> ${Math.floor(progressPercent)}%\n\n`;
-            
-        message += `✨ <b>Опыт:</b> <code>${user.xp.toLocaleString()} / ${nextXp.toLocaleString()} XP</code>\n` +
+            `📊 <b>Прогресс:</b> <code>${progressBar}</code> ${Math.floor(progressPercent)}%\n` +
+            `✨ <b>Опыт:</b> <code>${user.xp.toLocaleString()} / ${nextXp.toLocaleString()} XP</code>\n` +
             `🍪 <b>Печеньки:</b> <code>${user.reputation.toLocaleString()} шт.</code>\n`;
             
         if (user.warns > 0) {

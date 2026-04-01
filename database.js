@@ -48,7 +48,8 @@ async function getUser(chatId, userId, userInfo = {}) {
             username: userInfo.username || '',
             first_name: name,
             photo_url: userInfo.photo_url || '',
-            xp: 0, level: 1, reputation: 0, warns: 0, last_message_time: 0
+            xp: 0, level: 1, reputation: 0, warns: 0, last_message_time: 0,
+            birthday: null, bio: '', last_ai_time: 0
         };
         const { data, error: createError } = await supabase
             .from('users').insert([newUser]).select().single();
@@ -219,11 +220,43 @@ function getNextLevelXp(level) {
     return 50 * level * level + 50 * level;
 }
 
+// Новые функции для профиля
+async function setBirthday(chatId, userId, birthday) {
+    const user = await getUser(chatId, userId);
+    if (!user) return false;
+    await updateUser(user.id, { birthday });
+    return true;
+}
+
+async function setBio(chatId, userId, bio) {
+    const user = await getUser(chatId, userId);
+    if (!user) return false;
+    await updateUser(user.id, { bio });
+    return true;
+}
+
+async function getBirthdaysToday(chatId) {
+    const today = new Date();
+    const day = String(today.getDate()).padStart(2, '0');
+    const month = String(today.getMonth() + 1).padStart(2, '0');
+    const dateStr = `${day}.${month}`;
+
+    const { data, error } = await supabase
+        .from('users')
+        .select('*')
+        .eq('chat_id', chatId)
+        .ilike('birthday', `${dateStr}%`);
+    
+    if (error) return [];
+    return data;
+}
+
 const { ANONYMOUS_ADMIN_ID } = require('./config');
 
 module.exports = {
     getUser, updateUser, getBadWords, getNextLevelXp, claimDailyBonus,
     getChatSettings, updateChatSettings,
+    setBirthday, setBio, getBirthdaysToday,
     messageAuthors, reactionCooldowns, commandCooldowns, userCache,
     supabase, ANONYMOUS_ADMIN_ID, pendingVerifications
 };

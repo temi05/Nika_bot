@@ -1,5 +1,8 @@
 const { bot, escapeHTML, getUserName, getSenderData, sendTimedMessage, isAdmin } = require('../utils');
-const { getUser, updateUser, getBadWords, messageAuthors, reactionCooldowns, ANONYMOUS_ADMIN_ID, pendingVerifications, getChatSettings } = require('../database');
+const { getUser, updateUser, getBadWords, messageAuthors, reactionCooldowns, ANONYMOUS_ADMIN_ID, pendingVerifications, getChatSettings, getBirthdaysToday } = require('../database');
+const { handleAIChat } = require('./aiHandler');
+
+let lastBirthdayCheck = {}; // { chatId: dateString }
 
 function registerMessageHandlers() {
     bot.on('message', async (msg) => {
@@ -106,6 +109,32 @@ function registerMessageHandlers() {
                 }
             }
         }
+
+        // 5. BIRTHDAY CHECK (раз в день на первое сообщение)
+        const todayStr = new Date().toLocaleDateString();
+        if (lastBirthdayCheck[chatId] !== todayStr) {
+            const bdays = await getBirthdaysToday(chatId);
+            if (bdays && bdays.length > 0) {
+                let bdayMsg = `🎂 <b>СЕГОДНЯ ДЕНЬ РОЖДЕНИЯ!</b> 🎉\n━━━━━━━━━━━━━━━━━━\n`;
+                bdays.forEach(u => {
+                    let ageText = '';
+                    if (u.birthday && u.birthday.length === 10) {
+                        const birthYear = parseInt(u.birthday.split('.')[2]);
+                        const currentYear = new Date().getFullYear();
+                        const age = currentYear - birthYear;
+                        ageText = ` (${age} лет)`;
+                    }
+                    bdayMsg += `🌟 Поздравляем <b>${escapeHTML(getUserName(u))}</b>${ageText}! С твоим днем! 🥳🎁\n`;
+                });
+                bdayMsg += `━━━━━━━━━━━━━━━━━━\n<i>Желаем море печенек и высокого уровня во всём!</i>`;
+                bot.sendMessage(chatId, bdayMsg, { parse_mode: 'HTML' });
+            }
+            lastBirthdayCheck[chatId] = todayStr;
+        }
+
+        // 6. AI CHAT (НейроНика)
+        // Вызываем ИИ только если это не команда и сообщение прошло фильтры
+        await handleAIChat(msg);
     });
 }
 
