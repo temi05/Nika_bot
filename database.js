@@ -49,7 +49,7 @@ async function getUser(chatId, userId, userInfo = {}) {
             first_name: name,
             photo_url: userInfo.photo_url || '',
             xp: 0, level: 1, reputation: 0, warns: 0, last_message_time: 0,
-            birthday: null, bio: '', last_ai_time: 0
+            birthday: null, bio: '', ai_notes: '', last_ai_time: 0
         };
         const { data, error: createError } = await supabase
             .from('users').insert([newUser]).select().single();
@@ -254,6 +254,25 @@ async function setBioByUsernameOrName(chatId, queryName, bio) {
     return data.first_name; // Возвращаем имя того, кому поменяли
 }
 
+async function setNotesByUsernameOrName(chatId, queryName, notes) {
+    if (!queryName) return null;
+    let cleanName = queryName.replace('@', '');
+    
+    const { data, error } = await supabase
+        .from('users')
+        .select('id, first_name')
+        .eq('chat_id', chatId)
+        .or(`username.ilike.%${cleanName}%,first_name.ilike.%${cleanName}%`)
+        .limit(1)
+        .maybeSingle();
+
+    if (!data || error) return null;
+
+    await updateUser(data.id, { ai_notes: notes });
+    return data.first_name;
+}
+
+
 
 async function getBirthdaysToday(chatId) {
     const today = new Date();
@@ -292,7 +311,7 @@ async function updateChatMemory(chatId, memory) {
 module.exports = {
     getUser, updateUser, getBadWords, getNextLevelXp, claimDailyBonus,
     getChatSettings, updateChatSettings,
-    setBirthday, setBio, getBirthdaysToday, setBioByUsernameOrName,
+    setBirthday, setBio, getBirthdaysToday, setBioByUsernameOrName, setNotesByUsernameOrName,
     getChatMemory, updateChatMemory,
     messageAuthors, reactionCooldowns, commandCooldowns, userCache,
     supabase, ANONYMOUS_ADMIN_ID, pendingVerifications

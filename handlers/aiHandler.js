@@ -1,6 +1,6 @@
 const OpenAI = require('openai');
 const { bot, escapeHTML } = require('../utils');
-const { getChatMemory, updateChatMemory, getUser, setBioByUsernameOrName } = require('../database');
+const { getChatMemory, updateChatMemory, getUser, setBioByUsernameOrName, setNotesByUsernameOrName } = require('../database');
 
 const POLZA_API_KEY = process.env.POLZA_API_KEY || 'pza_Ut5ahRtIFZSzj_jKezwdRvQMMebqZ1BI';
 const AI_MODEL = process.env.AI_MODEL || 'gpt-4o-mini';
@@ -30,6 +30,12 @@ const SYSTEM_PROMPT = `Ты — ${AI_NAME}, дерзкая и остроумна
 - Никакой политики и жести.
 - Если спрашивают о стримах — отвечай уклончиво, но остроумно.
 - Ты представляешь бренд Ники — будь дерзкой, уверенной и харизматичной.
+
+ТВОЯ ПАМЯТЬ:
+1. У каждого юзера есть Публичное БИО (команда /bio). Это то, что он сам о себе пишет или просит тебя записать. Видно всем.
+2. У каждого юзера есть ТВОИ ЗАМЕТКИ (Личное Досье). Это твои "секретные" наблюдения за ним. Записывай туда его характер, предпочтения, странности или важные секреты. Это доступно через команду /notes.
+- ТЫ МОЖЕШЬ САМА обновлять и то, и другое через инструменты (tools), если считаешь нужным или тебя попросили.
+- Используй знания из Досье в разговоре, чтобы казаться умнее и внимательнее.
 `;
 
 async function summarizeMemory(chatId, history, oldMemory) {
@@ -60,7 +66,6 @@ async function summarizeMemory(chatId, history, oldMemory) {
     }
 }
 
-// Инструменты для ИИ
 const aiTools = [
     {
         type: "function",
@@ -72,14 +77,35 @@ const aiTools = [
                 properties: {
                     target_name: {
                         type: "string",
-                        description: "Имя или юзернейм пользователя, чье БИО нужно обновить (без @). Например: Темирлан, Alex."
+                        description: "Имя или юзернейм пользователя (без @)."
                     },
                     new_bio: {
                         type: "string",
-                        description: "Новый текст биографии. Сформулируй кратко, но ёмко. Если факт добавляется к существующему, напиши комбинированный текст."
+                        description: "Новый текст биографии. Сформулируй кратко, но ёмко."
                     }
                 },
                 required: ["target_name", "new_bio"]
+            }
+        }
+    },
+    {
+        type: "function",
+        function: {
+            name: "update_user_notes",
+            description: "Обновляет твои личные заметки (досье) о пользователе. Записывай сюда его предпочтения, характер, важные мелочи, которые помогут тебе лучше его подкалывать или понимать в будущем.",
+            parameters: {
+                type: "object",
+                properties: {
+                    target_name: {
+                        type: "string",
+                        description: "Имя или юзернейм пользователя (без @)."
+                    },
+                    new_notes: {
+                        type: "string",
+                        description: "Текст твоих заметок. Пиши в своем стиле, но информативно. Если есть старые данные, дополни их."
+                    }
+                },
+                required: ["target_name", "new_notes"]
             }
         }
     }
@@ -105,11 +131,12 @@ async function handleAIChat(msg) {
 
     // Получаем информацию о текущем пользователе
     const userDb = await getUser(chatId, userId, msg.from);
-    const userBioText = userDb && userDb.bio ? `(Био: ${userDb.bio}) ` : '';
-    const userLvlText = userDb ? `(Ур: ${userDb.level}, Реп: ${userDb.reputation}) ` : '';
+    const userBioText = userDb && userDb.bio ? `[Био: ${userDb.bio}] ` : '';
+    const userNotesText = userDb && userDb.ai_notes ? `[Твои заметки о нём: ${userDb.ai_notes}] ` : '';
+    const userLvlText = userDb ? `[Ур: ${userDb.level}, Реп: ${userDb.reputation}] ` : '';
 
     // Сохраняем сообщение пользователя в историю с расширенным контекстом
-    const contextMsg = `[${userName}] ${userLvlText}${userBioText}: ${text}`;
+    const contextMsg = `[${userName}] ${userLvlText}${userBioText}${userNotesText}: ${text}`;
     chatHistory[chatId].push({ role: 'user', content: contextMsg });
 
     // Ограничиваем историю (последние 10 сообщений)
@@ -147,17 +174,26 @@ async function handleAIChat(msg) {
                     try {
                         const args = JSON.parse(toolCall.function.arguments);
                         console.log(`[AI Function] update_user_bio for ${args.target_name} -> ${args.new_bio}`);
-
                         const updatedName = await setBioByUsernameOrName(chatId, args.target_name, args.new_bio);
-
                         if (updatedName) {
                             chatHistory[chatId].push({ role: 'system', content: `Успешно обновлено био для ${updatedName}.` });
                         } else {
-                            chatHistory[chatId].push({ role: 'system', content: `Ошибка: пользователь "${args.target_name}" не найден в базе данных этого чата.` });
+                            chatHistory[chatId].push({ role: 'system', content: `Ошибка: пользователь "${args.target_name}" не найден.` });
                         }
-                    } catch (e) {
-                        console.error("Ошибка tool_call:", e);
-                    }
+                    } catch (e) { console.error("Ошибка tool_call bio:", e); }
+                }
+
+                if (toolCall.function.name === 'update_user_notes') {
+                    try {
+                        const args = JSON.parse(toolCall.function.arguments);
+                        console.log(`[AI Function] update_user_notes for ${args.target_name} -> ${args.new_notes}`);
+                        const updatedName = await setNotesByUsernameOrName(chatId, args.target_name, args.new_notes);
+                        if (updatedName) {
+                            chatHistory[chatId].push({ role: 'system', content: `Успешно обновлены твои заметки о ${updatedName}.` });
+                        } else {
+                            chatHistory[chatId].push({ role: 'system', content: `Ошибка: пользователь "${args.target_name}" не найден.` });
+                        }
+                    } catch (e) { console.error("Ошибка tool_call notes:", e); }
                 }
             }
 

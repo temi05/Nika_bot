@@ -12,6 +12,7 @@ function registerCommands() {
             `🔹 <code>/daily</code> — Ежедневный бонус 🎁\n` +
             `🔹 <code>/mybirthday DD.MM</code> — Твой день рождения\n` +
             `🔹 <code>/bio &lt;текст&gt;</code> — Кратко о себе\n` +
+            `🔹 <code>/notes</code> — Что о тебе знает ИИ 🕵️‍♀️\n` +
             `🔹 <code>/give &lt;кол-во&gt;</code> — Передать печеньки (реплай)\n` +
             `🔹 <code>/kto &lt;текст&gt;</code> — Узнать, кто...\n` +
             `🔹 <code>/dashboard</code> — Панель управления (Mini App)\n\n` +
@@ -436,6 +437,44 @@ function registerCommands() {
         const randomUser = users[Math.floor(Math.random() * users.length)];
         sendTimedMessage(chatId, `🤔 Я думаю, что <b>${match[1]}</b> — это <b>${escapeHTML(getUserName(randomUser))}</b>!`, 60000, { parse_mode: 'HTML' });
     });
+
+    // /notes (Досье ИИ)
+    bot.onText(/^\/notes(?:\s+(.+))?$/, async (msg, match) => {
+        const chatId = msg.chat.id;
+        const requester = getSenderData(msg);
+        let userId = requester.userId;
+        let targetUser = requester.user;
+
+        deleteMsg(chatId, msg.message_id);
+
+        // Определяем цель (реплай или упоминание)
+        if (msg.reply_to_message) {
+            const replyInfo = getSenderData(msg.reply_to_message);
+            userId = replyInfo.userId; targetUser = replyInfo.user;
+        } else if (match[1]) {
+            const arg = match[1].trim();
+            if (arg.startsWith('@')) {
+                const { data } = await supabase.from('users').select('*').eq('chat_id', chatId).ilike('username', arg.substring(1)).maybeSingle();
+                if (data) { userId = data.user_id; targetUser = data; }
+                else return sendTimedMessage(chatId, `❌ Пользователь ${escapeHTML(arg)} не найден в базе.`);
+            }
+        }
+
+        const user = await getUser(chatId, userId, targetUser);
+        if (!user) return;
+
+        const userName = getUserName(targetUser);
+        const notes = user.ai_notes || 'Пока ничего особенного не приметила... Веди себя интереснее!';
+        
+        const response = `🕵️‍♀️ <b>ДОСЬЕ ИИ: ${escapeHTML(userName.toUpperCase())}</b>\n` +
+                         `━━━━━━━━━━━━━━━━━━\n\n` +
+                         `<i>"${escapeHTML(notes)}"</i>\n\n` +
+                         `━━━━━━━━━━━━━━━━━━\n` +
+                         `<i>Я всё записываю...</i>`;
+
+        sendTimedMessage(chatId, response, 60000, { parse_mode: 'HTML' });
+    });
+
 
 
 }
