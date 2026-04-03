@@ -4,6 +4,10 @@ const { handleAIChat } = require('./aiHandler');
 
 let lastBirthdayCheck = {}; // { chatId: dateString }
 
+// Буфер последних сообщений для пассивного наблюдения ИИ (только RAM, не в БД)
+const chatBuffer = {}; // { chatId: [{name, text, time}] }
+const CHAT_BUFFER_SIZE = 15;
+
 function registerMessageHandlers() {
     bot.on('message', async (msg) => {
         const chatId = msg.chat.id;
@@ -69,6 +73,22 @@ function registerMessageHandlers() {
 
         // 3. XP SYSTEM
         const isMedia = msg.photo || msg.voice || msg.video_note || msg.sticker;
+
+        // 3.1 Записываем ВСЕ сообщения в буфер (для контекста ИИ)
+        if (msg.text || msg.caption) {
+            if (!chatBuffer[chatId]) chatBuffer[chatId] = [];
+            const displayName = getUserName(user);
+            chatBuffer[chatId].push({
+                name: displayName,
+                text: msg.text || msg.caption || (msg.photo ? '[📷 фото]' : '[💬 медиа]'),
+                time: Date.now()
+            });
+            // Обрезаем буфер до CHAT_BUFFER_SIZE
+            if (chatBuffer[chatId].length > CHAT_BUFFER_SIZE) {
+                chatBuffer[chatId] = chatBuffer[chatId].slice(-CHAT_BUFFER_SIZE);
+            }
+        }
+
         if (msg.text || isMedia) {
             const now = Date.now();
             if (now - dbUser.last_message_time >= 60000) {
@@ -134,7 +154,12 @@ function registerMessageHandlers() {
 
         // 6. AI CHAT (НейроНика)
         // Вызываем ИИ только если это не команда и сообщение прошло фильтры
-        await handleAIChat(msg);
+        // Передаём фото и буфер чата для полного контекста
+        await handleAIChat(msg, {
+            chatBuffer: chatBuffer[chatId] || [],
+            photo: msg.photo ? msg.photo[msg.photo.length - 1] : null, // Берём фото максимального размера
+            caption: msg.caption || ''
+        });
     });
 }
 

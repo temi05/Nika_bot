@@ -272,6 +272,133 @@ async function setNotesByUsernameOrName(chatId, queryName, notes) {
     return data.first_name;
 }
 
+// ==================== ФУНКЦИИ ДЛЯ ИИ-ИНСТРУМЕНТОВ ====================
+
+// Статистика чата: топ юзеров + общее количество
+async function getChatStats(chatId) {
+    const { data: topUsers, error: topError } = await supabase
+        .from('users')
+        .select('first_name, username, level, xp, reputation')
+        .eq('chat_id', chatId)
+        .order('level', { ascending: false })
+        .order('xp', { ascending: false })
+        .limit(5);
+
+    const { count, error: countError } = await supabase
+        .from('users')
+        .select('*', { count: 'exact', head: true })
+        .eq('chat_id', chatId);
+
+    if (topError || countError) return null;
+
+    return {
+        totalUsers: count || 0,
+        topUsers: (topUsers || []).map((u, i) => ({
+            place: i + 1,
+            name: u.username ? `@${u.username}` : u.first_name,
+            level: u.level,
+            xp: u.xp,
+            cookies: u.reputation
+        }))
+    };
+}
+
+// Поиск пользователя по имени или @username
+async function searchUserByName(chatId, query) {
+    if (!query) return null;
+    const cleanQuery = query.replace('@', '');
+
+    const { data, error } = await supabase
+        .from('users')
+        .select('user_id, first_name, username, level, xp, reputation, bio, ai_notes, warns, birthday')
+        .eq('chat_id', chatId)
+        .or(`username.ilike.%${cleanQuery}%,first_name.ilike.%${cleanQuery}%`)
+        .limit(3);
+
+    if (error || !data || data.length === 0) return null;
+    return data.map(u => ({
+        name: u.username ? `@${u.username}` : u.first_name,
+        level: u.level,
+        xp: u.xp,
+        cookies: u.reputation,
+        bio: u.bio || 'Нет био',
+        warns: u.warns,
+        birthday: u.birthday || 'Не указан'
+    }));
+}
+
+// Выдать варн пользователю (возвращает новое количество варнов или null при ошибке)
+async function warnUserById(chatId, targetName) {
+    if (!targetName) return null;
+    const cleanName = targetName.replace('@', '');
+
+    const { data, error } = await supabase
+        .from('users')
+        .select('id, first_name, username, warns, user_id')
+        .eq('chat_id', chatId)
+        .or(`username.ilike.%${cleanName}%,first_name.ilike.%${cleanName}%`)
+        .limit(1)
+        .maybeSingle();
+
+    if (!data || error) return null;
+
+    const newWarns = (data.warns || 0) + 1;
+    await updateUser(data.id, { warns: newWarns });
+
+    return {
+        name: data.username ? `@${data.username}` : data.first_name,
+        userId: data.user_id,
+        newWarns: newWarns,
+        shouldMute: newWarns >= 3
+    };
+}
+
+// Ближайшие дни рождения (в ближайшие 7 дней)
+async function getUpcomingBirthdays(chatId) {
+    // Получаем всех юзеров с ДР в этом чате
+    const { data, error } = await supabase
+        .from('users')
+        .select('first_name, username, birthday')
+        .eq('chat_id', chatId)
+        .not('birthday', 'is', null)
+        .neq('birthday', '');
+
+    if (error || !data) return [];
+
+    const today = new Date();
+    const upcoming = [];
+
+    for (const u of data) {
+        if (!u.birthday) continue;
+        const parts = u.birthday.split('.');
+        if (parts.length < 2) continue;
+
+        const day = parseInt(parts[0]);
+        const month = parseInt(parts[1]) - 1; // JS months 0-indexed
+
+        // Создаём дату ДР в этом году
+        const bdayThisYear = new Date(today.getFullYear(), month, day);
+        // Если уже прошёл — берём следующий год
+        if (bdayThisYear < today) bdayThisYear.setFullYear(today.getFullYear() + 1);
+
+        const diffDays = Math.ceil((bdayThisYear - today) / (1000 * 60 * 60 * 24));
+
+        if (diffDays <= 7) {
+            upcoming.push({
+                name: u.username ? `@${u.username}` : u.first_name,
+                birthday: u.birthday,
+                daysUntil: diffDays === 0 ? 'Сегодня!' : `через ${diffDays} дн.`
+            });
+        }
+    }
+
+    return upcoming.sort((a, b) => {
+        const dA = a.daysUntil === 'Сегодня!' ? 0 : parseInt(a.daysUntil);
+        const dB = b.daysUntil === 'Сегодня!' ? 0 : parseInt(b.daysUntil);
+        return dA - dB;
+    });
+}
+
 
 
 async function getBirthdaysToday(chatId) {
@@ -313,6 +440,7 @@ module.exports = {
     getChatSettings, updateChatSettings,
     setBirthday, setBio, getBirthdaysToday, setBioByUsernameOrName, setNotesByUsernameOrName,
     getChatMemory, updateChatMemory,
+    getChatStats, searchUserByName, warnUserById, getUpcomingBirthdays,
     messageAuthors, reactionCooldowns, commandCooldowns, userCache,
     supabase, ANONYMOUS_ADMIN_ID, pendingVerifications
 };
