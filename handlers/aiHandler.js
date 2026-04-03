@@ -8,7 +8,7 @@ const {
 } = require('../database');
 
 const POLZA_API_KEY = process.env.POLZA_API_KEY || 'pza_Ut5ahRtIFZSzj_jKezwdRvQMMebqZ1BI';
-const AI_MODEL = process.env.AI_MODEL || 'google/gemma-3-27b-it';
+const AI_MODEL = process.env.AI_MODEL || 'gpt-4o-mini';
 const AI_NAME = process.env.AI_NAME || 'НейроНика';
 
 const openai = new OpenAI({
