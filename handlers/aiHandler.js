@@ -193,7 +193,7 @@ async function resolveUser(chatId, targetName) {
     return null;
 }
 
-async function executeToolCall(toolCall, chatId, requesterId) {
+async function executeToolCall(toolCall, chatId, messageId) {
     const args = JSON.parse(toolCall.function.arguments);
     const fn = toolCall.function.name;
     console.log(`[AI TOOL CALL] ${fn} | Args:`, args);
@@ -225,7 +225,7 @@ async function executeToolCall(toolCall, chatId, requesterId) {
                 return `Дала ${args.amount} печенек ${u.first_name}.`;
             }
             case 'react_to_message': {
-                await bot.setMessageReaction(chatId, requesterId, { reaction: [{ type: 'emoji', emoji: args.emoji || '🔥' }] });
+                await bot.setMessageReaction(chatId, messageId, { reaction: [{ type: 'emoji', emoji: args.emoji || '🔥' }] });
                 return "Реакция поставлена.";
             }
             case 'update_user_bio': {
@@ -281,7 +281,7 @@ async function handleAIChat(msg, extra = {}) {
             console.log(`[AI DECISION] AI decided to use ${resp.tool_calls.length} tools.`);
             chatHistory[chatId].push(resp);
             for (const tc of resp.tool_calls) {
-                const res = await executeToolCall(tc, chatId, userId);
+                const res = await executeToolCall(tc, chatId, msg.message_id);
                 chatHistory[chatId].push({ role: 'tool', tool_call_id: tc.id, name: tc.function.name, content: res });
             }
             const second = await openai.chat.completions.create({
