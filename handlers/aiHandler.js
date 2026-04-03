@@ -16,10 +16,11 @@ const openai = new OpenAI({
     baseURL: 'https://polza.ai/api/v1',
 });
 
-const chatHistory = {};
-const messageCount = {};
+const chatHistory = {}; 
+const messageCount = {}; 
 const activeParticipants = {};
-const aiMood = {};
+const aiMood = {}; 
+const processingQueue = new Map(); // Очередь для каждого чата
 
 const aiTools = [
     {
@@ -160,7 +161,13 @@ const aiTools = [
 
 function sanitizeHistory(history) {
     if (!history) return [];
-    return history.filter(m => m.role && (m.content || m.tool_calls || m.role === 'tool'));
+    return history.filter(m => {
+        // Оставляем только те сообщения, где есть либо контент, либо вызовы инструментов, либо это ответ инструмента
+        const hasContent = m.content !== null && m.content !== undefined && m.content !== "";
+        const hasTools = m.tool_calls && Array.isArray(m.tool_calls) && m.tool_calls.length > 0;
+        const isToolResponse = m.role === 'tool';
+        return m.role && (hasContent || hasTools || isToolResponse);
+    });
 }
 
 const SYSTEM_PROMPT = `Ты — ${AI_NAME}, самостоятельная цифровая личность, виртуальное альтер-эго стримерши Ники.
@@ -254,7 +261,7 @@ async function executeToolCall(toolCall, chatId, messageId) {
                 const u = await resolveUser(chatId, args.target_name);
                 if (!u) return "Не найден.";
                 const dur = Math.min(Math.max(1, args.duration_minutes || 15), 1440);
-                await bot.restrictChatMember(chatId, u.user_id, { until_date: Math.floor(Date.now() / 1000) + dur * 60 });
+                await bot.restrictChatMember(chatId, u.user_id, { until_date: Math.floor(Date.now()/1000) + dur*60 });
                 return `${u.first_name} в муте на ${dur} мин. Причина: ${args.reason}`;
             }
             case 'unmute_user': {
@@ -295,18 +302,40 @@ async function executeToolCall(toolCall, chatId, messageId) {
             }
             default: return "Ошибка инструмента.";
         }
-    } catch (e) {
+    } catch (e) { 
         console.error(`[AI TOOL ERROR] ${fn}:`, e.message);
-        return `Ошибка: ${e.message}`;
+        return `Ошибка: ${e.message}`; 
     }
 }
 
 async function handleAIChat(msg, extra = {}) {
     const chatId = msg.chat.id;
+    
+    // Инициализация очереди для чата
+    if (!processingQueue.has(chatId)) {
+        processingQueue.set(chatId, Promise.resolve());
+    }
+
+    // Добавляем текущую задачу в очередь, чтобы сообщения обрабатывались строго по порядку
+    const turn = processingQueue.get(chatId).then(async () => {
+        try {
+            await processAI(msg, extra);
+        } catch (e) {
+            console.error('[AI FATAL ERROR]:', e.message);
+        }
+    });
+
+    processingQueue.set(chatId, turn);
+    return turn;
+}
+
+async function processAI(msg, extra) {
+    const chatId = msg.chat.id;
     if (!chatHistory[chatId]) chatHistory[chatId] = [];
     const userId = msg.from.id;
     const lowerText = (msg.text || '').toLowerCase();
     const isMentioned = lowerText.includes(AI_NAME.toLowerCase()) || (msg.reply_to_message && msg.reply_to_message.from.id === (await bot.getMe()).id);
+    
     if (msg.chat.type !== 'private' && !isMentioned) return;
 
     if (!activeParticipants[chatId]) activeParticipants[chatId] = {};
@@ -316,8 +345,17 @@ async function handleAIChat(msg, extra = {}) {
     const recentNicks = Object.values(activeParticipants[chatId]).slice(-5).map(p => `${p.firstName}(@${p.username})`).join(', ');
     const finalPrompt = SYSTEM_PROMPT + `\n\nДневник:\n${mem}\nУчастники: ${recentNicks}\nВремя: ${new Date().toLocaleString()}`;
 
+    // Добавление сообщения в историю
     chatHistory[chatId].push({ role: 'user', content: `${msg.from.first_name}: ${msg.text}` });
-    if (chatHistory[chatId].length > 15) chatHistory[chatId] = chatHistory[chatId].slice(-15);
+
+    // Умное срезание истории (нельзя начинать с 'tool' или запроса инструментов)
+    if (chatHistory[chatId].length > 20) {
+        chatHistory[chatId] = chatHistory[chatId].slice(-20);
+        while (chatHistory[chatId].length > 0 && 
+               (chatHistory[chatId][0].role === 'tool' || chatHistory[chatId][0].tool_calls)) {
+            chatHistory[chatId].shift();
+        }
+    }
 
     try {
         bot.sendChatAction(chatId, 'typing');
@@ -348,11 +386,18 @@ async function handleAIChat(msg, extra = {}) {
             chatHistory[chatId].push({ role: 'assistant', content: res });
         }
 
+        if (!messageCount[chatId]) messageCount[chatId] = 0;
         if (++messageCount[chatId] >= 10) {
             await summarizeMemory(chatId, chatHistory[chatId], mem);
             messageCount[chatId] = 0;
         }
-    } catch (e) { console.error('AI Fatal Error:', e.message); }
+    } catch (e) { 
+        console.error('AI Processing Error:', e.message); 
+        if (e.message.includes('function response turn')) {
+            console.log('CRITICAL: Resetting chat history to fix tool sequence error.');
+            chatHistory[chatId] = []; // Сброс истории при фатальной ошибке структуры
+        }
+    }
 }
 
 module.exports = { handleAIChat, aiMood, AI_NAME };
