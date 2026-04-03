@@ -14,6 +14,17 @@ const reactionCooldowns = {};
 const commandCooldowns = {};
 const pendingVerifications = {};
 
+// Функция транслитерации для поиска (Ника -> Nika)
+function transliterate(text) {
+    const map = {
+        'а': 'a', 'б': 'b', 'в': 'v', 'г': 'g', 'д': 'd', 'е': 'e', 'ё': 'yo', 'ж': 'zh',
+        'з': 'z', 'и': 'i', 'й': 'y', 'к': 'k', 'л': 'l', 'м': 'm', 'н': 'n', 'о': 'o',
+        'п': 'p', 'р': 'r', 'с': 's', 'т': 't', 'у': 'u', 'ф': 'f', 'х': 'h', 'ц': 'ts',
+        'ч': 'ch', 'ш': 'sh', 'щ': 'sch', 'ъ': '', 'ы': 'y', 'ь': '', 'э': 'e', 'ю': 'yu', 'я': 'ya'
+    };
+    return text.toLowerCase().split('').map(char => map[char] || char).join('');
+}
+
 async function getUser(chatId, userId, userInfo = {}) {
     const cacheKey = `${chatId}_${userId}`;
     if (userCache[cacheKey] && Date.now() < userCache[cacheKey].expires) {
@@ -237,14 +248,15 @@ async function setBio(chatId, userId, bio) {
 
 async function setBioByUsernameOrName(chatId, queryName, bio) {
     if (!queryName) return null;
-    let cleanName = queryName.replace('@', ''); // Убираем @ если есть
+    let cleanName = queryName.replace('@', '').toLowerCase();
+    const latinName = transliterate(cleanName);
     
     // Ищем по username или first_name
     const { data, error } = await supabase
         .from('users')
         .select('id, first_name')
         .eq('chat_id', chatId)
-        .or(`username.ilike.%${cleanName}%,first_name.ilike.%${cleanName}%`)
+        .or(`username.ilike.%${cleanName}%,first_name.ilike.%${cleanName}%,username.ilike.%${latinName}%,first_name.ilike.%${latinName}%`)
         .limit(1)
         .maybeSingle();
 
@@ -256,13 +268,14 @@ async function setBioByUsernameOrName(chatId, queryName, bio) {
 
 async function setNotesByUsernameOrName(chatId, queryName, notes) {
     if (!queryName) return null;
-    let cleanName = queryName.replace('@', '');
+    let cleanName = queryName.replace('@', '').toLowerCase();
+    const latinName = transliterate(cleanName);
     
     const { data, error } = await supabase
         .from('users')
         .select('id, first_name')
         .eq('chat_id', chatId)
-        .or(`username.ilike.%${cleanName}%,first_name.ilike.%${cleanName}%`)
+        .or(`username.ilike.%${cleanName}%,first_name.ilike.%${cleanName}%,username.ilike.%latinName%,first_name.ilike.%${latinName}%`)
         .limit(1)
         .maybeSingle();
 
@@ -306,13 +319,14 @@ async function getChatStats(chatId) {
 // Поиск пользователя по имени или @username
 async function searchUserByName(chatId, query) {
     if (!query) return null;
-    const cleanQuery = query.replace('@', '');
+    const cleanQuery = query.replace('@', '').toLowerCase();
+    const latinQuery = transliterate(cleanQuery);
 
     const { data, error } = await supabase
         .from('users')
         .select('user_id, first_name, username, level, xp, reputation, bio, ai_notes, warns, birthday')
         .eq('chat_id', chatId)
-        .or(`username.ilike.%${cleanQuery}%,first_name.ilike.%${cleanQuery}%`)
+        .or(`username.ilike.%${cleanQuery}%,first_name.ilike.%${cleanQuery}%,username.ilike.%${latinQuery}%,first_name.ilike.%${latinQuery}%,ai_notes.ilike.%${cleanQuery}%`)
         .limit(3);
 
     if (error || !data || data.length === 0) return null;
@@ -330,13 +344,14 @@ async function searchUserByName(chatId, query) {
 // Выдать варн пользователю (возвращает новое количество варнов или null при ошибке)
 async function warnUserById(chatId, targetName) {
     if (!targetName) return null;
-    const cleanName = targetName.replace('@', '');
+    const cleanName = targetName.replace('@', '').toLowerCase();
+    const latinName = transliterate(cleanName);
 
     const { data, error } = await supabase
         .from('users')
         .select('id, first_name, username, warns, user_id')
         .eq('chat_id', chatId)
-        .or(`username.ilike.%${cleanName}%,first_name.ilike.%${cleanName}%`)
+        .or(`username.ilike.%${cleanName}%,first_name.ilike.%${cleanName}%,username.ilike.%${latinName}%,first_name.ilike.%${latinName}%`)
         .limit(1)
         .maybeSingle();
 
