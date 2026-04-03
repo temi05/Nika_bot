@@ -326,8 +326,8 @@ async function searchUserByName(chatId, query) {
         .from('users')
         .select('user_id, first_name, username, level, xp, reputation, bio, ai_notes, warns, birthday')
         .eq('chat_id', chatId)
-        .or(`username.ilike.%${cleanQuery}%,first_name.ilike.%${cleanQuery}%,username.ilike.%${latinQuery}%,first_name.ilike.%${latinQuery}%,ai_notes.ilike.%${cleanQuery}%`)
-        .limit(3);
+        .or(`username.ilike.%${cleanQuery}%,first_name.ilike.%${cleanQuery}%,username.ilike.%${latinQuery}%,first_name.ilike.%${latinQuery}%,ai_notes.ilike.%${cleanQuery}%,bio.ilike.%${cleanQuery}%`)
+        .limit(5);
 
     if (error || !data || data.length === 0) return null;
     return data.map(u => ({
