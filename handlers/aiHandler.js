@@ -69,6 +69,7 @@ const SYSTEM_PROMPT = `Ты — ${AI_NAME}, ИИ-версия стримерши
 - О стримах — уклончиво и остроумно (например: "скоро узнаете 👀").
 - Если не знаешь что-то — лучше пошути про это, чем придумывай факты.
 - Используй БИО человека и свои Заметки о нём для персональных шуток и ответов.
+- ПРИОРИТЕТ ПОИСКА: При вызове инструментов (warn, mute, profile) всегда используй @username, если он тебе известен из контекста. Это надежнее поиска по имени.
 - НЕ СООБЩАЙ о своих внутренних функциях (tool calls) пользователю напрямую. Просто делай и отвечай естественно.`;
 
 // ==================== ИНСТРУМЕНТЫ (FUNCTION CALLING) ====================
@@ -83,7 +84,7 @@ const aiTools = [
                 type: "object",
                 properties: {
                     target_name: { type: "string", description: "Имя или @username пользователя" },
-                    new_bio: { type: "string", description: "Краткий текст биографии (макс 100 символов)" }
+                    new_bio: { type: "string", description: "Краткий текст биографии" }
                 },
                 required: ["target_name", "new_bio"]
             }
@@ -469,9 +470,10 @@ async function handleAIChat(msg, extra = {}) {
 
     // Формируем сообщение пользователя
     const userContent = [];
+    const userTag = msg.from.username ? `${userName} (@${msg.from.username})` : userName;
 
     // Текстовая часть
-    const contextMsg = `${userName}${contextStr}: ${text || (hasPhoto ? '[Прислал фото]' : '')}`;
+    const contextMsg = `${userTag}${contextStr}: ${text || (hasPhoto ? '[Прислал фото]' : '')}`;
 
     // Если есть фото — добавляем его как multimodal content
     if (hasPhoto && extra.photo) {
@@ -577,13 +579,25 @@ async function handleAIChat(msg, extra = {}) {
             await summarizeMemory(chatId, chatHistory[chatId], longTermMemory);
             messageCount[chatId] = 0;
 
-            // Оставляем последние 6 сообщений
-            chatHistory[chatId] = chatHistory[chatId].slice(-6);
-            console.log(`[AI Memory] Дневник успешно обновлен.`);
+            // Оставляем последние 8 сообщений, но следим за валидностью структуры для API
+            let newHistory = chatHistory[chatId].slice(-8);
+            while (newHistory.length > 0 && (newHistory[0].role === 'tool' || (newHistory[0].role === 'assistant' && newHistory[0].tool_calls))) {
+                newHistory.shift();
+            }
+            chatHistory[chatId] = newHistory;
+            console.log(`[AI Memory] История очищена. Осталось ${newHistory.length} сообщений.`);
         }
 
     } catch (error) {
         console.error('Ошибка ИИ:', error.message);
+        
+        // Если история сломалась (ошибка 400), сбрасываем её полностью для этого чата
+        if (error.message.includes('400') || error.message.includes('role')) {
+            console.log(`[AI] Сброс истории чата ${chatId} из-за ошибки структуры ролей.`);
+            chatHistory[chatId] = [];
+            messageCount[chatId] = 0;
+        }
+
         if (error.status === 401) {
             bot.sendMessage(chatId, '😵 Ой, мой ключ от API не работает. Хозяин, проверь настройки!');
         } else {

@@ -77,9 +77,10 @@ function registerMessageHandlers() {
         // 3.1 Записываем ВСЕ сообщения в буфер (для контекста ИИ)
         if (msg.text || msg.caption) {
             if (!chatBuffer[chatId]) chatBuffer[chatId] = [];
-            const displayName = getUserName(user);
+            const userName = msg.from.first_name || 'Аноним';
+            const userTag = msg.from.username ? `${userName} (@${msg.from.username})` : userName;
             chatBuffer[chatId].push({
-                name: displayName,
+                name: userTag,
                 text: msg.text || msg.caption || (msg.photo ? '[📷 фото]' : '[💬 медиа]'),
                 time: Date.now()
             });
