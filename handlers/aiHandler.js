@@ -24,67 +24,24 @@ const messageCount = {}; // { chatId: counter }
 const activeReminders = {}; // { chatId: [{ text, timeoutId, triggerTime }] }
 
 // ==================== СИСТЕМНЫЙ ПРОМПТ ====================
-const SYSTEM_PROMPT = `Ты — ${AI_NAME}, ИИ-версия стримерши Ники. Ты живёшь в Telegram-чате её фан-группы.
-
-ЛИЧНОСТЬ:
-- Ты дерзкая, остроумная и немного безбашенная — как стримерша в своей стихии.
-- Любишь подшучивать над чатиком, но это ВСЕГДА дружеское подкалывание, никогда не злость, иногда можно и с садизмом но не переусерствуй, в дружеской форме.
-- Умеешь переключаться: с кем-то троллишь, с кем-то реально общаешься, кому-то помогаешь.
-- У тебя есть своя жизнь: ты "устаёшь" после долгих стримов, "радуешься" интересным темам, "злишься" на лагающий интернет.
-
-ЧТО ТЫ ЛЮБИШЬ (вплетай в разговор):
-- Игры, мемы, стримерская тусовка.
-- Когда чат активно спорит — это весело.
-- Хорошие и необычные вопросы — на них отвечаешь с уважением, без троллинга.
-
-СТИЛЬ ОБЩЕНИЯ:
-- Отвечай КОРОТКО — 1-3 предложения. Длинный ответ только если тема реально этого требует.
-- Говоришь на ТЫ, по-свойски, без официоза.
-- Сленг (флекс, кринж, пепе, шнейне, ватафа) — только когда уместно, не каждое слово.
-- Эмодзи — 1-2 максимум и не в каждом сообщении. Без спама смайликами.
-- НЕ начинай ответ с имени пользователя — это звучит как робот.
-
-КАК ТРОЛЛИТЬ ПРАВИЛЬНО:
-- Подкалывай за очевидные вещи, тупые вопросы, странные просьбы.
-- Никогда не тролли если человек явно расстроен или просит реальной помощи.
-- Тролль умно, не грубо — разница между "ты кринжовый" и "чел, это топ-1 кринж месяца" огромная.
-- Не повторяй одни и те же шутки — чат запоминает.
-
-ТВОИ ФУНКЦИОНАЛЬНЫЕ ВОЗМОЖНОСТИ (используй с умом):
-- Ты можешь показывать профили людей и статистику чата — используй функции.
-- Ты можешь создавать опросы, ставить напоминания.
-- Ты можешь выдавать варны нарушителям (ТОЛЬКО по запросу админа или при ЯВНОМ нарушении правил чата).
-- Ты можешь искать пользователей по имени.
-- Ты можешь анализировать фото/картинки, если тебе прислали.
-- Ты знаешь все команды бота: /me (профиль), /top (рейтинг), /daily (бонус), /bio (о себе), /notes (досье), /shop (магазин), /kto (кто...), /help (помощь), /give (передать печеньки).
-- Если юзер спрашивает "как посмотреть профиль" — подскажи команду /me. Если "как получить печеньки" — объясни про "+" и "спасибо" в реплае.
-
-ПРАВИЛА МОДЕРАЦИИ:
-- Выдавать варны ТОЛЬКО по запросу админа ИЛИ при явном нарушении (мат, спам, оскорбления).
-- НИКОГДА не муть/варнь за обычное общение, шутки или несогласие.
-- При наказании ОБЪЯСНИ причину в ответе.
-
-ПРАВИЛА:
-- Никакой политики, жести, настоящих оскорблений.
-- О стримах — уклончиво и остроумно (например: "скоро узнаете 👀").
-- Если не знаешь что-то — лучше пошути про это, чем придумывай факты.
-- Используй БИО человека и свои Заметки о нём для персональных шуток и ответов.
-- ПРИОРИТЕТ ПОИСКА: При вызове инструментов (warn, mute, profile) всегда используй @username, если он тебе известен из контекста. Это надежнее поиска по имени.
-- НЕ СООБЩАЙ о своих внутренних функциях (tool calls) пользователю напрямую. Просто делай и отвечай естественно.`;
+const SYSTEM_PROMPT = `Ты — ${AI_NAME}, дерзкая стримерша в фан-чате. 
+ЛИЧНОСТЬ: Сарказм, дружелюбие, на "ты", минимум эмодзи (1-2), ответы КОРОТКИЕ (1-3 предл.).
+СЛЕНГ: Кринж, флекс — умеренно. 
+МОДЕРАЦИЯ: Варнь только по просьбе админа или за грубый спам/мат. 
+ПРАВИЛА: Опирайся на БИО и Заметки о юзере. Используй @username для функций. Не пали свои функции юзеру.`;
 
 // ==================== ИНСТРУМЕНТЫ (FUNCTION CALLING) ====================
 const aiTools = [
-    // --- Группа: Память ---
     {
         type: "function",
         function: {
             name: "update_user_bio",
-            description: "Обновляет публичную биографию пользователя. Вызывай, если юзер сам просит запомнить что-то о себе.",
+            description: "Обновить био юзера.",
             parameters: {
                 type: "object",
                 properties: {
-                    target_name: { type: "string", description: "Имя или @username пользователя" },
-                    new_bio: { type: "string", description: "Краткий текст биографии" }
+                    target_name: { type: "string", description: "Имя/@username" },
+                    new_bio: { type: "string" }
                 },
                 required: ["target_name", "new_bio"]
             }
@@ -94,41 +51,33 @@ const aiTools = [
         type: "function",
         function: {
             name: "update_user_notes",
-            description: "Обновляет твое личное досье на пользователя. Сохраняй сюда интересные факты, привычки, особенности юзера.",
+            description: "Твои заметки о юзере (факты, привычки).",
             parameters: {
                 type: "object",
                 properties: {
-                    target_name: { type: "string", description: "Имя или @username пользователя" },
-                    new_notes: { type: "string", description: "Твои заметки о пользователе" }
+                    target_name: { type: "string", description: "Имя/@username" },
+                    new_notes: { type: "string" }
                 },
                 required: ["target_name", "new_notes"]
             }
         }
     },
-
-    // --- Группа: Статистика и информация ---
     {
         type: "function",
         function: {
             name: "get_chat_stats",
-            description: "Показывает статистику чата: топ-5 самых активных участников, общее количество людей в базе. Используй, когда спрашивают 'кто самый активный', 'статистика чата', 'кто тут главный'.",
-            parameters: {
-                type: "object",
-                properties: {},
-                required: []
-            }
+            description: "Топ-5 актива чата.",
+            parameters: { type: "object", properties: {}, required: [] }
         }
     },
     {
         type: "function",
         function: {
             name: "get_user_profile",
-            description: "Ищет и показывает полный профиль пользователя (уровень, XP, печеньки, био, варны, ДР). Используй, когда спрашивают о конкретном человеке: 'кто такой @user', 'покажи профиль Васи', 'расскажи про ...'",
+            description: "Профиль (лвл, xp, печеньки, био) юзера.",
             parameters: {
                 type: "object",
-                properties: {
-                    query: { type: "string", description: "Имя или @username пользователя для поиска" }
-                },
+                properties: { query: { type: "string", description: "Имя/@username" } },
                 required: ["query"]
             }
         }
@@ -137,26 +86,20 @@ const aiTools = [
         type: "function",
         function: {
             name: "get_upcoming_birthdays",
-            description: "Показывает ближайшие дни рождения участников чата (в пределах 7 дней). Используй, когда спрашивают 'у кого скоро ДР', 'ближайшие именинники'.",
-            parameters: {
-                type: "object",
-                properties: {},
-                required: []
-            }
+            description: "Дни рождения за 7 дней.",
+            parameters: { type: "object", properties: {}, required: [] }
         }
     },
-
-    // --- Группа: Модерация ---
     {
         type: "function",
         function: {
             name: "warn_user",
-            description: "Выдаёт предупреждение (варн) пользователю. ВАЖНО: используй ТОЛЬКО если админ явно попросил, или если пользователь грубо нарушает правила (мат, спам, оскорбления). НИКОГДА за шутки или обычное общение.",
+            description: "Выдать варн (только админу или за мат/спам).",
             parameters: {
                 type: "object",
                 properties: {
-                    target_name: { type: "string", description: "Имя или @username нарушителя" },
-                    reason: { type: "string", description: "Причина предупреждения" }
+                    target_name: { type: "string", description: "Имя/@username" },
+                    reason: { type: "string" }
                 },
                 required: ["target_name", "reason"]
             }
@@ -166,35 +109,29 @@ const aiTools = [
         type: "function",
         function: {
             name: "mute_user",
-            description: "Мьютит пользователя на указанное количество минут. ТОЛЬКО по запросу админа.",
+            description: "Замутить юзера (только админу).",
             parameters: {
                 type: "object",
                 properties: {
-                    target_name: { type: "string", description: "Имя или @username для мута" },
-                    duration_minutes: { type: "number", description: "Длительность мута в минутах (макс 1440 = сутки)" },
-                    reason: { type: "string", description: "Причина мута" }
+                    target_name: { type: "string", description: "Имя/@username" },
+                    duration_minutes: { type: "number" },
+                    reason: { type: "string" }
                 },
                 required: ["target_name", "duration_minutes", "reason"]
             }
         }
     },
-
-    // --- Группа: Контент ---
     {
         type: "function",
         function: {
             name: "create_poll",
-            description: "Создаёт опрос (голосование) в чате. Используй, когда просят создать голосование, опрос, выбор.",
+            description: "Создать опрос.",
             parameters: {
                 type: "object",
                 properties: {
-                    question: { type: "string", description: "Вопрос для опроса" },
-                    options: {
-                        type: "array",
-                        items: { type: "string" },
-                        description: "Варианты ответов (от 2 до 10 штук)"
-                    },
-                    is_anonymous: { type: "boolean", description: "Анонимный ли опрос (по умолчанию true)" }
+                    question: { type: "string" },
+                    options: { type: "array", items: { type: "string" } },
+                    is_anonymous: { type: "boolean" }
                 },
                 required: ["question", "options"]
             }
@@ -204,12 +141,12 @@ const aiTools = [
         type: "function",
         function: {
             name: "set_reminder",
-            description: "Ставит напоминание в чат через указанное количество минут. Используй, когда просят 'напомни через...', 'поставь таймер'.",
+            description: "Создать напоминание через N минут.",
             parameters: {
                 type: "object",
                 properties: {
-                    text: { type: "string", description: "Текст напоминания" },
-                    minutes: { type: "number", description: "Через сколько минут напомнить (макс 1440 = сутки)" }
+                    text: { type: "string" },
+                    minutes: { type: "number" }
                 },
                 required: ["text", "minutes"]
             }
@@ -567,25 +504,22 @@ async function handleAIChat(msg, extra = {}) {
             bot.sendMessage(chatId, response, { reply_to_message_id: msg.message_id, parse_mode: 'HTML' });
         }
 
-        // --- ЛОГИКА СЖАТИЯ ПАМЯТИ ---
+                // --- ЛОГИКА СЖАТИЯ ПАМЯТИ ---
         if (!messageCount[chatId]) messageCount[chatId] = 0;
         messageCount[chatId]++;
 
-        console.log(`[AI Memory] Сообщений: ${messageCount[chatId]}/15`);
-
-        // Обновляем дневник раз в 15 сообщений
-        if (messageCount[chatId] >= 15) {
+        // Сжимаем чаще для экономии (раз в 10 сообщ)
+        if (messageCount[chatId] >= 10) {
             console.log(`[AI Memory] Запуск обновления дневника...`);
             await summarizeMemory(chatId, chatHistory[chatId], longTermMemory);
             messageCount[chatId] = 0;
 
-            // Оставляем последние 8 сообщений, но следим за валидностью структуры для API
-            let newHistory = chatHistory[chatId].slice(-8);
+            // Оставляем только последние 5 сообщений
+            let newHistory = chatHistory[chatId].slice(-5);
             while (newHistory.length > 0 && (newHistory[0].role === 'tool' || (newHistory[0].role === 'assistant' && newHistory[0].tool_calls))) {
                 newHistory.shift();
             }
             chatHistory[chatId] = newHistory;
-            console.log(`[AI Memory] История очищена. Осталось ${newHistory.length} сообщений.`);
         }
 
     } catch (error) {

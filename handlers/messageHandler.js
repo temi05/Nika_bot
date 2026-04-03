@@ -6,7 +6,7 @@ let lastBirthdayCheck = {}; // { chatId: dateString }
 
 // Буфер последних сообщений для пассивного наблюдения ИИ (только RAM, не в БД)
 const chatBuffer = {}; // { chatId: [{name, text, time}] }
-const CHAT_BUFFER_SIZE = 15;
+const CHAT_BUFFER_SIZE = 10;
 
 function registerMessageHandlers() {
     bot.on('message', async (msg) => {
