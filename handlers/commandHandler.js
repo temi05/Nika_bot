@@ -1,5 +1,6 @@
 const { bot, escapeHTML, getUserName, getSenderData, sendTimedMessage, deleteMsg, isAdmin } = require('../utils');
 const { getUser, updateUser, getBadWords, supabase, commandCooldowns, getNextLevelXp, ANONYMOUS_ADMIN_ID, claimDailyBonus, getChatSettings, updateChatSettings } = require('../database');
+const { aiMood, AI_NAME } = require('./aiHandler');
 
 function registerCommands() {
     bot.onText(/^\/help$/, async (msg) => {
@@ -13,8 +14,9 @@ function registerCommands() {
             `🔹 <code>/mybirthday DD.MM</code> — Твой день рождения\n` +
             `🔹 <code>/bio &lt;текст&gt;</code> — Кратко о себе\n` +
             `🔹 <code>/notes</code> — Что о тебе знает ИИ 🕵️‍♀️\n` +
-            `🔹 <code>/give &lt;кол-во&gt;</code> — Передать печеньки (реплай)\n` +
+             `🔹 <code>/give &lt;кол-во&gt;</code> — Передать печеньки (реплай)\n` +
             `🔹 <code>/kto &lt;текст&gt;</code> — Узнать, кто...\n` +
+            `🔹 <code>/mood</code> — Настроение ${AI_NAME} 🎭\n` +
             `🔹 <code>/dashboard</code> — Панель управления (Mini App)\n\n` +
             `🛡 <b>Управление (Админ):</b>\n` +
             `🔸 <code>/ban</code>, <code>/unban</code> — Управление доступом\n` +
@@ -473,6 +475,33 @@ function registerCommands() {
                          `<i>Я всё записываю...</i>`;
 
         sendTimedMessage(chatId, response, 60000, { parse_mode: 'HTML' });
+    });
+
+    // /mood (Статус настроения ИИ)
+    bot.onText(/^\/mood$/, async (msg) => {
+        const chatId = msg.chat.id;
+        deleteMsg(chatId, msg.message_id);
+
+        const mood = aiMood[chatId] || 50;
+        let status = '😐 Нормальное';
+        let emoji = '💠';
+
+        if (mood >= 90) { status = '🤩 В восторге!'; emoji = '✨'; }
+        else if (mood >= 75) { status = '😊 Хорошее'; emoji = '☀️'; }
+        else if (mood >= 60) { status = '🙂 Довольное'; emoji = '🌤'; }
+        else if (mood <= 20) { status = '🤬 В ярости!'; emoji = '💢'; }
+        else if (mood <= 35) { status = '😒 Раздражена'; emoji = '☁️'; }
+        else if (mood <= 45) { status = '😕 Скучает'; emoji = '🌫'; }
+
+        const moodBar = '█'.repeat(Math.floor(mood / 10)) + '░'.repeat(10 - Math.floor(mood / 10));
+        
+        const response = `${emoji} <b>НАСТРОЕНИЕ ${AI_NAME.toUpperCase()}</b>\n` +
+                         `━━━━━━━━━━━━━━━━━━\n\n` +
+                         `Статус: <b>${status}</b>\n` +
+                         `Уровень: <code>[${moodBar}] ${mood}%</code>\n\n` +
+                         `<i>Настроение меняется в зависимости от твоего общения с ней!</i>`;
+
+        sendTimedMessage(chatId, response, 30000, { parse_mode: 'HTML' });
     });
 
 

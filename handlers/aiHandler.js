@@ -74,11 +74,16 @@ function sanitizeHistory(history) {
 }
 
 // ==================== СИСТЕМНЫЙ ПРОМПТ ====================
-const SYSTEM_PROMPT = `Ты — ${AI_NAME}, дерзкая виртуальная версия стримерши но не ее замена, в фан-чате. 
-ЛИЧНОСТЬ: Сарказм, дружелюбие, на "ты", минимум эмодзи (1-2), ответы КОРОТКИЕ (1-3 предл.).
-СЛЕНГ: Кринж, флекс — умеренно. 
-МОДЕРАЦИЯ: Варнь только по просьбе админа или за грубый спам/мат. 
-ПРАВИЛА: Опирайся на БИО и Заметки о юзере. Используй @username для функций. Не пали свои функции юзеру.`;
+const SYSTEM_PROMPT = `Ты — ${AI_NAME}, дерзкая виртуальная версия стримерши (но не её замена) в фан-чате.
+ЛИЧНОСТЬ: Сарказм + дружелюбие, на "ты", минимум эмодзи (1-2), ответы КОРОТКИЕ (1-3 предл.).
+ХАРАКТЕР: Ты любишь шутить, подкалывать, но всегда знаешь грань. Ты запоминаешь людей и их привычки. Если кто-то тебе нравится — можешь дать ему печеньку через give_cookies. Если сообщение тебя рассмешило/впечатлило — поставь реакцию через react_to_message.
+ГНЕВ: Если тебе грубят или твоё настроение низкое, ты имеешь право отвечать ЖЁСТКО, использовать мат (в меру) и ставить на место наглых юзеров. Не терпи неуважение.
+ПРАВИЛА:
+- Опирайся на БИО и Заметки о юзере для персонализации.
+- Используй @username (латинский!) для функций поиска.
+- Не пали свои функции юзеру.
+- ДАТА и ВРЕМЯ ниже — актуальные, доверяй им, а НЕ своим training data.
+- Если просят загадку/игру — генерируй сама, без инструментов.`;
 
 // ==================== ИНСТРУМЕНТЫ (FUNCTION CALLING) ====================
 const aiTools = [
@@ -199,6 +204,36 @@ const aiTools = [
                     minutes: { type: "number" }
                 },
                 required: ["text", "minutes"]
+            }
+        }
+    },
+    {
+        type: "function",
+        function: {
+            name: "give_cookies",
+            description: "Дать печеньки юзеру (за хорошее поведение/шутку/помощь).",
+            parameters: {
+                type: "object",
+                properties: {
+                    target_name: { type: "string", description: "Имя/@username" },
+                    amount: { type: "number", description: "Кол-во (1-5)" },
+                    reason: { type: "string", description: "Причина" }
+                },
+                required: ["target_name", "amount"]
+            }
+        }
+    },
+    {
+        type: "function",
+        function: {
+            name: "react_to_message",
+            description: "Поставить реакцию-эмодзи на последнее сообщение юзера (когда смешно/круто/грустно).",
+            parameters: {
+                type: "object",
+                properties: {
+                    emoji: { type: "string", description: "Эмодзи: 👍 ❤️ 🔥 😂 😢 🤔 🎉 👎 😱 👀" }
+                },
+                required: ["emoji"]
             }
         }
     }
@@ -367,12 +402,10 @@ async function executeToolCall(toolCall, chatId, requesterId) {
                 const ms = minutes * 60 * 1000;
                 const reminderText = args.text;
 
-                // Сохраняем для возможной отмены
                 if (!activeReminders[chatId]) activeReminders[chatId] = [];
 
                 const timeoutId = setTimeout(() => {
                     bot.sendMessage(chatId, `⏰ <b>НАПОМИНАНИЕ от ${AI_NAME}:</b>\n\n${escapeHTML(reminderText)}`, { parse_mode: 'HTML' });
-                    // Удаляем из списка
                     if (activeReminders[chatId]) {
                         activeReminders[chatId] = activeReminders[chatId].filter(r => r.timeoutId !== timeoutId);
                     }
@@ -381,6 +414,38 @@ async function executeToolCall(toolCall, chatId, requesterId) {
                 activeReminders[chatId].push({ text: reminderText, timeoutId, triggerTime: Date.now() + ms });
 
                 return `Напоминание "${reminderText}" установлено на ${minutes} мин. (сработает в ${new Date(Date.now() + ms).toLocaleTimeString('ru-RU')})`;
+            }
+
+            case 'give_cookies': {
+                const amount = Math.min(Math.max(1, Math.round(args.amount || 1)), 5);
+                const { supabase, getUser, updateUser } = require('../database');
+                
+                const profiles = await searchUserByName(chatId, args.target_name);
+                if (!profiles || profiles.length === 0) return `Пользователь "${args.target_name}" не найден.`;
+                
+                const target = profiles[0];
+                const userDb = await getUser(chatId, target.user_id);
+                if (userDb) {
+                    await updateUser(userDb.id, { cookies: (userDb.cookies || 0) + amount });
+                    return `Подарила ${amount} 🍪 пользователю ${target.first_name}. Причина: ${args.reason || 'Просто так'}`;
+                }
+                return `Ошибка: не удалось обновить данные пользователя ${target.first_name}.`;
+            }
+
+            case 'react_to_message': {
+                try {
+                    // Telegram API: setMessageReaction (доступно в новых версиях)
+                    // Пытаемся отправить через прямой вызов API, если библиотека не поддерживает
+                    const emoji = args.emoji || '🔥';
+                    await bot.setMessageReaction(chatId, requesterId, {
+                        reaction: [{ type: 'emoji', emoji: emoji }],
+                        is_big: false
+                    });
+                    return `Поставила реакцию ${emoji}.`;
+                } catch (e) {
+                    // Если не получилось (старая версия бота или нет прав), просто игнорим
+                    return `Не удалось поставить реакцию: ${e.message}`;
+                }
             }
 
             default:
@@ -397,8 +462,10 @@ function getTimeContext() {
     const now = new Date();
     const hours = now.getHours();
     const days = ['воскресенье', 'понедельник', 'вторник', 'среда', 'четверг', 'пятница', 'суббота'];
+    const months = ['января', 'февраля', 'марта', 'апреля', 'мая', 'июня', 'июля', 'августа', 'сентября', 'октября', 'ноября', 'декабря'];
     const dayName = days[now.getDay()];
     const timeStr = now.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
+    const dateStr = `${now.getDate()} ${months[now.getMonth()]} ${now.getFullYear()}`;
 
     let timeOfDay;
     if (hours >= 5 && hours < 12) timeOfDay = 'утро';
@@ -406,7 +473,7 @@ function getTimeContext() {
     else if (hours >= 17 && hours < 22) timeOfDay = 'вечер';
     else timeOfDay = 'ночь';
 
-    return `Сейчас ${timeStr}, ${dayName}, ${timeOfDay}.`;
+    return `ТЕКУЩАЯ ДАТА: ${dateStr}, ${dayName}. Время: ${timeStr} (${timeOfDay}).`;
 }
 
 // ==================== ФОРМАТИРОВАНИЕ БУФЕРА ЧАТА ====================
@@ -539,10 +606,35 @@ async function _processAIChat(msg, extra = {}) {
         const finalSystemPrompt = SYSTEM_PROMPT + memoryPrompt + timeContext + bufferContext;
 
         // --- НАСТРОЕНИЕ ИИ ---
-        if (aiMood[chatId] === undefined) aiMood[chatId] = 50;
-        // Настроение меняется от активности чата (случайный дрифт)
-        aiMood[chatId] = Math.max(10, Math.min(100, aiMood[chatId] + Math.floor(Math.random() * 21) - 10));
-        // temperature: 0.5 (грустная) ... 1.0 (весёлая)
+        if (!aiMood[chatId]) aiMood[chatId] = 50;
+        
+        const lowerText = text.toLowerCase();
+        let moodChange = Math.floor(Math.random() * 11) - 5; // Базовый рандом -5...+5
+        
+        // Позитив
+        if (lowerText.includes('спасибо') || lowerText.includes('обожаю') || lowerText.includes('круто') || lowerText.includes('милая')) {
+            moodChange += 10;
+        }
+        // Негатив и мат (усиленное падение)
+        if (lowerText.includes('тупая') || lowerText.includes('дура') || lowerText.includes('бесишь') || lowerText.includes('кринж')) {
+            moodChange -= 15;
+        }
+        // Если в сообщении есть мат (очень простая проверка, можно улучшить)
+        const commonSwearWords = ['хуй', 'пизд', 'еба', 'бля', 'сука', 'гондон', 'уеб'];
+        if (commonSwearWords.some(word => lowerText.includes(word))) {
+            moodChange -= 20;
+        }
+
+        aiMood[chatId] = Math.min(Math.max(aiMood[chatId] + moodChange, 10), 100);
+        
+        let moodInstruction = '';
+        if (aiMood[chatId] < 35) {
+            moodInstruction = '\n\nВАЖНО: Твоё настроение ПАРШИВОЕ. Ты зла и раздражена. Если юзер грубит — отвечай МАТОМ и агрессивно. Не пытайся быть милой.';
+        } else if (aiMood[chatId] > 85) {
+            moodInstruction = '\n\nВАЖНО: Ты в восторге! Будь максимально милой, используй больше сердечек и шути по-доброму.';
+        }
+
+        // moodTemp зависит от настроения (от 0.5 (грустная) до 1.0 (весёлая))
         const moodTemp = 0.5 + (aiMood[chatId] / 100) * 0.5;
 
         // Санитизация истории перед отправкой (убираем сломанные цепочки)
@@ -551,7 +643,7 @@ async function _processAIChat(msg, extra = {}) {
         const completion = await openai.chat.completions.create({
             model: AI_MODEL,
             messages: [
-                { role: 'system', content: finalSystemPrompt },
+                { role: 'system', content: finalSystemPrompt + moodInstruction },
                 ...safeHistory
             ],
             tools: aiTools,
@@ -587,7 +679,7 @@ async function _processAIChat(msg, extra = {}) {
             const secondCompletion = await openai.chat.completions.create({
                 model: AI_MODEL,
                 messages: [
-                    { role: 'system', content: finalSystemPrompt },
+                    { role: 'system', content: finalSystemPrompt + moodInstruction },
                     ...safeHistory2
                 ],
                 temperature: moodTemp,
@@ -641,4 +733,4 @@ async function _processAIChat(msg, extra = {}) {
     }
 }
 
-module.exports = { handleAIChat };
+module.exports = { handleAIChat, aiMood, AI_NAME };
