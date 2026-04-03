@@ -331,6 +331,7 @@ async function searchUserByName(chatId, query) {
 
     if (error || !data || data.length === 0) return null;
     return data.map(u => ({
+        user_id: u.user_id,
         name: u.username ? `@${u.username}` : u.first_name,
         level: u.level,
         xp: u.xp,

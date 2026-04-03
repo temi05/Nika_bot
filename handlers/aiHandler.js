@@ -183,7 +183,7 @@ async function resolveUser(chatId, targetName) {
         }
     }
     const results = await searchUserByName(chatId, stem);
-    if (results && results.length > 0) {
+    if (results && results.length > 0 && results[0].user_id) {
         return await getUser(chatId, results[0].user_id);
     }
     return null;
