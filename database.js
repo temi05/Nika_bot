@@ -316,17 +316,29 @@ async function getChatStats(chatId) {
     };
 }
 
-// Поиск пользователя по имени или @username
+// Улучшенное выделение корня слова для интеллектуального поиска
+function getStem(word) {
+    if (!word || word.length < 3) return word;
+    // Отсекаем типичные окончания падежей и множественного числа (рус/англ)
+    return word.toLowerCase()
+        .replace(/[уаеяюиыо]$/i, '') // Русские окончания (ед.ч.)
+        .replace(/(ов|ев|ий|ый|ые|ие|ах|ях|ом|ем)$/i, '') // Более сложные русские окончания
+        .replace(/(s|es|ed|ing)$/i, ''); // Английские окончания
+}
+
+// Поиск пользователя по имени или @username (Интеллектуальный)
 async function searchUserByName(chatId, query) {
     if (!query) return null;
-    const cleanQuery = query.replace('@', '').toLowerCase();
-    const latinQuery = transliterate(cleanQuery);
+    const cleanQuery = query.replace('@', '').toLowerCase().trim();
+    const stem = getStem(cleanQuery);
+    const latinStem = transliterate(stem);
 
+    // Ищем по оригиналу, транслитерации и их корням (стеммам)
     const { data, error } = await supabase
         .from('users')
         .select('user_id, first_name, username, level, xp, reputation, bio, ai_notes, warns, birthday')
         .eq('chat_id', chatId)
-        .or(`username.ilike.%${cleanQuery}%,first_name.ilike.%${cleanQuery}%,username.ilike.%${latinQuery}%,first_name.ilike.%${latinQuery}%,ai_notes.ilike.%${cleanQuery}%,bio.ilike.%${cleanQuery}%`)
+        .or(`username.ilike.%${stem}%,first_name.ilike.%${stem}%,username.ilike.%${latinStem}%,first_name.ilike.%${latinStem}%,ai_notes.ilike.%${stem}%,bio.ilike.%${stem}%`)
         .limit(5);
 
     if (error || !data || data.length === 0) return null;
