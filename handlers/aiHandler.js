@@ -16,10 +16,10 @@ const openai = new OpenAI({
     baseURL: 'https://polza.ai/api/v1',
 });
 
-const chatHistory = {}; 
-const messageCount = {}; 
+const chatHistory = {};
+const messageCount = {};
 const activeParticipants = {};
-const aiMood = {}; 
+const aiMood = {};
 
 const aiTools = [
     {
@@ -254,7 +254,7 @@ async function executeToolCall(toolCall, chatId, messageId) {
                 const u = await resolveUser(chatId, args.target_name);
                 if (!u) return "Не найден.";
                 const dur = Math.min(Math.max(1, args.duration_minutes || 15), 1440);
-                await bot.restrictChatMember(chatId, u.user_id, { until_date: Math.floor(Date.now()/1000) + dur*60 });
+                await bot.restrictChatMember(chatId, u.user_id, { until_date: Math.floor(Date.now() / 1000) + dur * 60 });
                 return `${u.first_name} в муте на ${dur} мин. Причина: ${args.reason}`;
             }
             case 'unmute_user': {
@@ -274,7 +274,7 @@ async function executeToolCall(toolCall, chatId, messageId) {
             case 'give_cookies': {
                 const u = await resolveUser(chatId, args.target_name);
                 if (!u) return "Не найден.";
-                await updateUser(u.id, { cookies: (u.cookies || 0) + args.amount });
+                await updateUser(u.id, { reputation: (u.reputation || 0) + args.amount });
                 return `Дала ${args.amount} печенек ${u.first_name}.`;
             }
             case 'react_to_message': {
@@ -295,9 +295,9 @@ async function executeToolCall(toolCall, chatId, messageId) {
             }
             default: return "Ошибка инструмента.";
         }
-    } catch (e) { 
+    } catch (e) {
         console.error(`[AI TOOL ERROR] ${fn}:`, e.message);
-        return `Ошибка: ${e.message}`; 
+        return `Ошибка: ${e.message}`;
     }
 }
 
