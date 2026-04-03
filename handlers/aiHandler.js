@@ -8,7 +8,7 @@ const {
 } = require('../database');
 
 const POLZA_API_KEY = process.env.POLZA_API_KEY || 'pza_Ut5ahRtIFZSzj_jKezwdRvQMMebqZ1BI';
-const AI_MODEL = process.env.AI_MODEL || 'gpt-4o-mini';
+const AI_MODEL = process.env.AI_MODEL || 'google/gemma-3-27b-it';
 const AI_NAME = process.env.AI_NAME || 'НейроНика';
 
 const openai = new OpenAI({
@@ -23,8 +23,58 @@ const messageCount = {}; // { chatId: counter }
 // Напоминания (RAM)
 const activeReminders = {}; // { chatId: [{ text, timeoutId, triggerTime }] }
 
+// Кулдаун на ИИ-ответы (5 сек на юзера, предотвращает спам)
+const aiCooldowns = {}; // { `chatId_userId`: timestamp }
+const AI_COOLDOWN_MS = 5000;
+
+// Настроение ИИ (влияет на temperature)
+const aiMood = {}; // { chatId: number 0-100 }
+
+// Блокировки чатов (предотвращает race condition при параллельных сообщениях)
+const chatLocks = {}; // { chatId: Promise }
+
+// Очистка истории от "сломанных" цепочек tool_calls
+function sanitizeHistory(history) {
+    const clean = [];
+    for (let i = 0; i < history.length; i++) {
+        const msg = history[i];
+        if (msg.role === 'tool') {
+            // tool допустим только если перед ним был assistant с tool_calls
+            const prev = clean[clean.length - 1];
+            if (prev && prev.role === 'assistant' && prev.tool_calls) {
+                clean.push(msg);
+            } else {
+                // Также проверяем — может перед нами уже идет другой tool от того же assistant
+                const prevTool = clean[clean.length - 1];
+                if (prevTool && prevTool.role === 'tool') {
+                    // Ищем assistant с tool_calls выше
+                    let foundAssistant = false;
+                    for (let j = clean.length - 1; j >= 0; j--) {
+                        if (clean[j].role === 'assistant' && clean[j].tool_calls) { foundAssistant = true; break; }
+                        if (clean[j].role === 'user') break; // Прервали цепь
+                    }
+                    if (foundAssistant) clean.push(msg);
+                    // Иначе пропускаем — осиротевший tool
+                }
+                // Иначе пропускаем — осиротевший tool
+            }
+        } else if (msg.role === 'assistant' && msg.tool_calls) {
+            // assistant с tool_calls допустим только если за ним идут tool-ответы
+            // Проверяем, есть ли хотя бы один tool после
+            const nextMsg = history[i + 1];
+            if (nextMsg && nextMsg.role === 'tool') {
+                clean.push(msg);
+            }
+            // Если tool-ответов нет (потерялись) — пропускаем этот assistant
+        } else {
+            clean.push(msg);
+        }
+    }
+    return clean;
+}
+
 // ==================== СИСТЕМНЫЙ ПРОМПТ ====================
-const SYSTEM_PROMPT = `Ты — ${AI_NAME}, дерзкая стримерша в фан-чате. 
+const SYSTEM_PROMPT = `Ты — ${AI_NAME}, дерзкая виртуальная версия стримерши но не ее замена, в фан-чате. 
 ЛИЧНОСТЬ: Сарказм, дружелюбие, на "ты", минимум эмодзи (1-2), ответы КОРОТКИЕ (1-3 предл.).
 СЛЕНГ: Кринж, флекс — умеренно. 
 МОДЕРАЦИЯ: Варнь только по просьбе админа или за грубый спам/мат. 
@@ -370,6 +420,27 @@ function formatChatBuffer(buffer) {
 // ==================== ОСНОВНАЯ ФУНКЦИЯ ====================
 async function handleAIChat(msg, extra = {}) {
     const chatId = msg.chat.id;
+
+    // --- LOCK: ждём, пока предыдущий запрос для этого чата не завершится ---
+    while (chatLocks[chatId]) {
+        await chatLocks[chatId].catch(() => { });
+    }
+
+    // Создаём новый lock — промис, который завершится, когда мы закончим
+    let unlockChat;
+    chatLocks[chatId] = new Promise(resolve => { unlockChat = resolve; });
+
+    try {
+        await _processAIChat(msg, extra);
+    } finally {
+        delete chatLocks[chatId];
+        unlockChat();
+    }
+}
+
+// Внутренняя логика (защищена lock-ом)
+async function _processAIChat(msg, extra = {}) {
+    const chatId = msg.chat.id;
     const text = msg.text || msg.caption || '';
     const userId = msg.from.id;
     const userName = msg.from.first_name || 'Аноним';
@@ -386,6 +457,18 @@ async function handleAIChat(msg, extra = {}) {
     );
 
     if (!isPrivate && !isMentioned && !isPhotoMention) return;
+
+    // --- ФИЛЬТР ПУСТЫХ ОБРАЩЕНИЙ ---
+    // Если юзер написал просто "ника" или "ника да/ок/нет" — не тратим API-вызов
+    const cleanText = text.replace(new RegExp(AI_NAME, 'gi'), '').trim();
+    const emptyWords = ['', 'да', 'нет', 'ок', 'окей', 'ладно', 'угу', 'ага', 'ну', 'а', 'э'];
+    if (!hasPhoto && emptyWords.includes(cleanText.toLowerCase())) return;
+
+    // --- КУЛДАУН 5 СЕК НА ЮЗЕРА ---
+    const cooldownKey = `${chatId}_${userId}`;
+    const now = Date.now();
+    if (aiCooldowns[cooldownKey] && (now - aiCooldowns[cooldownKey]) < AI_COOLDOWN_MS) return;
+    aiCooldowns[cooldownKey] = now;
 
     if (!chatHistory[chatId]) {
         chatHistory[chatId] = [];
@@ -431,9 +514,14 @@ async function handleAIChat(msg, extra = {}) {
         chatHistory[chatId].push({ role: 'user', content: contextMsg });
     }
 
-    // Храним до 15 сообщений
-    if (chatHistory[chatId].length > 15) {
-        chatHistory[chatId] = chatHistory[chatId].slice(-15);
+    // Храним до 12 сообщений (было 15)
+    if (chatHistory[chatId].length > 12) {
+        let trimmed = chatHistory[chatId].slice(-12);
+        // Убираем осиротевшие tool/assistant-with-tool_calls в начале
+        while (trimmed.length > 0 && (trimmed[0].role === 'tool' || (trimmed[0].role === 'assistant' && trimmed[0].tool_calls))) {
+            trimmed.shift();
+        }
+        chatHistory[chatId] = trimmed;
     }
 
     try {
@@ -450,14 +538,24 @@ async function handleAIChat(msg, extra = {}) {
 
         const finalSystemPrompt = SYSTEM_PROMPT + memoryPrompt + timeContext + bufferContext;
 
+        // --- НАСТРОЕНИЕ ИИ ---
+        if (aiMood[chatId] === undefined) aiMood[chatId] = 50;
+        // Настроение меняется от активности чата (случайный дрифт)
+        aiMood[chatId] = Math.max(10, Math.min(100, aiMood[chatId] + Math.floor(Math.random() * 21) - 10));
+        // temperature: 0.5 (грустная) ... 1.0 (весёлая)
+        const moodTemp = 0.5 + (aiMood[chatId] / 100) * 0.5;
+
+        // Санитизация истории перед отправкой (убираем сломанные цепочки)
+        const safeHistory = sanitizeHistory(chatHistory[chatId]);
+
         const completion = await openai.chat.completions.create({
             model: AI_MODEL,
             messages: [
                 { role: 'system', content: finalSystemPrompt },
-                ...chatHistory[chatId]
+                ...safeHistory
             ],
             tools: aiTools,
-            temperature: 0.8,
+            temperature: moodTemp,
             max_tokens: 500,
         });
 
@@ -482,14 +580,17 @@ async function handleAIChat(msg, extra = {}) {
                 });
             }
 
+            // Санитизация перед вторым запросом тоже
+            const safeHistory2 = sanitizeHistory(chatHistory[chatId]);
+
             // Второй запрос с результатами функций
             const secondCompletion = await openai.chat.completions.create({
                 model: AI_MODEL,
                 messages: [
                     { role: 'system', content: finalSystemPrompt },
-                    ...chatHistory[chatId]
+                    ...safeHistory2
                 ],
-                temperature: 0.8,
+                temperature: moodTemp,
                 max_tokens: 500,
             });
 
@@ -504,7 +605,7 @@ async function handleAIChat(msg, extra = {}) {
             bot.sendMessage(chatId, response, { reply_to_message_id: msg.message_id, parse_mode: 'HTML' });
         }
 
-                // --- ЛОГИКА СЖАТИЯ ПАМЯТИ ---
+        // --- ЛОГИКА СЖАТИЯ ПАМЯТИ ---
         if (!messageCount[chatId]) messageCount[chatId] = 0;
         messageCount[chatId]++;
 
@@ -524,7 +625,7 @@ async function handleAIChat(msg, extra = {}) {
 
     } catch (error) {
         console.error('Ошибка ИИ:', error.message);
-        
+
         // Если история сломалась (ошибка 400), сбрасываем её полностью для этого чата
         if (error.message.includes('400') || error.message.includes('role')) {
             console.log(`[AI] Сброс истории чата ${chatId} из-за ошибки структуры ролей.`);
