@@ -259,17 +259,19 @@ async function summarizeMemory(chatId, history, oldMemory) {
             .map(m => `${m.role === 'user' ? 'Юзер' : 'ИИ'}: ${m.content || 'Вызов функции'}`)
             .join('\n');
 
-        const prompt = `Ты — аналитик. Твоя задача: обновить дневник памяти чата.
+        const prompt = `Ты — ${AI_NAME}. Это твой ЛИЧНЫЙ ДНЕВНИК ПАМЯТИ ЧАТА. 
+        Твоя задача: кратко записать всё важное, что произошло в последних диалогах.
         
-[СТАРЫЙ ДНЕВНИК]:
+[ТВОЙ СТАРЫЙ ДНЕВНИК]:
 "${oldMemory || 'Пусто'}"
         
-[НОВЫЕ СООБЩЕНИЯ]:
+[ЧТО НОВОГО СЛУЧИЛОСЬ]:
 "${cleanHistory}"
         
-Напиши обновленный дневник (СВЯЗНЫМ ТЕКСТОМ, НЕ JSON). 
-Сохрани ключевые факты о пользователях (кто есть кто, кто над кем шутил, какие темы обсуждали) и объедини их со старым дневником. 
-Выкинь мусор и пустую болтовню. Пиши максимально кратко, но информативно.`;
+Напиши обновленный дневник СУБЪЕКТИВНО, в своем стиле. 
+Отмечай: кто тебя бесил, кто смешил, кто тебе нравится (твои "краши"), а кто — полный нуб. 
+Объедини это со старым дневником. Пиши связным текстом, кратко, без лишнего мусора. 
+Это твои личные мысли о людях, они помогут тебе помнить, как с кем общаться.`;
 
         const completion = await openai.chat.completions.create({
             model: AI_MODEL,
@@ -539,9 +541,10 @@ async function _processAIChat(msg, extra = {}) {
 
     // --- ФИЛЬТР ПУСТЫХ ОБРАЩЕНИЙ ---
     // Если юзер написал просто "ника" или "ника да/ок/нет" — не тратим API-вызов
+    // Ослабленный фильтр: позволяем ИИ иронизировать даже над короткими фразами, если есть контекст
     const cleanText = text.replace(new RegExp(AI_NAME, 'gi'), '').trim();
-    const emptyWords = ['', 'да', 'нет', 'ок', 'окей', 'ладно', 'угу', 'ага', 'ну', 'а', 'э'];
-    if (!hasPhoto && emptyWords.includes(cleanText.toLowerCase())) return;
+    const silentWords = ['', '...']; 
+    if (!hasPhoto && silentWords.includes(cleanText.toLowerCase())) return;
 
     // --- КУЛДАУН 5 СЕК НА ЮЗЕРА ---
     const cooldownKey = `${chatId}_${userId}`;
@@ -643,11 +646,11 @@ async function _processAIChat(msg, extra = {}) {
         if (aiMood[chatId] < 35) {
             moodInstruction = '\n\nВАЖНО: Твоё настроение ПАРШИВОЕ. Ты зла и раздражена. Если юзер грубит — отвечай МАТОМ и агрессивно. Не пытайся быть милой.';
         } else if (aiMood[chatId] > 85) {
-            moodInstruction = '\n\nВАЖНО: Ты в восторге! Будь максимально милой, используй больше сердечек и шути по-доброму.';
+            moodInstruction = '\n\nВАЖНО: Ты в душевном восторге! Будь щедрой на похвалу и печеньки, подкалывай по-доброму, но оставайся собой — никакой "сахарной" вежливости.';
         }
 
-        // moodTemp зависит от настроения (от 0.5 (грустная) до 1.0 (весёлая))
-        const moodTemp = 0.5 + (aiMood[chatId] / 100) * 0.5;
+        // Повышенная температура для креативности (больше сарказма и жизни)
+        const moodTemp = 0.85;
 
         // Санитизация истории перед отправкой (убираем сломанные цепочки)
         const safeHistory = sanitizeHistory(chatHistory[chatId]);
@@ -698,7 +701,15 @@ async function _processAIChat(msg, extra = {}) {
                 max_tokens: 500,
             });
 
-            const finalResponse = secondCompletion.choices[0]?.message?.content || 'Окей, всё сделала!';
+            const defaultPhrases = [
+                'Всё, готово. Не благодари.',
+                'Сделала в лучшем виде, как и всегда.',
+                'Всё, я поправила. Что дальше?',
+                'Готово. Надеюсь, ты доволен.',
+                'Всё, всё, не ной — сделала.'
+            ];
+            const finalResponse = secondCompletion.choices[0]?.message?.content || 
+                                 defaultPhrases[Math.floor(Math.random() * defaultPhrases.length)];
             bot.sendMessage(chatId, finalResponse, { reply_to_message_id: msg.message_id, parse_mode: 'HTML' });
             chatHistory[chatId].push({ role: 'assistant', content: finalResponse });
 

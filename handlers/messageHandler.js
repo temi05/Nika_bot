@@ -53,7 +53,12 @@ function registerMessageHandlers() {
                 }
             }
 
-            if (foundBadWord || isPromoBlocked) {
+            // ПРИОРИТЕТ ИИ: Если в сообщении есть "НейроНика" или это реплай на ИИ — пропускаем фильтр мата
+            // СТРИМЕРША (Ника) при этом остается под защитой
+            const isAiMention = text.includes('нейроника');
+            const isReplyToAi = msg.reply_to_message && msg.reply_to_message.from.is_bot;
+            
+            if ((foundBadWord || isPromoBlocked) && !isAiMention && !isReplyToAi) {
                 bot.deleteMessage(chatId, msg.message_id).catch(() => { });
                 const newWarns = dbUser.warns + 1;
                 await updateUser(dbUser.id, { warns: newWarns });
@@ -99,8 +104,13 @@ function registerMessageHandlers() {
                 const newLevel = dbUser.xp + xpGain >= nextXp ? dbUser.level + 1 : dbUser.level;
                 await updateUser(dbUser.id, { xp: dbUser.xp + xpGain, level: newLevel, last_message_time: now });
                 if (newLevel > dbUser.level) {
-                   const levelUpMsg = `🎉 Поздравляем!\n` + 
-                                      `👤 <b>${escapeHTML(getUserName(user))}</b> достиг <b>${newLevel} уровня</b>! 🌟`;
+                   const levelUpPhrases = [
+                       `👤 <b>${escapeHTML(getUserName(user))}</b>, ты теперь <b>${newLevel} уровня</b>. Растешь, не по дням, а по часам! 📈`,
+                       `О, <b>${escapeHTML(getUserName(user))}</b> дополз до <b>${newLevel} лвла</b>. Неплохо, для начала. 🌟`,
+                       `Смотрите-ка, <b>${escapeHTML(getUserName(user))}</b> апнул <b>${newLevel} уровень</b>! Продолжай в том же духе. 🔥`,
+                       `<b>${newLevel} уровень</b> у <b>${escapeHTML(getUserName(user))}</b>! Скоро меня догонишь (шучу, нет). 🚀`
+                   ];
+                   const levelUpMsg = levelUpPhrases[Math.floor(Math.random() * levelUpPhrases.length)];
                    sendTimedMessage(chatId, levelUpMsg, 30000, { parse_mode: 'HTML' });
                 }
             }
@@ -122,10 +132,18 @@ function registerMessageHandlers() {
                 const receiver = await getUser(chatId, rId, rInfo);
                 if (receiver) {
                     await updateUser(receiver.id, { reputation: receiver.reputation + change });
-                    const text = change > 0 
-                        ? `🌟 <b>${escapeHTML(getUserName(user))}</b> передал печеньку <b>${escapeHTML(getUserName(rInfo))}</b>!\n└ Теперь у него <code>${receiver.reputation + change} 🍪</code>`
-                        : `📉 <b>${escapeHTML(getUserName(user))}</b> отнял печеньку у <b>${escapeHTML(getUserName(rInfo))}</b>!\n└ Теперь у него <code>${receiver.reputation + change} 🍪</code>`;
-                    sendTimedMessage(chatId, text, 60000, { parse_mode: 'HTML' });
+                    const cookiePhrases = [
+                        `🌟 <b>${escapeHTML(getUserName(user))}</b> передал печеньку <b>${escapeHTML(getUserName(rInfo))}</b>!\n└ Теперь у него <code>${receiver.reputation + change} 🍪</code>`,
+                        `Держи, <b>${escapeHTML(getUserName(rInfo))}</b>, тебе прилетела печенька от <b>${escapeHTML(getUserName(user))}</b>. \n└ В копилке теперь <code>${receiver.reputation + change} 🍪</code>`
+                    ];
+                    const lossPhrases = [
+                        `📉 <b>${escapeHTML(getUserName(user))}</b> отнял печеньку у <b>${escapeHTML(getUserName(rInfo))}</b>. Грустно.\n└ Осталось <code>${receiver.reputation + change} 🍪</code>`,
+                        `Минус печенька у <b>${escapeHTML(getUserName(rInfo))}</b>. Постарался <b>${escapeHTML(getUserName(user))}</b>.\n└ Теперь их всего <code>${receiver.reputation + change} 🍪</code>`
+                    ];
+                    const repMsg = change > 0 
+                        ? cookiePhrases[Math.floor(Math.random() * cookiePhrases.length)]
+                        : lossPhrases[Math.floor(Math.random() * lossPhrases.length)];
+                    sendTimedMessage(chatId, repMsg, 60000, { parse_mode: 'HTML' });
                     reactionCooldowns[cooldownKey] = Date.now();
                 }
             }
