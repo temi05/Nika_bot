@@ -84,8 +84,16 @@ function registerMessageHandlers() {
         // 3.1 Записываем ВСЕ сообщения в буфер (для контекста ИИ)
         if (msg.text || msg.caption) {
             if (!chatBuffer[chatId]) chatBuffer[chatId] = [];
-            const userName = msg.from.first_name || 'Аноним';
-            const userTag = msg.from.username ? `${userName} (@${msg.from.username})` : userName;
+            // Если это анонимный админ, берем его подпись (если есть), иначе форматируем имя
+            let userTag = '';
+            if (msg.from && msg.from.username === 'GroupAnonymousBot') {
+                userTag = msg.author_signature ? msg.author_signature : 'Анонимный админ';
+            } else {
+                const name = user ? user.first_name : (msg.from?.first_name || 'Аноним');
+                const username = user && user.username ? ` (@${user.username})` : (msg.from?.username ? ` (@${msg.from.username})` : '');
+                userTag = name + username;
+            }
+
             chatBuffer[chatId].push({
                 name: userTag,
                 text: msg.text || msg.caption || (msg.photo ? '[📷 фото]' : '[💬 медиа]'),
