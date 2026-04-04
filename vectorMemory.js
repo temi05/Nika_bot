@@ -1,4 +1,4 @@
-const OpenAI = require('openai');
+﻿const OpenAI = require('openai');
 const { insertKnowledge, searchKnowledge, checkFactExists } = require('./database');
 
 const POLZA_API_KEY = process.env.POLZA_API_KEY || 'pza_Ut5ahRtIFZSzj_jKezwdRvQMMebqZ1BI';
@@ -27,22 +27,10 @@ async function createEmbedding(text) {
 async function extractAndSaveFacts(chatId, historyText, participants = []) {
     try {
         const participantInfo = participants.length > 0 ? 
-            `Участники чата: ${participants.join(', ')}. Используй ТОЛЬКО эти имена для идентификации.` : 
+            "Участники чата: " + participants.join(', ') + ". Используй ТОЛЬКО эти имена для идентификации." : 
             "Определи имена участников из диалога.";
 
-        const prompt = `Ты — эксперт по верификации данных. Твоя задача — извлечь из диалога ДОЛГОСРОЧНЫЕ факты об участниках чата.
-
-[ПРАВИЛА ИЗВЛЕЧЕНИЯ СВЯЗЕЙ (Memory v3)]
-1. СУБЪЕКТЫ: Каждый факт ДОЛЖЕН начинаться с Имени (в точности как в чате). НИКАКИХ "Он", "Она", "Бот".
-2. ФОРМАТ: "Имя: [Действие] [Объект] (Контекст)". Например: "Чика: купил iPhone 15", "Марго: дружит с Чикой", "Темирлан: живет в Казахстане (ночью)".
-3. СВЯЗИ: Описывай отношения между людьми и их владение предметами.
-4. ПРИОРИТЕТЫ: Крупные покупки, хобби, место работы, важные события, отношения.
-
-${participantInfo}
-
-Диалог для анализа:
-${historyText}`;
-
+        const prompt = "Ты — эксперт по верификации данных. Твоя задача — извлечь из диалога ДОЛГОСРОЧНЫЕ факты об участниках чата.\n\n[ПРАВИЛА ИЗВЛЕЧЕНИЯ СВЯЗЕЙ (Memory v3)]\n1. СУБЪЕКТЫ: Каждый факт ДОЛЖЕН начинаться с Имени (в точности как в чате). НИКАКИХ 'Он', 'Она', 'Бот'.\n2. ФОРМАТ: 'Имя: [Действие] [Объект] (Контекст)'.\n3. СВЯЗИ: Описывай отношения между людьми.\n4. ПРИОРИТЕТЫ: Крупные покупки, хобби, важные события.\n\n" + participantInfo + "\n\nДиалог для анализа:\n" + historyText;
 
         const completion = await openai.chat.completions.create({
             model: AI_MODEL,
@@ -52,63 +40,33 @@ ${historyText}`;
         });
 
         const rawContent = completion.choices[0].message.content;
-        console.log(`[MEMORY EXTRACTOR] Ответ ИИ: ${rawContent}`);
+        console.log("[MEMORY EXTRACTOR] Ответ ИИ: " + rawContent);
 
         let result;
         try {
-            // 1. Предварительная очистка от Markdown
-            let cleanContent = rawContent.replace(/```json/g, '').replace(/```/g, '').trim();
-            
-            // 2. Если JSON не валиден (возможно обрезан), пробуем восстановить скобки и кавычки
-            try {
-                result = JSON.parse(cleanContent);
-            } catch (initialError) {
-                // Пытаемся закрыть кавычки, если строка обрезана в середине
-                if (cleanContent.startsWith('{')) {
-                    // Если нечетное количество кавычек, добавляем одну в конце
-                    const quotes = (cleanContent.match(/"/g) || []).length;
-                    if (quotes % 2 !== 0) cleanContent += '"';
-                    
-                    let balance_braces = (cleanContent.match(/{/g) || []).length - (cleanContent.match(/}/g) || []).length;
-                    let balance_brackets = (cleanContent.match(/\[/g) || []).length - (cleanContent.match(/]/g) || []).length;
-                    
-                    while (balance_brackets > 0) { cleanContent += ']'; balance_brackets--; }
-                    while (balance_braces > 0) { cleanContent += '}'; balance_braces--; }
-                    
-                    result = JSON.parse(cleanContent);
-                } else {
-                    throw initialError;
-                }
-            }
+            let cleanContent = rawContent.replace(/`json/g, '').replace(/`/g, '').trim();
+            result = JSON.parse(cleanContent);
         } catch (parseError) {
-            console.log(`[MEMORY EXTRACTOR] ⚠️ Не удалось распарсить JSON. Возможно, ответ слишком короткий или поврежден. Ошибка: ${parseError.message}`);
+            console.log("[MEMORY EXTRACTOR] Ошибка парсинга JSON: " + parseError.message);
             return;
         }
         
         const facts = result.facts || [];
 
-        const savedNewFacts = [];
-
         for (const fact of facts) {
             const exists = await checkFactExists(chatId, fact);
-            if (exists) {
-                // Если факт уже есть в базе, не делаем эмбеддинг и пропускаем
-                continue;
-            }
+            if (exists) continue;
 
             const embedding = await createEmbedding(fact);
             if (embedding) {
-                // Семантическая дедупликация (теперь более деликатная: 95%+)
                 const duplicates = await searchKnowledge(chatId, embedding, 1, 0.95);
                 if (duplicates && duplicates.length > 0) {
-                    console.log(`[MEMORY] Семантический дубликат пропущен. Фраза "${fact}" почти идентична уже известной.`);
+                    console.log("[MEMORY] Семантический дубликат пропущен: " + fact);
                     continue;
                 }
 
-
                 await insertKnowledge(chatId, fact, embedding);
-                console.log(`[MEMORY] Успешно запомнен факт: ${fact}`);
-                savedNewFacts.push(fact);
+                console.log("[MEMORY] Успешно запомнен факт: " + fact);
             }
         }
     } catch (e) {
@@ -116,38 +74,44 @@ ${historyText}`;
     }
 }
 
-// Поиск фактов для ответа (ГИБРИДНАЯ МОДЕЛЬ: Векторы + Ключевые слова + История + Субъекты)
+// Поиск фактов для ответа (ГИБРИДНАЯ МОДЕЛЬ v3.3.1: Векторы + Широкие Ключи + Стеммы имен)
 async function getRelevantFacts(chatId, userMessage, userName = "", activeParticipants = []) {
     if (!userMessage || userMessage.trim() === '') return "";
 
-    const { searchKnowledgeByText, getRecentKnowledge } = require('./database');
+    const { searchKnowledgeByText, getRecentKnowledge, transliterate } = require('./database');
     const allFoundFacts = new Set();
     const finalFacts = [];
 
-    const lowMsg = userMessage.toLowerCase();
+    // Стоп-слова
+    const stopWords = new Set(['меня', 'тебя', 'чтобы', 'какой', 'такой', 'зачем', 'почему', 'когда', 'будет', 'очень', 'просто', 'может', 'нужно', 'хочу', 'люблю']);
 
+    const getStemLocal = (word) => {
+        if (!word || word.length < 3) return word;
+        return word.toLowerCase()
+            .replace(/[уаеяюиыо]$/i, '')
+            .replace(/(ов|ев|ий|ый|ые|ие|ах|ях|ом|ем|ам|ам|у|е|а|я)$/i, '')
+            .replace(/(s|es|ed|ing)$/i, '');
+    };
 
     // --- СТРИМ 1: СЕМАНТИКА (ВЕКТОРЫ) ---
     const embeddingRaw = await createEmbedding(userMessage);
-    const vectorResults = await searchKnowledge(chatId, embeddingRaw, 5, 0.40);
+    const vectorResults = await searchKnowledge(chatId, embeddingRaw, 10, 0.30);
     vectorResults.forEach(r => {
         if (!allFoundFacts.has(r.fact)) {
             allFoundFacts.add(r.fact);
-            finalFacts.push({ source: 'semantic', text: r.fact });
+            finalFacts.push({ source: 'semantic', text: r.fact, relevance: r.similarity || 0.5 });
         }
     });
 
-    // --- СТРИМ 2: КЛЮЧЕВЫЕ СЛОВА (SQL ILIKE) ---
-    // Извлекаем "тяжелые" слова (длиннее 4 символов)
-    const keywords = userMessage.split(/\s+/)
+    // --- СТРИМ 2: ШИРОКИЕ КЛЮЧЕВЫЕ СЛОВА ---
+    const words = userMessage.split(/\s+/)
         .map(w => w.replace(/[.,!?;:()]/g, '').toLowerCase())
-        .filter(w => w.length > 4);
+        .filter(w => w.length > 3 && !stopWords.has(w));
     
-    if (keywords.length > 0) {
-        // Берем топ-2 самых длинных слова для поиска
-        const bestKeywords = keywords.sort((a, b) => b.length - a.length).slice(0, 2);
-        for (const kw of bestKeywords) {
-            const textResults = await searchKnowledgeByText(chatId, kw, 3);
+    if (words.length > 0) {
+        for (const word of words.slice(0, 7)) {
+            const stem = getStemLocal(word);
+            const textResults = await searchKnowledgeByText(chatId, stem, 3);
             textResults.forEach(r => {
                 if (!allFoundFacts.has(r.fact)) {
                     allFoundFacts.add(r.fact);
@@ -157,9 +121,9 @@ async function getRelevantFacts(chatId, userMessage, userName = "", activePartic
         }
     }
 
-    // --- СТРИМ 3: ИСТОРИЯ ЛИЧНОСТИ (ПОСЛЕДНИЕ СОБЫТИЯ) ---
+    // --- СТРИМ 3: ИСТОРИЯ КОНКРЕТНОГО ЮЗЕРА ---
     if (userName) {
-        const recentResults = await getRecentKnowledge(chatId, userName, 7);
+        const recentResults = await getRecentKnowledge(chatId, userName, 10);
         recentResults.forEach(r => {
             if (!allFoundFacts.has(r.fact)) {
                 allFoundFacts.add(r.fact);
@@ -168,32 +132,31 @@ async function getRelevantFacts(chatId, userMessage, userName = "", activePartic
         });
     }
 
-    // --- СТРИМ 4: ПОИСК ПО СУБЪЕКТАМ (SMART NAME MATCH) ---
-    // Собираем список всех имен и ников текущих участников для точечного поиска
-    const searchTargets = new Set();
-    
-    // 1. Имена из участников чата (из метаданных)
-    activeParticipants.forEach(p => {
-        if (p.firstName && lowMsg.includes(p.firstName.toLowerCase())) searchTargets.add(p.firstName);
-        if (p.username && lowMsg.includes(p.username.toLowerCase())) searchTargets.add(p.username);
-    });
+    // --- СТРИМ 4: АГРЕССИВНЫЙ ПОИСК ПО СУБЪЕКТАМ ---
+    const searchStems = new Set();
+    const addTargetWithStem = (name) => {
+        if (!name || name.length < 3) return;
+        const stem = getStemLocal(name);
+        searchStems.add(stem);
+        searchStems.add(name.toLowerCase());
+        const trans = transliterate(name);
+        if (trans !== name.toLowerCase()) searchStems.add(getStemLocal(trans));
+    };
 
-    // 2. Имена из регулярки (С заглавной буквы или @юзернеймы)
-    const potentialNames = userMessage.match(/([А-Я][а-я]+|@[a-zA-Z0-9_]+)/g) || [];
-    potentialNames.forEach(n => searchTargets.add(n.replace('@', '')));
-
-    // 3. ПОДДЕРЖКА "Я" (Memory v3.2): Если юзер говорит о себе
-    if (userName && (/\b(я|меня|мой|мои|мне)\b/i.test(userMessage))) {
-        searchTargets.add(userName);
+    addTargetWithStem(userName);
+    if (activeParticipants) {
+        activeParticipants.forEach(p => {
+            if (p.firstName) addTargetWithStem(p.firstName);
+            if (p.username) addTargetWithStem(p.username);
+        });
     }
 
-    for (const name of searchTargets) {
-        if (name.length < 3) continue;
-        
-        // Ищем записи, начинающиеся строго с этого имени "Имя:" или "@Ник:"
-        const nameResults = await searchKnowledgeByText(chatId, `${name}:`, 10);
+    const potentialNames = userMessage.match(/([А-Я][а-я]+|@[a-zA-Z0-9_]+)/g) || [];
+    potentialNames.forEach(n => addTargetWithStem(n.replace('@', '')));
 
-        nameResults.forEach(r => {
+    for (const stem of searchStems) {
+        const byStem = await searchKnowledgeByText(chatId, stem, 10);
+        byStem.forEach(r => {
             if (!allFoundFacts.has(r.fact)) {
                 allFoundFacts.add(r.fact);
                 finalFacts.push({ source: 'subject', text: r.fact });
@@ -201,42 +164,33 @@ async function getRelevantFacts(chatId, userMessage, userName = "", activePartic
         });
     }
 
-
-
     if (finalFacts.length === 0) return "";
 
-    // Сортируем: сначала семантика, потом ключевые слова, потом история, но ограничиваем общее число
-    const factsText = finalFacts
-        .slice(0, 15)
-        .map((f, i) => `${i + 1}. [${f.source}] ${f.text}`)
+    const sortedFacts = finalFacts.sort((a, b) => {
+        const order = { 'subject': 0, 'recent': 1, 'semantic': 2, 'keyword': 3 };
+        return order[a.source] - order[b.source];
+    });
+
+    const factsText = sortedFacts
+        .slice(0, 25)
+        .map((f, i) => (i + 1) + ". [" + f.source + "] " + f.text)
         .join('\n');
     
-    console.log(`[MEMORY] Гибридный поиск завершен: ${finalFacts.length} найдено всего.`);
+    console.log("[MEMORY] Сверхпамять v3.3.1: " + finalFacts.length + " найдено.");
     return factsText;
 }
 
-
-
-// Удаление факта из памяти (Безопасное забывание)
 async function forgetFact(chatId, query) {
     if (!query || query.trim() === '') return false;
-
-    // Ищем топ-1 факт с ОЧЕНЬ высокой точностью (0.80+)
     const embedding = await createEmbedding(query);
     const results = await searchKnowledge(chatId, embedding, 1, 0.75);
-
     if (results && results.length > 0) {
         const target = results[0];
-        console.log(`[MEMORY] Найдено для удаления: "${target.fact}" (сходство: ${target.similarity})`);
-        
-        // Дополнительная проверка на безопасность: не удаляем пустые ID или странные совпадения
         if (target.id) {
             const success = await require('./database').deleteKnowledge(chatId, target.id);
             return success ? target.fact : false;
         }
     }
-    
-    console.log(`[MEMORY] Не найдено точного соответствия для удаления по запросу: "${query}"`);
     return false;
 }
 
@@ -246,4 +200,3 @@ module.exports = {
     createEmbedding,
     forgetFact
 };
-

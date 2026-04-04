@@ -577,7 +577,7 @@ module.exports = {
     getChatSettings, updateChatSettings,
     setBirthday, setBio, getBirthdaysToday, setBioByUsernameOrName, setNotesByUsernameOrName, setFirstNameByUsernameOrName,
     getChatMemory, updateChatMemory, insertKnowledge, searchKnowledge, searchKnowledgeByText, getRecentKnowledge,
-    checkFactExists, deleteKnowledge,
+    checkFactExists, deleteKnowledge, transliterate,
     getChatStats, searchUserByName, warnUserById, getUpcomingBirthdays,
     messageAuthors, reactionCooldowns, commandCooldowns, userCache,
     supabase, ANONYMOUS_ADMIN_ID, pendingVerifications

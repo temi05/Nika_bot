@@ -381,28 +381,21 @@ async function processAI(msg, extra) {
     const recentNicks = Object.values(activeParticipants[chatId]).slice(-5).map(p => `${p.firstName}(@${p.username})`).join(', ');
 
     
-    // Формируем блок памяти с четким разделением
+    // Формируем человечный блок памяти: без "пусто" и "нет данных"
     const factsArray = relevantFacts ? relevantFacts.split('\n') : [];
     const aboutYou = factsArray.filter(f => f.includes('[recent]') || f.includes(userName + ':')).join('\n');
     const aboutOthers = factsArray.filter(f => f.includes('[subject]')).join('\n');
     const general = factsArray.filter(f => !aboutYou.includes(f) && !aboutOthers.includes(f)).join('\n');
 
-    const memoryBlock = `
-[ПАМЯТЬ О ТЕБЕ (Сверхпамять)]
-${aboutYou || "Пока ничего личного не припоминаю."}
+    let memoryBlock = `\n[КТО ПЕРЕД ТОБОЙ: ${userName}]\n`;
+    if (dbUser && dbUser.ai_notes) memoryBlock += `Личное досье: ${dbUser.ai_notes}\n`;
+    if (dbUser && dbUser.bio) memoryBlock += `Био: ${dbUser.bio}\n`;
+    
+    if (aboutYou) memoryBlock += `\n[ТВОИ ВОСПОМИНАНИЯ О НЕМ]\n${aboutYou}\n`;
+    if (aboutOthers) memoryBlock += `\n[ЧТО ТЫ ПОМНИШЬ О ДРУГИХ]\n${aboutOthers}\n`;
+    if (general) memoryBlock += `\n[ПРОЧИЕ ФАКТЫ ИЗ ПАМЯТИ]\n${general}\n`;
 
-${aboutOthers ? `[ФАКТЫ ОБ УПОМЯНУТЫХ ЛЮДЯХ]\n${aboutOthers}\n` : ""}
-
-[ОБЩИЕ ВОСПОМИНАНИЯ]
-${general || "Пусто."}
-
-[ЛИЧНОЕ ДОСЬЕ ПОЛЬЗОВАТЕЛЯ (${userName})]
-${dbUser && dbUser.ai_notes ? dbUser.ai_notes : "Досье пока пусто."}
-
-[ТЕКУЩИЙ КОНТЕКСТ]
-Участники: ${recentNicks}
-Время: ${new Date().toLocaleString('ru-RU')}
-`;
+    memoryBlock += `\n[КОНТЕКСТ]\nУчастники: ${recentNicks}\nВремя: ${new Date().toLocaleString('ru-RU')}\n`;
 
 
     const finalPrompt = SYSTEM_PROMPT + memoryBlock;
