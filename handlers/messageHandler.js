@@ -6,7 +6,8 @@ let lastBirthdayCheck = {}; // { chatId: dateString }
 
 // Буфер последних сообщений для пассивного наблюдения ИИ (только RAM, не в БД)
 const chatBuffer = {}; // { chatId: [{name, text, time}] }
-const CHAT_BUFFER_SIZE = 10;
+const CHAT_BUFFER_SIZE = 25; // Увеличил размер буфера для лучшего контекста
+let passiveMessageCount = {}; // { chatId: count }
 
 function registerMessageHandlers() {
     bot.on('message', async (msg) => {
@@ -92,6 +93,15 @@ function registerMessageHandlers() {
             // Обрезаем буфер до CHAT_BUFFER_SIZE
             if (chatBuffer[chatId].length > CHAT_BUFFER_SIZE) {
                 chatBuffer[chatId] = chatBuffer[chatId].slice(-CHAT_BUFFER_SIZE);
+            }
+
+            // Фоновая прослушка чата: раз в 25 сообщений сканируем буфер
+            if (!passiveMessageCount[chatId]) passiveMessageCount[chatId] = 0;
+            if (++passiveMessageCount[chatId] >= CHAT_BUFFER_SIZE) {
+                const bufferText = chatBuffer[chatId].map(m => `${m.name}: ${m.text}`).join('\n');
+                const { extractAndSaveFacts } = require('../vectorMemory');
+                extractAndSaveFacts(chatId, bufferText);
+                passiveMessageCount[chatId] = 0;
             }
         }
 

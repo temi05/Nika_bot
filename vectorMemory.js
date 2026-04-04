@@ -1,5 +1,5 @@
 const OpenAI = require('openai');
-const { insertKnowledge, searchKnowledge } = require('./database');
+const { insertKnowledge, searchKnowledge, checkFactExists } = require('./database');
 
 const POLZA_API_KEY = process.env.POLZA_API_KEY || 'pza_Ut5ahRtIFZSzj_jKezwdRvQMMebqZ1BI';
 const AI_MODEL = process.env.AI_MODEL || 'gpt-4o-mini';
@@ -52,8 +52,21 @@ ${historyText}`;
         const facts = result.facts || [];
 
         for (const fact of facts) {
+            const exists = await checkFactExists(chatId, fact);
+            if (exists) {
+                // Если факт уже есть в базе, не делаем эмбеддинг и пропускаем
+                continue;
+            }
+            
             const embedding = await createEmbedding(fact);
             if (embedding) {
+                // Семантическая дедупликация (если мысль совпадает на 90%+, пропускаем)
+                const duplicates = await searchKnowledge(chatId, embedding, 1, 0.90);
+                if (duplicates && duplicates.length > 0) {
+                    console.log(`[MEMORY] Семантический дубликат пропущен. Фраза "${fact}" -> похожа на: "${duplicates[0].fact}"`);
+                    continue;
+                }
+
                 await insertKnowledge(chatId, fact, embedding);
                 console.log(`[MEMORY] Успешно запомнен факт: ${fact}`);
             }
@@ -70,8 +83,8 @@ async function getRelevantFacts(chatId, userMessage) {
     const embedding = await createEmbedding(userMessage);
     if (!embedding) return "";
 
-    // Ищем топ 3 факта с совпадением (similarity) больше 30%
-    const results = await searchKnowledge(chatId, embedding, 3, 0.3);
+    // Ищем топ 3 факта с совпадением (similarity) больше 45% (чтобы отсечь мусор)
+    const results = await searchKnowledge(chatId, embedding, 3, 0.45);
     if (results.length === 0) return "";
 
     const factsText = results.map((r, i) => `${i + 1}. ${r.fact}`).join('\n');

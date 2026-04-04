@@ -484,11 +484,23 @@ async function searchKnowledge(chatId, queryEmbedding, limit = 3, threshold = 0.
     return data || [];
 }
 
+async function checkFactExists(chatId, factText) {
+    const { data, error } = await supabase
+        .from('bot_knowledge')
+        .select('id')
+        .eq('chat_id', chatId)
+        .eq('fact', factText)
+        .limit(1)
+        .maybeSingle();
+    if (error) return false;
+    return !!data;
+}
+
 module.exports = {
     getUser, updateUser, getBadWords, getNextLevelXp, claimDailyBonus,
     getChatSettings, updateChatSettings,
     setBirthday, setBio, getBirthdaysToday, setBioByUsernameOrName, setNotesByUsernameOrName,
-    getChatMemory, updateChatMemory, insertKnowledge, searchKnowledge,
+    getChatMemory, updateChatMemory, insertKnowledge, searchKnowledge, checkFactExists,
     getChatStats, searchUserByName, warnUserById, getUpcomingBirthdays,
     messageAuthors, reactionCooldowns, commandCooldowns, userCache,
     supabase, ANONYMOUS_ADMIN_ID, pendingVerifications
