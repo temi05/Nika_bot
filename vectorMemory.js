@@ -112,22 +112,47 @@ ${historyText}`;
     }
 }
 
-// Поиск фактов для ответа (Двухэтапная ассоциативная модель)
+// Поиск фактов для ответа (Двухэтапная ассоциативная модель + Усиление личности)
 async function getRelevantFacts(chatId, userMessage, userName = "") {
     if (!userMessage || userMessage.trim() === '') return "";
 
-    // 1. ПЕРВЫЙ ЭТАП: Семантический поиск по запросу
-    const searchQuery = userName ? `${userName}: ${userMessage}` : userMessage;
-    const directResults = await searchKnowledge(chatId, await createEmbedding(searchQuery), 5, 0.40);
+    // 1. ПЕРВЫЙ ЭТАП: Двойной семантический поиск
+    // Мы ищем и по сообщению, и по "Имя: сообщение", чтобы поймать разные смыслы
+    const embeddingRaw = await createEmbedding(userMessage);
+    const resultsRaw = await searchKnowledge(chatId, embeddingRaw, 5, 0.40);
     
-    if (directResults.length === 0) return "";
+    let resultsPrefixed = [];
+    if (userName) {
+        const embeddingPrefixed = await createEmbedding(`${userName}: ${userMessage}`);
+        resultsPrefixed = await searchKnowledge(chatId, embeddingPrefixed, 5, 0.40);
+    }
+
+    // Объединяем и убираем дубли
+    const directResults = [...resultsRaw, ...resultsPrefixed];
+    const uniqueIds = new Set();
+    const uniqueDirectResults = directResults.filter(r => {
+        if (uniqueIds.has(r.id)) return false;
+        uniqueIds.add(r.id);
+        return true;
+    });
+
+    if (uniqueDirectResults.length === 0 && !userName) return "";
 
     // Собираем найденные факты и ищем в них Сущности для ассоциаций
-    let facts = directResults.map(r => r.fact);
+    let facts = uniqueDirectResults.map(r => r.fact);
     let entities = new Set();
     
-    // Простой поиск имен (Слова с большой буквы или @username)
+    // ПРИНУДИТЕЛЬНО: Всегда ищем ассоциации про текущего пользователя
+    if (userName) entities.add(userName);
+
+    // Добавляем сущности из сообщения (Имена, Юзернеймы)
     const entityRegex = /(@[a-zA-Z0-9_]+|[А-Я][а-я]+)/g;
+    
+    // Ищем сущности в самом сообщении пользователя
+    const msgMatches = userMessage.match(entityRegex);
+    if (msgMatches) msgMatches.forEach(m => entities.add(m));
+
+    // Ищем сущности в найденных фактах
     facts.forEach(f => {
         const matches = f.match(entityRegex);
         if (matches) matches.forEach(m => entities.add(m));
@@ -136,24 +161,27 @@ async function getRelevantFacts(chatId, userMessage, userName = "") {
     // 2. ВТОРОЙ ЭТАП: Добор связанных фактов для найденных сущностей
     let extraFacts = [];
     if (entities.size > 0) {
-        const entityList = Array.from(entities).slice(0, 3); // Ограничимся 3 сущностями для скорости
-        console.log(`[MEMORY] Найдено сущностей для связи: ${entityList.join(', ')}`);
+        const entityList = Array.from(entities).slice(0, 5); // До 5 сущностей для глубины
+        console.log(`[MEMORY] Поиск ассоциаций для: ${entityList.join(', ')}`);
         
         for (const entity of entityList) {
             // Поиск по ключевому слову сущности (без эмбеддинга, просто текст)
-            const branchResults = await searchKnowledge(chatId, await createEmbedding(entity), 2, 0.75);
+            const branchResults = await searchKnowledge(chatId, await createEmbedding(entity), 3, 0.75);
             branchResults.forEach(r => {
-                if (!facts.includes(r.fact)) extraFacts.push(r.fact);
+                if (!facts.includes(r.fact) && !extraFacts.includes(r.fact)) {
+                    extraFacts.push(r.fact);
+                }
             });
         }
     }
 
-    const allFacts = [...facts, ...extraFacts].slice(0, 10);
+    const allFacts = [...facts, ...extraFacts].slice(0, 15); // До 15 фактов для ИИ
     const factsText = allFacts.map((f, i) => `${i + 1}. ${f}`).join('\n');
     
-    console.log(`[MEMORY] Цепочка ассоциаций (Глубина 2):\n${directResults.length} прямо\n${extraFacts.length} по связям\nИтого: ${allFacts.length} фактов.`);
+    console.log(`[MEMORY] Расширенный поиск (Глубина 2):\n${uniqueDirectResults.length} прямо\n${extraFacts.length} по ассоциациям\nИтого: ${allFacts.length} фактов.`);
     return factsText;
 }
+
 
 // Удаление факта из памяти (Безопасное забывание)
 async function forgetFact(chatId, query) {

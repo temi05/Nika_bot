@@ -351,7 +351,13 @@ async function processAI(msg, extra) {
     if (!activeParticipants[chatId]) activeParticipants[chatId] = {};
     activeParticipants[chatId][userId] = { firstName: msg.from.first_name, username: msg.from.username || '', lastSeen: Date.now() };
 
-    const relevantFacts = await getRelevantFacts(chatId, userText, userName);
+    // Для поиска памяти используем и текущее сообщение, и контекст ответа (если есть)
+    const searchQuery = msg.reply_to_message ? 
+        `${msg.reply_to_message.text || ""}. ${userText}` : 
+        userText;
+
+    const relevantFacts = await getRelevantFacts(chatId, searchQuery, userName);
+
     const dossier = (dbUser && dbUser.ai_notes) ? `\n\n[ДОСЬЕ ПОЛЬЗОВАТЕЛЯ: ${userName.toUpperCase()}]\n${dbUser.ai_notes}` : "";
 
     const recentNicks = Object.values(activeParticipants[chatId]).slice(-5).map(p => `${p.firstName}(@${p.username})`).join(', ');
