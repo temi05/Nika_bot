@@ -463,11 +463,32 @@ async function updateChatMemory(chatId, memory) {
         .eq('chat_id', chatId);
 }
 
+async function insertKnowledge(chatId, factText, embedding) {
+    const { error } = await supabase
+        .from('bot_knowledge')
+        .insert([{ chat_id: chatId, fact: factText, embedding: embedding }]);
+    if (error) console.error('[DB ERROR] insertKnowledge:', error.message);
+}
+
+async function searchKnowledge(chatId, queryEmbedding, limit = 3, threshold = 0.3) {
+    const { data, error } = await supabase.rpc('match_knowledge', {
+        query_embedding: queryEmbedding,
+        match_threshold: threshold,
+        match_count: limit,
+        p_chat_id: chatId
+    });
+    if (error) {
+        console.error('[DB ERROR] searchKnowledge:', error.message);
+        return [];
+    }
+    return data || [];
+}
+
 module.exports = {
     getUser, updateUser, getBadWords, getNextLevelXp, claimDailyBonus,
     getChatSettings, updateChatSettings,
     setBirthday, setBio, getBirthdaysToday, setBioByUsernameOrName, setNotesByUsernameOrName,
-    getChatMemory, updateChatMemory,
+    getChatMemory, updateChatMemory, insertKnowledge, searchKnowledge,
     getChatStats, searchUserByName, warnUserById, getUpcomingBirthdays,
     messageAuthors, reactionCooldowns, commandCooldowns, userCache,
     supabase, ANONYMOUS_ADMIN_ID, pendingVerifications
