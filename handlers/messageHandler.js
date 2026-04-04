@@ -124,7 +124,7 @@ function registerMessageHandlers() {
                 const nextXp = getNextLevelXp(dbUser.level);
                 const newLevel = dbUser.xp + xpGain >= nextXp ? dbUser.level + 1 : dbUser.level;
                 await updateUser(dbUser.id, { xp: dbUser.xp + xpGain, level: newLevel, last_message_time: now });
-                console.log(`[XP] ${userTag} получил(а) ${xpGain} XP (Ур: ${newLevel})`);
+                console.log(`[DB DEBUG] ${userTag} получил(а) ${xpGain} XP (Ур: ${newLevel})`);
 
                 if (newLevel > dbUser.level) {
                     // Повышение уровня!
