@@ -182,11 +182,17 @@ async function getRelevantFacts(chatId, userMessage, userName = "", activePartic
     const potentialNames = userMessage.match(/([А-Я][а-я]+|@[a-zA-Z0-9_]+)/g) || [];
     potentialNames.forEach(n => searchTargets.add(n.replace('@', '')));
 
+    // 3. ПОДДЕРЖКА "Я" (Memory v3.2): Если юзер говорит о себе
+    if (userName && (/\b(я|меня|мой|мои|мне)\b/i.test(userMessage))) {
+        searchTargets.add(userName);
+    }
+
     for (const name of searchTargets) {
-        if (name.length < 3 || name.toLowerCase() === userName.toLowerCase()) continue;
+        if (name.length < 3) continue;
         
         // Ищем записи, начинающиеся строго с этого имени "Имя:" или "@Ник:"
-        const nameResults = await searchKnowledgeByText(chatId, `${name}:`, 5);
+        const nameResults = await searchKnowledgeByText(chatId, `${name}:`, 10);
+
         nameResults.forEach(r => {
             if (!allFoundFacts.has(r.fact)) {
                 allFoundFacts.add(r.fact);
