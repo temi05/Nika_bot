@@ -356,7 +356,9 @@ async function processAI(msg, extra) {
         `${msg.reply_to_message.text || ""}. ${userText}` : 
         userText;
 
+    const relevantFacts = await getRelevantFacts(chatId, searchQuery, userName);
     const recentNicks = Object.values(activeParticipants[chatId]).slice(-5).map(p => `${p.firstName}(@${p.username})`).join(', ');
+
     
     // Формируем блок памяти с четким разделением
     const memoryBlock = `
