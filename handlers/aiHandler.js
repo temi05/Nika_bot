@@ -1,5 +1,5 @@
-﻿const OpenAI = require('openai');
-const { bot, escapeHTML, isAdmin } = require('../utils');
+const OpenAI = require('openai');
+const { bot, escapeHTML, isAdmin, getSenderData } = require('../utils');
 const {
     getUser, updateUser,
     setBioByUsernameOrName, setNotesByUsernameOrName,
@@ -258,8 +258,13 @@ async function handleAIChat(msg, extra = {}) {
 async function processAI(msg, extra) {
     const chatId = msg.chat.id;
     if (!chatHistory[chatId]) chatHistory[chatId] = [];
-    const userId = msg.from.id;
-    const userName = msg.from.first_name;
+    const { userId: realUserId, user: realUser } = getSenderData(msg);
+    const userId = realUserId;
+
+    let userName = realUser.first_name || 'Аноним';
+    if (msg.from && msg.from.username === 'GroupAnonymousBot') {
+        userName = msg.author_signature ? msg.author_signature : 'Анонимный админ';
+    }
 
     let userText = msg.text || "";
     if (msg.sticker) {
@@ -275,12 +280,17 @@ async function processAI(msg, extra) {
     let replyPrefix = "";
     if (msg.reply_to_message) {
         const rp = msg.reply_to_message;
-        const rpAuthor = rp.from ? rp.from.first_name : "Кто-то";
+        let rpAuthor = rp.from ? rp.from.first_name : "Кто-то";
+        if (rp.from && rp.from.username === 'GroupAnonymousBot') {
+             rpAuthor = rp.author_signature ? rp.author_signature : 'Анонимный админ';
+        } else if (rp.sender_chat) {
+             rpAuthor = rp.sender_chat.title || "Канал";
+        }
         const rpText = rp.text || (rp.sticker ? `стикер ${rp.sticker.emoji}` : "медиа");
         replyPrefix = `(в ответ ${rpAuthor}: "${rpText.slice(0, 50)}${rpText.length > 50 ? '...' : ''}") `;
     }
 
-    const fullContent = `${msg.from.first_name} ${replyPrefix}: ${userText}`;
+    const fullContent = `${userName} ${replyPrefix}: ${userText}`;
 
     const isMentioned = userText.toLowerCase().includes(AI_NAME.toLowerCase()) ||
         (msg.reply_to_message && msg.reply_to_message.from.id === (await bot.getMe()).id);

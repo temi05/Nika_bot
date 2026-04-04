@@ -11,6 +11,8 @@ let passiveMessageCount = {}; // { chatId: count }
 
 function registerMessageHandlers() {
     bot.on('message', async (msg) => {
+        // Минималистичный лог каждого сообщения для спокойствия, что бот всё видит
+        console.log(`[MSG] Чат: ${msg.chat.id} | От: ${msg.from?.first_name || 'Аноним'} | Текст: "${msg.text?.substring(0, 30) || 'медиа'}"`);
         
         const chatId = msg.chat.id;
         const { userId, user } = getSenderData(msg);
