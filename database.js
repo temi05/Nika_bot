@@ -518,11 +518,26 @@ async function checkFactExists(chatId, factText) {
     return !!data;
 }
 
+async function deleteKnowledge(chatId, knowledgeId) {
+    const { error } = await supabase
+        .from('bot_knowledge')
+        .delete()
+        .eq('chat_id', chatId)
+        .eq('id', knowledgeId);
+    
+    if (error) {
+        console.error('[DB ERROR] deleteKnowledge:', error.message);
+        return false;
+    }
+    return true;
+}
+
+
 module.exports = {
     getUser, updateUser, getBadWords, getNextLevelXp, claimDailyBonus,
     getChatSettings, updateChatSettings,
     setBirthday, setBio, getBirthdaysToday, setBioByUsernameOrName, setNotesByUsernameOrName, setFirstNameByUsernameOrName,
-    getChatMemory, updateChatMemory, insertKnowledge, searchKnowledge, checkFactExists,
+    getChatMemory, updateChatMemory, insertKnowledge, searchKnowledge, checkFactExists, deleteKnowledge,
     getChatStats, searchUserByName, warnUserById, getUpcomingBirthdays,
     messageAuthors, reactionCooldowns, commandCooldowns, userCache,
     supabase, ANONYMOUS_ADMIN_ID, pendingVerifications

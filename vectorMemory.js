@@ -141,7 +141,7 @@ async function getRelevantFacts(chatId, userMessage, userName = "") {
         
         for (const entity of entityList) {
             // Поиск по ключевому слову сущности (без эмбеддинга, просто текст)
-            const branchResults = await searchKnowledge(chatId, await createEmbedding(entity), 2, 0.60);
+            const branchResults = await searchKnowledge(chatId, await createEmbedding(entity), 2, 0.75);
             branchResults.forEach(r => {
                 if (!facts.includes(r.fact)) extraFacts.push(r.fact);
             });
@@ -155,8 +155,33 @@ async function getRelevantFacts(chatId, userMessage, userName = "") {
     return factsText;
 }
 
+// Удаление факта из памяти (Безопасное забывание)
+async function forgetFact(chatId, query) {
+    if (!query || query.trim() === '') return false;
+
+    // Ищем топ-1 факт с ОЧЕНЬ высокой точностью (0.80+)
+    const embedding = await createEmbedding(query);
+    const results = await searchKnowledge(chatId, embedding, 1, 0.75);
+
+    if (results && results.length > 0) {
+        const target = results[0];
+        console.log(`[MEMORY] Найдено для удаления: "${target.fact}" (сходство: ${target.similarity})`);
+        
+        // Дополнительная проверка на безопасность: не удаляем пустые ID или странные совпадения
+        if (target.id) {
+            const success = await require('./database').deleteKnowledge(chatId, target.id);
+            return success ? target.fact : false;
+        }
+    }
+    
+    console.log(`[MEMORY] Не найдено точного соответствия для удаления по запросу: "${query}"`);
+    return false;
+}
+
 module.exports = {
     extractAndSaveFacts,
     getRelevantFacts,
-    createEmbedding
+    createEmbedding,
+    forgetFact
 };
+
