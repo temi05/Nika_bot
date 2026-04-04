@@ -51,7 +51,16 @@ ${historyText}`;
         const rawContent = completion.choices[0].message.content;
         console.log(`[MEMORY EXTRACTOR] Ответ ИИ: ${rawContent}`);
 
-        const result = JSON.parse(rawContent);
+        let result;
+        try {
+            // Очищаем от возможных маркдаун-блоков
+            const cleanContent = rawContent.replace(/```json/g, '').replace(/```/g, '').trim();
+            result = JSON.parse(cleanContent);
+        } catch (parseError) {
+            console.log(`[MEMORY EXTRACTOR] ⚠️ ИИ вернул поломанный JSON (возможно сбой API или спам-сообщения). Ошибка: ${parseError.message}`);
+            return; // Прерываем только анализ этой пачки, бот работает дальше
+        }
+        
         const facts = result.facts || [];
 
         const savedNewFacts = [];
