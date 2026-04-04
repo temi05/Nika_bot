@@ -545,7 +545,34 @@ async function getRecentKnowledge(chatId, userName = "", limit = 10) {
     return data || [];
 }
 
+async function checkFactExists(chatId, factText) {
+    const { data, error } = await supabase
+        .from('bot_knowledge')
+        .select('id')
+        .eq('chat_id', chatId)
+        .eq('fact', factText)
+        .limit(1)
+        .maybeSingle();
+    if (error) return false;
+    return !!data;
+}
+
+async function deleteKnowledge(chatId, knowledgeId) {
+    const { error } = await supabase
+        .from('bot_knowledge')
+        .delete()
+        .eq('chat_id', chatId)
+        .eq('id', knowledgeId);
+    
+    if (error) {
+        console.error('[DB ERROR] deleteKnowledge:', error.message);
+        return false;
+    }
+    return true;
+}
+
 module.exports = {
+
     getUser, updateUser, getBadWords, getNextLevelXp, claimDailyBonus,
     getChatSettings, updateChatSettings,
     setBirthday, setBio, getBirthdaysToday, setBioByUsernameOrName, setNotesByUsernameOrName, setFirstNameByUsernameOrName,
