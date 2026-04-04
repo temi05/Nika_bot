@@ -116,13 +116,16 @@ ${historyText}`;
     }
 }
 
-// Поиск фактов для ответа (ГИБРИДНАЯ МОДЕЛЬ: Векторы + Ключевые слова + История)
-async function getRelevantFacts(chatId, userMessage, userName = "") {
+// Поиск фактов для ответа (ГИБРИДНАЯ МОДЕЛЬ: Векторы + Ключевые слова + История + Субъекты)
+async function getRelevantFacts(chatId, userMessage, userName = "", activeParticipants = []) {
     if (!userMessage || userMessage.trim() === '') return "";
 
     const { searchKnowledgeByText, getRecentKnowledge } = require('./database');
     const allFoundFacts = new Set();
     const finalFacts = [];
+
+    const lowMsg = userMessage.toLowerCase();
+
 
     // --- СТРИМ 1: СЕМАНТИКА (ВЕКТОРЫ) ---
     const embeddingRaw = await createEmbedding(userMessage);
@@ -166,14 +169,23 @@ async function getRelevantFacts(chatId, userMessage, userName = "") {
     }
 
     // --- СТРИМ 4: ПОИСК ПО СУБЪЕКТАМ (SMART NAME MATCH) ---
-    // Ищем слова с большой буквы или @юзернеймы, которые могут быть именами
-    const potentialNames = userMessage.match(/([А-Я][а-я]+|@[a-zA-Z0-9_]+)/g) || [];
-    const uniqueNames = [...new Set(potentialNames.map(n => n.replace('@', '')))];
+    // Собираем список всех имен и ников текущих участников для точечного поиска
+    const searchTargets = new Set();
+    
+    // 1. Имена из участников чата (из метаданных)
+    activeParticipants.forEach(p => {
+        if (p.firstName && lowMsg.includes(p.firstName.toLowerCase())) searchTargets.add(p.firstName);
+        if (p.username && lowMsg.includes(p.username.toLowerCase())) searchTargets.add(p.username);
+    });
 
-    for (const name of uniqueNames) {
+    // 2. Имена из регулярки (С заглавной буквы или @юзернеймы)
+    const potentialNames = userMessage.match(/([А-Я][а-я]+|@[a-zA-Z0-9_]+)/g) || [];
+    potentialNames.forEach(n => searchTargets.add(n.replace('@', '')));
+
+    for (const name of searchTargets) {
         if (name.length < 3 || name.toLowerCase() === userName.toLowerCase()) continue;
         
-        // Ищем записи, начинающиеся строго с этого имени "Имя:"
+        // Ищем записи, начинающиеся строго с этого имени "Имя:" или "@Ник:"
         const nameResults = await searchKnowledgeByText(chatId, `${name}:`, 5);
         nameResults.forEach(r => {
             if (!allFoundFacts.has(r.fact)) {
@@ -182,6 +194,7 @@ async function getRelevantFacts(chatId, userMessage, userName = "") {
             }
         });
     }
+
 
 
     if (finalFacts.length === 0) return "";
