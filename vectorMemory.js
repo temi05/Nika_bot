@@ -113,18 +113,21 @@ ${historyText}`;
 }
 
 // Поиск фактов для ответа
-async function getRelevantFacts(chatId, userMessage) {
+async function getRelevantFacts(chatId, userMessage, userName = "") {
     if (!userMessage || userMessage.trim() === '') return "";
 
-    const embedding = await createEmbedding(userMessage);
+    // Добавляем имя юзера в запрос, чтобы векторный поиск лучше находил его данные
+    const searchQuery = userName ? `${userName}: ${userMessage}` : userMessage;
+
+    const embedding = await createEmbedding(searchQuery);
     if (!embedding) return "";
 
-    // Ищем топ 3 факта с совпадением (similarity) больше 45% (чтобы отсечь мусор)
-    const results = await searchKnowledge(chatId, embedding, 3, 0.45);
+    // Снижаем порог до 0.40 для большей гибкости
+    const results = await searchKnowledge(chatId, embedding, 5, 0.40);
     if (results.length === 0) return "";
 
     const factsText = results.map((r, i) => `${i + 1}. ${r.fact}`).join('\n');
-    console.log(`[MEMORY] Вытащены факты для текущего ответа:\n${factsText}`);
+    console.log(`[MEMORY] Вытащены факты для текущего ответа (Запрос: "${searchQuery}"):\n${factsText}`);
     return factsText;
 }
 

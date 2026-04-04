@@ -339,9 +339,11 @@ async function processAI(msg, extra) {
     if (!activeParticipants[chatId]) activeParticipants[chatId] = {};
     activeParticipants[chatId][userId] = { firstName: msg.from.first_name, username: msg.from.username || '', lastSeen: Date.now() };
 
-    const relevantFacts = await getRelevantFacts(chatId, userText);
+    const relevantFacts = await getRelevantFacts(chatId, userText, userName);
+    const dossier = (dbUser && dbUser.ai_notes) ? `\n\n[ЛИЧНОЕ ДОСЬЕ ${userName.toUpperCase()}]\n${dbUser.ai_notes}` : "";
+
     const recentNicks = Object.values(activeParticipants[chatId]).slice(-5).map(p => `${p.firstName}(@${p.username})`).join(', ');
-    const finalPrompt = SYSTEM_PROMPT + `\n\n[СИСТЕМНЫЕ ДАННЫЕ]\nВсплывшие воспоминания по теме:\n${relevantFacts || "Нет текущих ассоциаций."}\nАктивные участники: ${recentNicks}\nВремя: ${new Date().toLocaleString('ru-RU')}`;
+    const finalPrompt = SYSTEM_PROMPT + dossier + `\n\n[СИСТЕМНЫЕ ДАННЫЕ]\nВсплывшие воспоминания по теме:\n${relevantFacts || "Нет текущих ассоциаций."}\nАктивные участники: ${recentNicks}\nВремя: ${new Date().toLocaleString('ru-RU')}`;
 
     chatHistory[chatId].push({ role: 'user', content: fullContent });
     chatHistory[chatId] = trimHistory(chatHistory[chatId], 20);
