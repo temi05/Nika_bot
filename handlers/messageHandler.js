@@ -11,6 +11,8 @@ let passiveMessageCount = {}; // { chatId: count }
 
 function registerMessageHandlers() {
     bot.on('message', async (msg) => {
+        console.log(`\n\n[INCOMING MESSAGE] Получено событие от Telegram. Чат: ${msg.chat.id}, Текст: "${msg.text?.substring(0, 50)}"`);
+        
         const chatId = msg.chat.id;
         const { userId, user } = getSenderData(msg);
 
