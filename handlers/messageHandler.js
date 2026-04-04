@@ -81,18 +81,22 @@ function registerMessageHandlers() {
         // 3. XP SYSTEM
         const isMedia = msg.photo || msg.voice || msg.video_note || msg.sticker;
 
-        // 3.1 Записываем ВСЕ сообщения в буфер (для контекста ИИ)
-        if (msg.text || msg.caption) {
-            if (!chatBuffer[chatId]) chatBuffer[chatId] = [];
-            // Если это анонимный админ, берем его подпись (если есть), иначе форматируем имя
-            let userTag = '';
-            if (msg.from && msg.from.username === 'GroupAnonymousBot') {
-                userTag = msg.author_signature ? msg.author_signature : 'Анонимный админ';
+        let userTag = '';
+        if (msg.from && msg.from.username === 'GroupAnonymousBot') {
+            if (dbUser.first_name !== 'Анонимный админ' && dbUser.first_name !== 'Канал') {
+                userTag = dbUser.first_name;
             } else {
-                const name = user ? user.first_name : (msg.from?.first_name || 'Аноним');
-                const username = user && user.username ? ` (@${user.username})` : (msg.from?.username ? ` (@${msg.from.username})` : '');
-                userTag = name + username;
+                userTag = msg.author_signature ? msg.author_signature : 'Анонимный админ';
             }
+        } else {
+            const name = dbUser.first_name ? dbUser.first_name : (user ? user.first_name : (msg.from?.first_name || 'Аноним'));
+            const username = user && user.username ? ` (@${user.username})` : (msg.from?.username ? ` (@${msg.from.username})` : '');
+            userTag = name + username;
+        }
+
+        // 3.1 Записываем ВСЕ сообщения в буфер (для контекста ИИ)
+        if (msg.text || msg.caption || isMedia) {
+            if (!chatBuffer[chatId]) chatBuffer[chatId] = [];
 
             chatBuffer[chatId].push({
                 name: userTag,

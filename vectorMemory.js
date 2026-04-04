@@ -53,12 +53,33 @@ ${historyText}`;
 
         let result;
         try {
-            // Очищаем от возможных маркдаун-блоков
-            const cleanContent = rawContent.replace(/```json/g, '').replace(/```/g, '').trim();
-            result = JSON.parse(cleanContent);
+            // 1. Предварительная очистка от Markdown
+            let cleanContent = rawContent.replace(/```json/g, '').replace(/```/g, '').trim();
+            
+            // 2. Если JSON не валиден (возможно обрезан), пробуем восстановить скобки и кавычки
+            try {
+                result = JSON.parse(cleanContent);
+            } catch (initialError) {
+                // Пытаемся закрыть кавычки, если строка обрезана в середине
+                if (cleanContent.startsWith('{')) {
+                    // Если нечетное количество кавычек, добавляем одну в конце
+                    const quotes = (cleanContent.match(/"/g) || []).length;
+                    if (quotes % 2 !== 0) cleanContent += '"';
+                    
+                    let balance_braces = (cleanContent.match(/{/g) || []).length - (cleanContent.match(/}/g) || []).length;
+                    let balance_brackets = (cleanContent.match(/\[/g) || []).length - (cleanContent.match(/]/g) || []).length;
+                    
+                    while (balance_brackets > 0) { cleanContent += ']'; balance_brackets--; }
+                    while (balance_braces > 0) { cleanContent += '}'; balance_braces--; }
+                    
+                    result = JSON.parse(cleanContent);
+                } else {
+                    throw initialError;
+                }
+            }
         } catch (parseError) {
-            console.log(`[MEMORY EXTRACTOR] ⚠️ ИИ вернул поломанный JSON (возможно сбой API или спам-сообщения). Ошибка: ${parseError.message}`);
-            return; // Прерываем только анализ этой пачки, бот работает дальше
+            console.log(`[MEMORY EXTRACTOR] ⚠️ Не удалось распарсить JSON. Возможно, ответ слишком короткий или поврежден. Ошибка: ${parseError.message}`);
+            return;
         }
         
         const facts = result.facts || [];

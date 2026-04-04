@@ -268,14 +268,17 @@ async function setBioByUsernameOrName(chatId, queryName, bio) {
 
 async function setNotesByUsernameOrName(chatId, queryName, notes) {
     if (!queryName) return null;
-    let cleanName = queryName.replace('@', '').toLowerCase();
-    const latinName = transliterate(cleanName);
+    let cleanName = queryName.replace('@', '').toLowerCase().trim();
+    const stem = getStem(cleanName);
+    const latinStem = transliterate(stem);
     
+    // Сначала ищем по точному имени/юзернейму в кэше активных
+    // Но так как у нас нет доступа к кэшу ИИ тут, используем общий поиск
     const { data, error } = await supabase
         .from('users')
         .select('id, first_name')
         .eq('chat_id', chatId)
-        .or(`username.ilike.%${cleanName}%,first_name.ilike.%${cleanName}%,username.ilike.%latinName%,first_name.ilike.%${latinName}%`)
+        .or(`username.ilike.%${cleanName}%,first_name.ilike.%${cleanName}%,username.ilike.%${latinStem}%,first_name.ilike.%${latinStem}%`)
         .limit(1)
         .maybeSingle();
 
@@ -283,6 +286,25 @@ async function setNotesByUsernameOrName(chatId, queryName, notes) {
 
     await updateUser(data.id, { ai_notes: notes });
     return data.first_name;
+}
+
+async function setFirstNameByUsernameOrName(chatId, queryName, newName) {
+    if (!queryName || !newName) return null;
+    let cleanName = queryName.replace('@', '').toLowerCase().trim();
+    const latinStem = transliterate(cleanName);
+    
+    const { data, error } = await supabase
+        .from('users')
+        .select('id, first_name')
+        .eq('chat_id', chatId)
+        .or(`username.ilike.%${cleanName}%,first_name.ilike.%${cleanName}%,username.ilike.%${latinStem}%,first_name.ilike.%${latinStem}%`)
+        .limit(1)
+        .maybeSingle();
+
+    if (!data || error) return null;
+
+    await updateUser(data.id, { first_name: newName });
+    return data.first_name; // Старое имя или новое? Лучше вернуть подтверждение
 }
 
 // ==================== ФУНКЦИИ ДЛЯ ИИ-ИНСТРУМЕНТОВ ====================
@@ -499,7 +521,7 @@ async function checkFactExists(chatId, factText) {
 module.exports = {
     getUser, updateUser, getBadWords, getNextLevelXp, claimDailyBonus,
     getChatSettings, updateChatSettings,
-    setBirthday, setBio, getBirthdaysToday, setBioByUsernameOrName, setNotesByUsernameOrName,
+    setBirthday, setBio, getBirthdaysToday, setBioByUsernameOrName, setNotesByUsernameOrName, setFirstNameByUsernameOrName,
     getChatMemory, updateChatMemory, insertKnowledge, searchKnowledge, checkFactExists,
     getChatStats, searchUserByName, warnUserById, getUpcomingBirthdays,
     messageAuthors, reactionCooldowns, commandCooldowns, userCache,
