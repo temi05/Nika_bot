@@ -1,8 +1,8 @@
-﻿const OpenAI = require('openai');
+const OpenAI = require('openai');
 const { insertKnowledge, searchKnowledge, checkFactExists } = require('./database');
 
 const POLZA_API_KEY = process.env.POLZA_API_KEY || 'pza_Ut5ahRtIFZSzj_jKezwdRvQMMebqZ1BI';
-const AI_MODEL = process.env.AI_MODEL || 'gpt-4o-mini';
+const AI_MODEL = process.env.AI_MODEL || 'gemini-2.0-flash-lite-preview-02-05';
 
 const openai = new OpenAI({
     apiKey: POLZA_API_KEY,
@@ -44,8 +44,13 @@ async function extractAndSaveFacts(chatId, historyText, participants = []) {
 
         let result;
         try {
-            let cleanContent = rawContent.replace(/`json/g, '').replace(/`/g, '').trim();
-            result = JSON.parse(cleanContent);
+            // v4.0: Более надежное извлечение JSON через RegEx
+            const jsonMatch = rawContent.match(/\{[\s\S]*\}/);
+            if (jsonMatch) {
+                result = JSON.parse(jsonMatch[0]);
+            } else {
+                result = JSON.parse(rawContent);
+            }
         } catch (parseError) {
             console.log("[MEMORY EXTRACTOR] Ошибка парсинга JSON: " + parseError.message);
             return;
@@ -95,7 +100,8 @@ async function getRelevantFacts(chatId, userMessage, userName = "", activePartic
 
     // --- СТРИМ 1: СЕМАНТИКА (ВЕКТОРЫ) ---
     const embeddingRaw = await createEmbedding(userMessage);
-    const vectorResults = await searchKnowledge(chatId, embeddingRaw, 10, 0.30);
+    // v4.0: Повышаем порог точности до 0.45 для минимизации галлюцинаций
+    const vectorResults = await searchKnowledge(chatId, embeddingRaw, 10, 0.45);
     vectorResults.forEach(r => {
         if (!allFoundFacts.has(r.fact)) {
             allFoundFacts.add(r.fact);

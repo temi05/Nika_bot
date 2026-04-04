@@ -571,6 +571,47 @@ async function deleteKnowledge(chatId, knowledgeId) {
     return true;
 }
 
+// v4.0: Работа с напоминаниями
+async function insertReminder(chatId, userId, userName, text, triggerTime) {
+    const { data, error } = await supabase.from('reminders').insert([{
+        chat_id: chatId,
+        user_id: userId,
+        user_name: userName,
+        text: text,
+        trigger_time: triggerTime,
+        is_sent: false
+    }]).select().single();
+    
+    if (error) {
+        console.error('[DB ERROR] insertReminder:', error.message);
+        return null;
+    }
+    return data;
+}
+
+async function getDueReminders() {
+    const now = new Date().toISOString();
+    const { data, error } = await supabase
+        .from('reminders')
+        .select('*')
+        .eq('is_sent', false)
+        .lte('trigger_time', now);
+    
+    if (error) {
+        console.error('[DB ERROR] getDueReminders:', error.message);
+        return [];
+    }
+    return data;
+}
+
+async function markReminderAsSent(id) {
+    const { error } = await supabase
+        .from('reminders')
+        .update({ is_sent: true })
+        .eq('id', id);
+    if (error) console.error('[DB ERROR] markReminderAsSent:', error.message);
+}
+
 module.exports = {
 
     getUser, updateUser, getBadWords, getNextLevelXp, claimDailyBonus,
@@ -578,6 +619,7 @@ module.exports = {
     setBirthday, setBio, getBirthdaysToday, setBioByUsernameOrName, setNotesByUsernameOrName, setFirstNameByUsernameOrName,
     getChatMemory, updateChatMemory, insertKnowledge, searchKnowledge, searchKnowledgeByText, getRecentKnowledge,
     checkFactExists, deleteKnowledge, transliterate,
+    insertReminder, getDueReminders, markReminderAsSent,
     getChatStats, searchUserByName, warnUserById, getUpcomingBirthdays,
     messageAuthors, reactionCooldowns, commandCooldowns, userCache,
     supabase, ANONYMOUS_ADMIN_ID, pendingVerifications

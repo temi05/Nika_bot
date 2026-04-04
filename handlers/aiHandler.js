@@ -4,12 +4,12 @@ const {
     getUser, updateUser,
     setBioByUsernameOrName, setNotesByUsernameOrName,
     getChatStats, searchUserByName, warnUserById, getUpcomingBirthdays,
-    getChatSettings
+    getChatSettings, insertReminder, getDueReminders, markReminderAsSent
 } = require('../database');
 const { extractAndSaveFacts, getRelevantFacts, forgetFact } = require('../vectorMemory');
 
 const POLZA_API_KEY = process.env.POLZA_API_KEY || 'pza_Ut5ahRtIFZSzj_jKezwdRvQMMebqZ1BI';
-const AI_MODEL = process.env.AI_MODEL || 'gpt-4o-mini';
+const AI_MODEL = process.env.AI_MODEL || 'gemini-2.0-flash-lite-preview-02-05';
 const AI_NAME = process.env.AI_NAME || 'НейроНика';
 
 const openai = new OpenAI({
@@ -22,7 +22,8 @@ const messageCount = {};
 const activeParticipants = {};
 const aiMood = {};
 const processingQueue = new Map();
-const activeReminders = new Set(); // Чтобы не дублировать или для логов
+const extractionBuffer = {}; // v4.0: Буфер для извлечения фактов (чтобы не терять контекст при обрезке истории)
+const activeReminders = new Set();
 
 const aiTools = [
     { type: "function", function: { name: "update_user_bio", description: "Обновить био юзера.", parameters: { type: "object", properties: { target_name: { type: "string", description: "Имя/@username" }, new_bio: { type: "string" } }, required: ["target_name", "new_bio"] } } },
@@ -250,15 +251,14 @@ async function executeToolCall(toolCall, chatId, messageId, userName, userId) {
                 return "Опрос запущен.";
             }
             case 'set_reminder': {
-                const delay = args.delay_minutes || 1;
+                const delay = Math.max(1, args.delay_minutes || 1);
                 const text = args.text || "Напоминание!";
-                const mention = `<a href="tg://user?id=${userId}">${userName}</a>`;
+                const triggerTime = new Date(Date.now() + delay * 60 * 1000).toISOString();
 
-                setTimeout(async () => {
-                    await safeSendMessage(chatId, `🔔 ${mention}, ты просил напомнить: ${text}`);
-                }, delay * 60 * 1000);
+                const ok = await insertReminder(chatId, userId, userName, text, triggerTime);
+                if (!ok) return "Не удалось записать напоминание в базу.";
 
-                return `Хорошо, напомню через ${delay} мин.`;
+                return `Хорошо, записала! Напомню через ${delay} мин. (даже если я перезагружусь 😉)`;
             }
             case 'set_user_name': {
                 const { setFirstNameByUsernameOrName, getUser } = require('../database');
@@ -299,16 +299,64 @@ async function safeSendMessage(chatId, text, replyId) {
         if (error.message.includes('parse entities') || error.message.includes('HTML')) {
             await bot.sendMessage(chatId, text, { reply_to_message_id: replyId });
         } else {
-            console.error('[TG SEND ERROR]:', error.message);
+            console.error('[SEND ERROR]:', error.message);
         }
     }
 }
+
+// v4.0: Фоновый воркер для напоминаний
+function startReminderWorker() {
+    console.log('[REMINDER WORKER] Запущен.');
+    setInterval(async () => {
+        const due = await getDueReminders();
+        for (const rem of due) {
+            const mention = `<a href="tg://user?id=${rem.user_id}">${rem.user_name}</a>`;
+            const msg = `🔔 ${mention}, ты просил напомнить: <b>${rem.text}</b>`;
+            try {
+                await bot.sendMessage(rem.chat_id, msg, { parse_mode: 'HTML' });
+                await markReminderAsSent(rem.id);
+                console.log(`[REMINDER] Отправлено: ID ${rem.id} для ${rem.user_name}`);
+            } catch (e) {
+                console.error(`[REMINDER ERROR] ID ${rem.id}:`, e.message);
+            }
+        }
+    }, 30000); // Проверка каждые 30 секунд
+}
+
+// v4.0: Описание фото через Gemini Vision
+async function describePhoto(fileId) {
+    try {
+        const fileLink = await bot.getFileLink(fileId);
+        const response = await openai.chat.completions.create({
+            model: AI_MODEL,
+            messages: [
+                {
+                    role: "user",
+                    content: [
+                        { type: "text", text: "Что на этом фото? Опиши кратко, ехидно и дерзко, как будто ты вредная девчонка-стример Ника, которая комментирует чат. Отвечай на русском." },
+                        { type: "image_url", image_url: { url: fileLink } }
+                    ]
+                }
+            ],
+            max_tokens: 300
+        });
+        return response.choices[0].message.content;
+    } catch (e) {
+        console.error('[VISION ERROR]:', e.message);
+        return null;
+    }
+}
+
+startReminderWorker();
 
 async function handleAIChat(msg, extra = {}) {
     const chatId = msg.chat.id;
     if (!processingQueue.has(chatId)) processingQueue.set(chatId, Promise.resolve());
     const turn = processingQueue.get(chatId).then(async () => {
-        try { await processAI(msg, extra); } catch (e) { console.error('[AI FATAL ERROR]:', e.message); }
+        try { await processAI(msg, extra); } catch (e) { 
+            console.error('[AI FATAL ERROR]:', e.message); 
+            await bot.sendMessage(chatId, "Ой, у меня что-то в голове замкнуло... Попробуй еще раз.");
+        }
     });
     processingQueue.set(chatId, turn);
     return turn;
@@ -334,10 +382,17 @@ async function processAI(msg, extra) {
     }
 
     let userText = msg.text || "";
+    let photoDescription = "";
+
     if (msg.sticker) {
         userText = `[${msg.sticker.is_animated ? "Анимированный стикер" : msg.sticker.is_video ? "Видео-стикер" : "Стикер"} ${msg.sticker.emoji || ""}]`;
     } else if (msg.photo) {
+        const fileId = msg.photo[msg.photo.length - 1].file_id;
+        photoDescription = await describePhoto(fileId);
         userText = `[Фото] ${msg.caption || ""}`;
+        if (photoDescription) {
+            userText += ` (Ника видит на фото: ${photoDescription})`;
+        }
     } else if (msg.video) {
         userText = `[Видео] ${msg.caption || ""}`;
     } else if (msg.voice) {
@@ -404,6 +459,11 @@ async function processAI(msg, extra) {
     chatHistory[chatId].push({ role: 'user', content: fullContent });
     chatHistory[chatId] = trimHistory(chatHistory[chatId], 20);
 
+    // v4.0: Добавляем в буфер экстракции (он длиннее, до 40 сообщений)
+    if (!extractionBuffer[chatId]) extractionBuffer[chatId] = [];
+    extractionBuffer[chatId].push(`${userName}: ${userText}`);
+    if (extractionBuffer[chatId].length > 40) extractionBuffer[chatId].shift();
+
     try {
         await bot.sendChatAction(chatId, 'typing');
         const completion = await openai.chat.completions.create({
@@ -436,11 +496,13 @@ async function processAI(msg, extra) {
 
         if (!messageCount[chatId]) messageCount[chatId] = 0;
         if (++messageCount[chatId] >= 15) {
-            const historyText = chatHistory[chatId].map(m => `${m.role}: ${m.content}`).join('\n');
+            const historyText = extractionBuffer[chatId].join('\n');
             const participants = Object.values(activeParticipants[chatId]).map(p => p.firstName);
-            // Запускаем асинхронно, чтобы не тормозить ответ
+            // Запускаем асинхронно
             extractAndSaveFacts(chatId, historyText, participants);
             messageCount[chatId] = 0;
+            // Частично очищаем буфер, оставляя нахлест для контекста
+            extractionBuffer[chatId] = extractionBuffer[chatId].slice(-10);
         }
 
     } catch (e) {
