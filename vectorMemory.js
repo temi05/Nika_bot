@@ -2,7 +2,7 @@ const OpenAI = require('openai');
 const { insertKnowledge, searchKnowledge, checkFactExists } = require('./database');
 
 const POLZA_API_KEY = process.env.POLZA_API_KEY || 'pza_Ut5ahRtIFZSzj_jKezwdRvQMMebqZ1BI';
-const AI_MODEL = process.env.AI_MODEL || 'gemini-2.0-flash-lite-preview-02-05';
+const AI_MODEL = process.env.AI_MODEL || 'google/gemini-2.5-flash-lite';
 
 const openai = new OpenAI({
     apiKey: POLZA_API_KEY,

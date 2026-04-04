@@ -9,7 +9,8 @@ const {
 const { extractAndSaveFacts, getRelevantFacts, forgetFact } = require('../vectorMemory');
 
 const POLZA_API_KEY = process.env.POLZA_API_KEY || 'pza_Ut5ahRtIFZSzj_jKezwdRvQMMebqZ1BI';
-const AI_MODEL = process.env.AI_MODEL || 'gemini-2.0-flash-lite-preview-02-05';
+const AI_MODEL = process.env.AI_MODEL || 'google/gemini-2.5-flash-lite';
+const FALLBACK_MODEL = 'gpt-4o-mini'; // Резервная модель на случай ошибки основной
 const AI_NAME = process.env.AI_NAME || 'НейроНика';
 
 const openai = new OpenAI({
@@ -327,23 +328,27 @@ function startReminderWorker() {
 async function describePhoto(fileId) {
     try {
         const fileLink = await bot.getFileLink(fileId);
-        const response = await openai.chat.completions.create({
-            model: AI_MODEL,
-            messages: [
-                {
-                    role: "user",
-                    content: [
-                        { type: "text", text: "Что на этом фото? Опиши кратко, ехидно и дерзко, как будто ты вредная девчонка-стример Ника, которая комментирует чат. Отвечай на русском." },
-                        { type: "image_url", image_url: { url: fileLink } }
-                    ]
-                }
-            ],
-            max_tokens: 300
-        });
-        return response.choices[0].message.content;
+        // v4.0.2: Ограничиваем время ожидания описания фото
+        const responseList = await Promise.race([
+            openai.chat.completions.create({
+                model: AI_MODEL,
+                messages: [
+                    {
+                        role: "user",
+                        content: [
+                            { type: "text", text: "Что на этом фото? Опиши кратко, ехидно и дерзко. Отвечай на русском." },
+                            { type: "image_url", image_url: { url: fileLink } }
+                        ]
+                    }
+                ],
+                max_tokens: 200
+            }),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('Vision Timeout')), 10000))
+        ]);
+        return responseList.choices[0].message.content;
     } catch (e) {
         console.error('[VISION ERROR]:', e.message);
-        return null;
+        return null; // Возвращаем null, чтобы основной процесс продолжался
     }
 }
 
@@ -353,8 +358,8 @@ async function handleAIChat(msg, extra = {}) {
     const chatId = msg.chat.id;
     if (!processingQueue.has(chatId)) processingQueue.set(chatId, Promise.resolve());
     const turn = processingQueue.get(chatId).then(async () => {
-        try { await processAI(msg, extra); } catch (e) { 
-            console.error('[AI FATAL ERROR]:', e.message); 
+        try { await processAI(msg, extra); } catch (e) {
+            console.error('[AI FATAL ERROR]:', e.message);
             await bot.sendMessage(chatId, "Ой, у меня что-то в голове замкнуло... Попробуй еще раз.");
         }
     });
@@ -404,9 +409,9 @@ async function processAI(msg, extra) {
         const rp = msg.reply_to_message;
         let rpAuthor = rp.from ? rp.from.first_name : "Кто-то";
         if (rp.from && rp.from.username === 'GroupAnonymousBot') {
-             rpAuthor = rp.author_signature ? rp.author_signature : 'Анонимный админ';
+            rpAuthor = rp.author_signature ? rp.author_signature : 'Анонимный админ';
         } else if (rp.sender_chat) {
-             rpAuthor = rp.sender_chat.title || "Канал";
+            rpAuthor = rp.sender_chat.title || "Канал";
         }
         const rpText = rp.text || (rp.sticker ? `стикер ${rp.sticker.emoji}` : "медиа");
         replyPrefix = `(в ответ ${rpAuthor}: "${rpText.slice(0, 50)}${rpText.length > 50 ? '...' : ''}") `;
@@ -423,8 +428,8 @@ async function processAI(msg, extra) {
     activeParticipants[chatId][userId] = { firstName: msg.from.first_name, username: msg.from.username || '', lastSeen: Date.now() };
 
     // Для поиска памяти используем и текущее сообщение, и контекст ответа (если есть)
-    const userMessage = msg.reply_to_message ? 
-        `${msg.reply_to_message.text || ""}. ${userText}` : 
+    const userMessage = msg.reply_to_message ?
+        `${msg.reply_to_message.text || ""}. ${userText}` :
         userText;
 
     // Получаем список участников для поиска по субъектам
@@ -435,7 +440,7 @@ async function processAI(msg, extra) {
 
     const recentNicks = Object.values(activeParticipants[chatId]).slice(-5).map(p => `${p.firstName}(@${p.username})`).join(', ');
 
-    
+
     // Формируем человечный блок памяти: без "пусто" и "нет данных"
     const factsArray = relevantFacts ? relevantFacts.split('\n') : [];
     const aboutYou = factsArray.filter(f => f.includes('[recent]') || f.includes(userName + ':')).join('\n');
@@ -445,7 +450,7 @@ async function processAI(msg, extra) {
     let memoryBlock = `\n[КТО ПЕРЕД ТОБОЙ: ${userName}]\n`;
     if (dbUser && dbUser.ai_notes) memoryBlock += `Личное досье: ${dbUser.ai_notes}\n`;
     if (dbUser && dbUser.bio) memoryBlock += `Био: ${dbUser.bio}\n`;
-    
+
     if (aboutYou) memoryBlock += `\n[ТВОИ ВОСПОМИНАНИЯ О НЕМ]\n${aboutYou}\n`;
     if (aboutOthers) memoryBlock += `\n[ЧТО ТЫ ПОМНИШЬ О ДРУГИХ]\n${aboutOthers}\n`;
     if (general) memoryBlock += `\n[ПРОЧИЕ ФАКТЫ ИЗ ПАМЯТИ]\n${general}\n`;
@@ -466,12 +471,26 @@ async function processAI(msg, extra) {
 
     try {
         await bot.sendChatAction(chatId, 'typing');
-        const completion = await openai.chat.completions.create({
-            model: AI_MODEL,
-            messages: [{ role: 'system', content: finalPrompt }, ...sanitizeHistory(chatHistory[chatId])],
-            tools: aiTools,
-            temperature: 0.8
-        });
+
+        let completion;
+        try {
+            completion = await openai.chat.completions.create({
+                model: AI_MODEL,
+                messages: [{ role: 'system', content: finalPrompt }, ...sanitizeHistory(chatHistory[chatId])],
+                tools: aiTools, // ВОССТАНОВЛЕНО: поддержка инструментов
+                max_tokens: 1500,
+                temperature: 0.8
+            });
+        } catch (error) {
+            console.warn(`[AI MODEL ERROR]: ${AI_MODEL} failed, trying fallback ${FALLBACK_MODEL}. Error: ${error.message}`);
+            // Резервная попытка с другой моделью
+            completion = await openai.chat.completions.create({
+                model: FALLBACK_MODEL,
+                messages: [{ role: 'system', content: finalPrompt }, ...sanitizeHistory(chatHistory[chatId])],
+                tools: aiTools, // Также добавляем инструменты в резервную модель
+                max_tokens: 1000
+            });
+        }
 
         const resp = completion.choices[0].message;
         if (resp.tool_calls) {
@@ -507,9 +526,15 @@ async function processAI(msg, extra) {
 
     } catch (e) {
         console.error('AI Processing Error:', e.message);
+        // v4.0.1: Всегда отвечаем в чат при ошибке, чтобы юзер не ждал зря
+        const errorMsg = (e.message.includes('model') || e.message.includes('404'))
+            ? "Ой, кажется я потеряла голос (ошибка модели). проверте название модели в настройках!"
+            : `Упс, у меня что-то пошло не так: ${e.message.slice(0, 100)}`;
+
+        await safeSendMessage(chatId, errorMsg, msg.message_id);
+
         if (e.message.includes('function response turn') || e.message.includes('messages format')) {
             chatHistory[chatId] = [];
-            await safeSendMessage(chatId, "Ой, я немного запуталась в мыслях. О чем мы говорили?", msg.message_id);
         }
     }
 }
