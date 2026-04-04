@@ -305,24 +305,31 @@ async function safeSendMessage(chatId, text, replyId) {
     }
 }
 
-// v4.0: Фоновый воркер для напоминаний
+// v4.2: Фоновый воркер для напоминаний с защитой от сбоев
 function startReminderWorker() {
     console.log('[REMINDER WORKER] Запущен.');
     setInterval(async () => {
-        const due = await getDueReminders();
-        for (const rem of due) {
-            const mention = `<a href="tg://user?id=${rem.user_id}">${rem.user_name}</a>`;
-            const msg = `🔔 ${mention}, ты просил напомнить: <b>${rem.text}</b>`;
-            try {
-                await bot.sendMessage(rem.chat_id, msg, { parse_mode: 'HTML' });
-                await markReminderAsSent(rem.id);
-                console.log(`[REMINDER] Отправлено: ID ${rem.id} для ${rem.user_name}`);
-            } catch (e) {
-                console.error(`[REMINDER ERROR] ID ${rem.id}:`, e.message);
+        try {
+            const due = await getDueReminders();
+            if (!due || due.length === 0) return;
+
+            for (const rem of due) {
+                const mention = `<a href="tg://user?id=${rem.user_id}">${rem.user_name}</a>`;
+                const msg = `🔔 ${mention}, ты просил напомнить: <b>${rem.text}</b>`;
+                try {
+                    await bot.sendMessage(rem.chat_id, msg, { parse_mode: 'HTML' });
+                    await markReminderAsSent(rem.id);
+                    console.log(`[REMINDER] Отправлено: ID ${rem.id} для ${rem.user_name}`);
+                } catch (e) {
+                    console.error(`[REMINDER ERROR] Ошибка отправки ID ${rem.id}:`, e.message);
+                }
             }
+        } catch (e) {
+            console.error('[REMINDER WORKER CRITICAL ERROR]:', e.message);
         }
     }, 30000); // Проверка каждые 30 секунд
 }
+
 
 // v4.0: Описание фото через Gemini Vision
 async function describePhoto(fileId) {
@@ -499,14 +506,26 @@ async function processAI(msg, extra) {
                 const res = await executeToolCall(tc, chatId, msg.message_id, userName, userId);
                 chatHistory[chatId].push({ role: 'tool', tool_call_id: tc.id, name: tc.function.name, content: res });
             }
-            const second = await openai.chat.completions.create({
-                model: AI_MODEL,
-                messages: [{ role: 'system', content: finalPrompt }, ...sanitizeHistory(chatHistory[chatId])],
-                temperature: 0.8
-            });
-            const final = second.choices[0].message.content || "Действие выполнено.";
+            let second;
+            try {
+                second = await openai.chat.completions.create({
+                    model: AI_MODEL,
+                    messages: [{ role: 'system', content: finalPrompt }, ...sanitizeHistory(chatHistory[chatId])],
+                    temperature: 0.8
+                });
+            } catch (e) {
+                console.warn(`[AI SECOND CALL ERROR]: ${AI_MODEL} failed, using fallback ${FALLBACK_MODEL}`);
+                second = await openai.chat.completions.create({
+                    model: FALLBACK_MODEL,
+                    messages: [{ role: 'system', content: finalPrompt }, ...sanitizeHistory(chatHistory[chatId])],
+                    temperature: 0.8
+                });
+            }
+            
+            const final = second.choices[0].message.content || "Действие успешно выполнено.";
             await safeSendMessage(chatId, final, msg.message_id);
             chatHistory[chatId].push({ role: 'assistant', content: final });
+
         } else {
             const res = resp.content || "Ммм?";
             await safeSendMessage(chatId, res, msg.message_id);

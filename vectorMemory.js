@@ -30,11 +30,20 @@ async function extractAndSaveFacts(chatId, historyText, participants = []) {
             "Участники чата: " + participants.join(', ') + ". Используй ТОЛЬКО эти имена для идентификации." : 
             "Определи имена участников из диалога.";
 
-        const prompt = "Ты — эксперт по верификации данных. Твоя задача — извлечь из диалога ДОЛГОСРОЧНЫЕ факты об участниках чата.\n\n[ПРАВИЛА ИЗВЛЕЧЕНИЯ СВЯЗЕЙ (Memory v3)]\n1. СУБЪЕКТЫ: Каждый факт ДОЛЖЕН начинаться с Имени (в точности как в чате). НИКАКИХ 'Он', 'Она', 'Бот'.\n2. ФОРМАТ: 'Имя: [Действие] [Объект] (Контекст)'.\n3. СВЯЗИ: Описывай отношения между людьми.\n4. ПРИОРИТЕТЫ: Крупные покупки, хобби, важные события.\n\n" + participantInfo + "\n\nДиалог для анализа:\n" + historyText;
+        const prompt = "Ты — эксперт по верификации данных. Твоя задача — извлечь из диалога ДОЛГОСРОЧНЫЕ факты об участниках чата.\n\n" +
+            "[КРИТИЧЕСКИЕ ПРАВИЛА ИЗВЛЕЧЕНИЯ (Memory v4.2)]\n" +
+            "1. СУБЪЕКТЫ: Каждый факт ДОЛЖЕН начинаться с Имени (в точности как в чате). НИКАКИХ 'Он', 'Она', 'Бот'.\n" +
+            "2. ФОТО VS ПРЕДПОЧТЕНИЯ (ВАЖНО): Если в тексте есть пометка '(Ника видит на фото: ...)', записывай это ТОЛЬКО как внешнее наблюдение ('Имя: на фото был(а) с синими волосами').\n" +
+            "3. ЗАПРЕТ ГАЛЛЮЦИНАЦИЙ: КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО интерпретировать визуальные детали как 'любит' или 'предпочитает'. Если на фото девушка в кожанке, НЕ ПИШИ 'Пользователь любит кожанки'. Пиши только то, что видишь.\n" +
+            "4. ПРЕДПОЧТЕНИЯ: Записывай 'любит/хочет/интересуется' ТОЛЬКО если пользователь ЯВНО сказал об этом текстом (например: 'Я обожаю аниме').\n" +
+            "5. ФОРМАТ: 'Имя: [Факт]'.\n\n" + participantInfo + "\n\nДиалог для анализа:\n" + historyText;
+
 
         const completion = await openai.chat.completions.create({
             model: AI_MODEL,
-            messages: [{ role: 'system', content: prompt }],
+            messages: [
+                { role: 'system', content: prompt + "\n\nОТВЕТЬ ТОЛЬКО В ФОРМАТЕ JSON: {\"facts\": [{\"participant\": \"Имя\", \"fact\": \"Имя: факт\"}, ...]}" }
+            ],
             temperature: 0.1,
             response_format: { type: 'json_object' }
         });
@@ -44,8 +53,8 @@ async function extractAndSaveFacts(chatId, historyText, participants = []) {
 
         let result;
         try {
-            // v4.0: Более надежное извлечение JSON через RegEx
-            const jsonMatch = rawContent.match(/\{[\s\S]*\}/);
+            // v4.1: Более надежное извлечение JSON (поддержка как {} так и [])
+            const jsonMatch = rawContent.match(/(\{[\s\S]*\}|\[[\s\S]*\])/);
             if (jsonMatch) {
                 result = JSON.parse(jsonMatch[0]);
             } else {
@@ -56,7 +65,15 @@ async function extractAndSaveFacts(chatId, historyText, participants = []) {
             return;
         }
         
-        const facts = result.facts || [];
+        // v4.1: Адаптивный поиск фактов в результате
+        let facts = [];
+        if (Array.isArray(result)) {
+            facts = result.map(f => typeof f === 'object' ? f.fact : f);
+        } else if (result && result.facts) {
+            facts = result.facts.map(f => typeof f === 'object' ? f.fact : f);
+        }
+
+        facts = facts.filter(f => f && typeof f === 'string');
 
         for (const fact of facts) {
             const exists = await checkFactExists(chatId, fact);
