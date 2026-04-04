@@ -449,7 +449,27 @@ async function getUpcomingBirthdays(chatId) {
     });
 }
 
+// Поиск одного пользователя по имени/нику (для resolveUser)
+async function findSingleUser(chatId, query) {
+    if (!query) return null;
+    const cleanQuery = query.replace('@', '').toLowerCase().trim();
+    const stem = (cleanQuery.length > 3) ? getStem(cleanQuery) : cleanQuery;
+    const latinStem = transliterate(stem);
 
+    const { data: user, error } = await supabase
+        .from('users')
+        .select('*')
+        .eq('chat_id', chatId)
+        .or(`username.ilike.%${cleanQuery}%,first_name.ilike.%${cleanQuery}%,username.ilike.%${latinStem}%,first_name.ilike.%${latinStem}%`)
+        .limit(1)
+        .maybeSingle();
+
+    if (error) {
+        console.error('[DB ERROR] findSingleUser:', error.message || error);
+        return null;
+    }
+    return user;
+}
 
 async function getBirthdaysToday(chatId) {
     const today = new Date();
@@ -621,6 +641,7 @@ module.exports = {
     checkFactExists, deleteKnowledge, transliterate,
     insertReminder, getDueReminders, markReminderAsSent,
     getChatStats, searchUserByName, warnUserById, getUpcomingBirthdays,
+    findSingleUser,
     messageAuthors, reactionCooldowns, commandCooldowns, userCache,
     supabase, ANONYMOUS_ADMIN_ID, pendingVerifications
 };

@@ -1,12 +1,13 @@
 const OpenAI = require('openai');
 const { bot, escapeHTML, isAdmin, getSenderData } = require('../utils');
 const {
-    getUser, updateUser,
-    setBioByUsernameOrName, setNotesByUsernameOrName,
+    getUser, updateUser, insertReminder, findSingleUser,
+    setBioByUsernameOrName, setNotesByUsernameOrName, setFirstNameByUsernameOrName,
     getChatStats, searchUserByName, warnUserById, getUpcomingBirthdays,
-    getChatSettings, insertReminder, getDueReminders, markReminderAsSent
+    getDueReminders, markReminderAsSent
 } = require('../database');
 const { extractAndSaveFacts, getRelevantFacts, forgetFact } = require('../vectorMemory');
+const { ANONYMOUS_ADMIN_ID } = require('../config');
 
 const POLZA_API_KEY = process.env.POLZA_API_KEY || 'pza_Ut5ahRtIFZSzj_jKezwdRvQMMebqZ1BI';
 const AI_MODEL = process.env.AI_MODEL || 'google/gemini-2.5-flash-lite';
@@ -58,8 +59,8 @@ const aiTools = [
 ];
 
 
-const SYSTEM_PROMPT = `Ты — ${AI_NAME}, самостоятельная личность, дерзкое альтер-эго стримерши Ники.
 
+const SYSTEM_PROMPT = `
 [ТВОЙ ХАРАКТЕР]
 - Ты живая, ироничная и с отличным чувством юмора. Обожаешь спорить по мелочам, но остаешься справедливой.
 - Черты: Умеренное ЧСВ (чувство собственной важности), ты круче обычных ботов, любишь внимание, язвишь, но свою создательницу Нику боготворишь и защищаешь.
@@ -121,14 +122,14 @@ async function resolveUser(chatId, targetName) {
     if (!targetName) return null;
     let cleanName = targetName.replace('@', '').toLowerCase().trim();
 
-    const getStemLocal = (word) => {
-        if (!word || word.length < 3) return word;
-        return word.replace(/[уаеяюиыо]$/i, '').replace(/(ов|ев|ий|ый|ые|ие|ах|ях|ом|ем)$/i, '');
-    };
-
-    const stem = getStemLocal(cleanName);
-
+    // v4.3: Сначала ищем в кэше активных участников (те, кто недавно писал)
     if (activeParticipants[chatId]) {
+        const getStemLocal = (word) => {
+            if (!word || word.length < 3) return word;
+            return word.replace(/[уаеяюиыо]$/i, '').replace(/(ов|ев|ий|ый|ые|ие|ах|ях|ом|ем)$/i, '');
+        };
+        const stem = getStemLocal(cleanName);
+
         for (const [uid, p] of Object.entries(activeParticipants[chatId])) {
             const lowFirst = (p.firstName || '').toLowerCase();
             const lowUser = (p.username || '').toLowerCase();
@@ -142,52 +143,66 @@ async function resolveUser(chatId, targetName) {
             }
         }
     }
-    const results = await searchUserByName(chatId, stem);
-    if (results && results.length > 0 && results[0].user_id) {
-        return await getUser(chatId, results[0].user_id);
-    }
-    return null;
+
+    // v4.3.1: Если в кэше нет — ищем по всей базе данных чата через findSingleUser
+    return await findSingleUser(chatId, cleanName);
 }
 
-async function executeToolCall(toolCall, chatId, messageId, userName, userId) {
-    const args = JSON.parse(toolCall.function.arguments);
-    const fn = toolCall.function.name;
-    console.log(`[AI TOOL CALL] ${fn} | Args:`, args);
+async function executeToolCall(toolCall, chatId, messageId, userName, userId, callerIsAdmin) {
+    // Поддержка как нового OpenAI tool_calls, так и старого function_call
+    const fn = toolCall.function ? toolCall.function.name : toolCall.name;
+    const argsString = toolCall.function ? toolCall.function.arguments : toolCall.arguments;
+
+    let args;
+    try {
+        args = typeof argsString === 'string' ? JSON.parse(argsString) : argsString;
+    } catch (e) {
+        console.error(`[AI TOOL ARGS ERROR] ${fn}:`, e.message);
+        return "Ошибка разбора аргументов инструмента.";
+    }
+
+    console.log(`[AI TOOL CALL] ${fn} | Admin: ${callerIsAdmin} | Args:`, args);
+
     try {
         switch (fn) {
             case 'get_user_profile': {
                 let u = await resolveUser(chatId, args.query);
                 if (!u && (args.query.toLowerCase() === 'я' || args.query.toLowerCase() === 'me' || userName.toLowerCase().includes(args.query.toLowerCase()))) {
-                    const { getUser } = require('../database');
                     u = await getUser(chatId, userId);
                 }
                 if (!u) return "Не могу найти такого человека.";
                 return `Профиль ${u.first_name}: XP ${u.xp}, Лвл ${u.level}, Био: ${u.bio || 'Пусто'}, Заметки: ${u.ai_notes || 'Нет'}.`;
             }
             case 'find_users_by_criteria': {
-                const { searchUserByName } = require('../database');
                 const results = await searchUserByName(chatId, args.search_query);
                 if (!results || results.length === 0) return "Никого подходящего не нашла.";
                 const list = results.map(u => `${u.name} (Заметки: ${u.ai_notes || u.bio || '?...'})`).join('\n');
                 return `Нашла подходящих людей:\n${list}`;
             }
             case 'warn_user': {
+                if (!callerIsAdmin) return "У тебя недостаточно прав для выдачи предупреждений. Это могут делать только админы.";
                 const u = await resolveUser(chatId, args.target_name);
-                if (!u) return "Не найден.";
+                if (!u) return "Пользователь не найден.";
                 const nw = (u.warns || 0) + 1;
                 await updateUser(u.id, { warns: nw });
                 return `${u.first_name} получил варн (${nw}/3). Причина: ${args.reason}`;
             }
             case 'mute_user': {
+                if (!callerIsAdmin) return "Ты не админ, чтобы мутить людей. Знай своё место!";
                 const u = await resolveUser(chatId, args.target_name);
-                if (!u) return "Не найден.";
+                if (!u) return "Пользователь не найден.";
                 const targetChatId = args.group_chat_id || u.chat_id || chatId;
                 if (!String(targetChatId).startsWith("-")) return "Мутить можно только в группах.";
                 const dur = Math.min(Math.max(1, args.duration_minutes || 15), 1440);
-                await bot.restrictChatMember(targetChatId, u.user_id, { until_date: Math.floor(Date.now() / 1000) + dur * 60 });
-                return `${u.first_name} в муте на ${dur} мин. Причина: ${args.reason}`;
+                try {
+                    await bot.restrictChatMember(targetChatId, u.user_id, { until_date: Math.floor(Date.now() / 1000) + dur * 60 });
+                    return `${u.first_name} в муте на ${dur} мин. Причина: ${args.reason}`;
+                } catch (e) {
+                    return `Не удалось замутить: ${e.message} (возможно, у меня нет прав админа)`;
+                }
             }
             case 'unmute_user': {
+                if (!callerIsAdmin) return "Размучивать людей могут только админы.";
                 const u = await resolveUser(chatId, args.target_name);
                 if (!u) return "Пользователь не найден.";
                 const targetChatId = args.group_chat_id || u.chat_id || chatId;
@@ -196,38 +211,40 @@ async function executeToolCall(toolCall, chatId, messageId, userName, userId) {
                     await bot.restrictChatMember(targetChatId, u.user_id, {
                         can_send_messages: true, can_send_media_messages: true, can_send_polls: true, can_send_other_messages: true, can_add_web_page_previews: true, can_invite_users: true
                     });
-                    return `Мут с ${u.first_name} снят в чате ${targetChatId}.`;
+                    return `Мут с ${u.first_name} снят.`;
                 } catch (e) {
                     return `Ошибка размута: ${e.message}`;
                 }
             }
             case 'give_cookies': {
                 const u = await resolveUser(chatId, args.target_name);
-                if (!u) return "Не найден.";
+                if (!u) return "Кому давать печеньки? Не вижу такого.";
                 await updateUser(u.id, { reputation: (u.reputation || 0) + args.amount });
                 return `Дала ${args.amount} печенек ${u.first_name}.`;
             }
             case 'react_to_message': {
-                await bot.setMessageReaction(chatId, messageId, { reaction: [{ type: 'emoji', emoji: args.emoji || '🔥' }] });
-                return "Реакция успешна.";
+                try {
+                    await bot.setMessageReaction(chatId, messageId, { reaction: [{ type: 'emoji', emoji: args.emoji || '🔥' }] });
+                    return "Реакция успешна.";
+                } catch (e) {
+                    return `Не удалось поставить реакцию: ${e.message}`;
+                }
             }
             case 'update_user_bio': {
                 let u = await resolveUser(chatId, args.target_name);
                 if (!u && (args.target_name.toLowerCase() === 'я' || args.target_name.toLowerCase() === 'me' || userName.toLowerCase().includes(args.target_name.toLowerCase()))) {
-                    const { getUser } = require('../database');
                     u = await getUser(chatId, userId);
                 }
-                if (!u) return "Не найден.";
+                if (!u) return "Пользователь не найден.";
                 await updateUser(u.id, { bio: args.new_bio });
                 return `Био ${u.first_name} обновлено.`;
             }
             case 'update_user_notes': {
                 let u = await resolveUser(chatId, args.target_name);
                 if (!u && (args.target_name.toLowerCase() === 'я' || args.target_name.toLowerCase() === 'me' || userName.toLowerCase().includes(args.target_name.toLowerCase()))) {
-                    const { getUser } = require('../database');
                     u = await getUser(chatId, userId);
                 }
-                if (!u) return "Не найден.";
+                if (!u) return "Пользователь не найден.";
 
                 if (args.replace_all) {
                     await updateUser(u.id, { ai_notes: args.new_note_item });
@@ -245,11 +262,15 @@ async function executeToolCall(toolCall, chatId, messageId, userName, userId) {
             }
             case 'create_poll': {
                 if (!args.question || !args.options || args.options.length < 2) return "Нужен вопрос и варианты.";
-                await bot.sendPoll(chatId, args.question, args.options, {
-                    is_anonymous: args.is_anonymous !== undefined ? args.is_anonymous : true,
-                    allows_multiple_answers: !!args.allows_multiple_answers
-                });
-                return "Опрос запущен.";
+                try {
+                    await bot.sendPoll(chatId, args.question, args.options, {
+                        is_anonymous: args.is_anonymous !== undefined ? args.is_anonymous : true,
+                        allows_multiple_answers: !!args.allows_multiple_answers
+                    });
+                    return "Опрос запущен.";
+                } catch (e) {
+                    return `Ошибка создания опроса: ${e.message}`;
+                }
             }
             case 'set_reminder': {
                 const delay = Math.max(1, args.delay_minutes || 1);
@@ -259,36 +280,35 @@ async function executeToolCall(toolCall, chatId, messageId, userName, userId) {
                 const ok = await insertReminder(chatId, userId, userName, text, triggerTime);
                 if (!ok) return "Не удалось записать напоминание в базу.";
 
-                return `Хорошо, записала! Напомню через ${delay} мин. (даже если я перезагружусь 😉)`;
+                return `Хорошо, записала! Напомню через ${delay} мин.`;
             }
             case 'set_user_name': {
-                const { setFirstNameByUsernameOrName, getUser } = require('../database');
-                let target = args.target_name;
-                if (target.toLowerCase() === 'я' || target.toLowerCase() === 'me') {
-                    const u = await getUser(chatId, userId);
-                    if (u) {
-                        const { updateUser } = require('../database');
-                        await updateUser(u.id, { first_name: args.new_name });
-                        return `Имя пользователя успешно изменено на ${args.new_name}.`;
-                    }
+                let u;
+                if (args.target_name.toLowerCase() === 'я' || args.target_name.toLowerCase() === 'me') {
+                    u = await getUser(chatId, userId);
+                } else {
+                    u = await resolveUser(chatId, args.target_name);
                 }
-                const oldName = await setFirstNameByUsernameOrName(chatId, target, args.new_name);
-                if (!oldName) return "Не могу найти такого юзера для смены имени.";
+
+                if (!u) return "Не могу найти такого юзера для смены имени.";
+
+                const oldName = u.first_name;
+                await updateUser(u.id, { first_name: args.new_name });
                 return `Имя пользователя ${oldName} изменено на ${args.new_name}.`;
             }
             case 'forget_knowledge': {
                 const deletedFact = await forgetFact(chatId, args.query);
                 if (deletedFact) {
-                    return `Успешно удалила из памяти факт: "${deletedFact}". Больше не буду об этом вспоминать!`;
+                    return `Успешно удалила из памяти факт: "${deletedFact}".`;
                 } else {
-                    return `Не нашла в своей Сверхпамяти точного факта по запросу: "${args.query}". Видимо, я уже это забыла или этого там и не было.`;
+                    return `Не нашла такого факта в памяти.`;
                 }
             }
-            default: return "Ошибка инструмента.";
+            default: return "Ошибка инструмента или неизвестный тип.";
         }
     } catch (e) {
         console.error(`[AI TOOL ERROR] ${fn}:`, e.message);
-        return `Системная ошибка: ${e.message}`;
+        return `Системная ошибка инструмента: ${e.message}`;
     }
 }
 
@@ -476,6 +496,8 @@ async function processAI(msg, extra) {
     extractionBuffer[chatId].push(`${userName}: ${userText}`);
     if (extractionBuffer[chatId].length > 40) extractionBuffer[chatId].shift();
 
+    const callerIsAdmin = await isAdmin(chatId, userId);
+
     try {
         await bot.sendChatAction(chatId, 'typing');
 
@@ -484,28 +506,38 @@ async function processAI(msg, extra) {
             completion = await openai.chat.completions.create({
                 model: AI_MODEL,
                 messages: [{ role: 'system', content: finalPrompt }, ...sanitizeHistory(chatHistory[chatId])],
-                tools: aiTools, // ВОССТАНОВЛЕНО: поддержка инструментов
+                tools: aiTools,
                 max_tokens: 1500,
                 temperature: 0.8
             });
         } catch (error) {
             console.warn(`[AI MODEL ERROR]: ${AI_MODEL} failed, trying fallback ${FALLBACK_MODEL}. Error: ${error.message}`);
-            // Резервная попытка с другой моделью
             completion = await openai.chat.completions.create({
                 model: FALLBACK_MODEL,
                 messages: [{ role: 'system', content: finalPrompt }, ...sanitizeHistory(chatHistory[chatId])],
-                tools: aiTools, // Также добавляем инструменты в резервную модель
+                tools: aiTools,
                 max_tokens: 1000
             });
         }
 
-        const resp = completion.choices[0].message;
-        if (resp.tool_calls) {
+        let resp = completion.choices[0].message;
+
+        // v4.3.2: Поддержка как новых tool_calls, так и старых function_call
+        if (resp.tool_calls || resp.function_call) {
             chatHistory[chatId].push(resp);
-            for (const tc of resp.tool_calls) {
-                const res = await executeToolCall(tc, chatId, msg.message_id, userName, userId);
-                chatHistory[chatId].push({ role: 'tool', tool_call_id: tc.id, name: tc.function.name, content: res });
+
+            const calls = resp.tool_calls || [resp.function_call];
+            for (const tc of calls) {
+                const res = await executeToolCall(tc, chatId, msg.message_id, userName, userId, callerIsAdmin);
+
+                // Для нового формата Tool Role, для старого Assistant (т.к. старые модели не знают роль 'tool')
+                if (resp.tool_calls) {
+                    chatHistory[chatId].push({ role: 'tool', tool_call_id: tc.id, name: tc.function.name, content: res });
+                } else {
+                    chatHistory[chatId].push({ role: 'assistant', content: `[SYSTEM: Результат функции ${tc.name}: ${res}]` });
+                }
             }
+
             let second;
             try {
                 second = await openai.chat.completions.create({
@@ -521,8 +553,8 @@ async function processAI(msg, extra) {
                     temperature: 0.8
                 });
             }
-            
-            const final = second.choices[0].message.content || "Действие успешно выполнено.";
+
+            const final = second.choices[0].message.content || "Действие выполнено.";
             await safeSendMessage(chatId, final, msg.message_id);
             chatHistory[chatId].push({ role: 'assistant', content: final });
 
