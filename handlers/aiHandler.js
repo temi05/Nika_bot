@@ -131,11 +131,16 @@ async function executeToolCall(toolCall, chatId, messageId, userName, userId) {
     try {
         switch (fn) {
             case 'get_user_profile': {
-                const u = await resolveUser(chatId, args.query);
+                let u = await resolveUser(chatId, args.query);
+                if (!u && (args.query.toLowerCase() === 'я' || args.query.toLowerCase() === 'me' || userName.toLowerCase().includes(args.query.toLowerCase()))) {
+                    const { getUser } = require('../database');
+                    u = await getUser(chatId, userId);
+                }
                 if (!u) return "Не могу найти такого человека.";
                 return `Профиль ${u.first_name}: XP ${u.xp}, Лвл ${u.level}, Био: ${u.bio || 'Пусто'}, Заметки: ${u.ai_notes || 'Нет'}.`;
             }
             case 'find_users_by_criteria': {
+                const { searchUserByName } = require('../database');
                 const results = await searchUserByName(chatId, args.search_query);
                 if (!results || results.length === 0) return "Никого подходящего не нашла.";
                 const list = results.map(u => `${u.name} (Заметки: ${u.ai_notes || u.bio || '?...'})`).join('\n');
@@ -182,13 +187,21 @@ async function executeToolCall(toolCall, chatId, messageId, userName, userId) {
                 return "Реакция успешна.";
             }
             case 'update_user_bio': {
-                const u = await resolveUser(chatId, args.target_name);
+                let u = await resolveUser(chatId, args.target_name);
+                if (!u && (args.target_name.toLowerCase() === 'я' || args.target_name.toLowerCase() === 'me' || userName.toLowerCase().includes(args.target_name.toLowerCase()))) {
+                    const { getUser } = require('../database');
+                    u = await getUser(chatId, userId);
+                }
                 if (!u) return "Не найден.";
                 await updateUser(u.id, { bio: args.new_bio });
                 return `Био ${u.first_name} обновлено.`;
             }
             case 'update_user_notes': {
-                const u = await resolveUser(chatId, args.target_name);
+                let u = await resolveUser(chatId, args.target_name);
+                if (!u && (args.target_name.toLowerCase() === 'я' || args.target_name.toLowerCase() === 'me' || userName.toLowerCase().includes(args.target_name.toLowerCase()))) {
+                    const { getUser } = require('../database');
+                    u = await getUser(chatId, userId);
+                }
                 if (!u) return "Не найден.";
 
                 if (args.replace_all) {

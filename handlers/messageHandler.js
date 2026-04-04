@@ -11,9 +11,7 @@ let passiveMessageCount = {}; // { chatId: count }
 
 function registerMessageHandlers() {
     bot.on('message', async (msg) => {
-        // Минималистичный лог каждого сообщения для спокойствия, что бот всё видит
-        console.log(`[MSG] Чат: ${msg.chat.id} | От: ${msg.from?.first_name || 'Аноним'} | Текст: "${msg.text?.substring(0, 30) || 'медиа'}"`);
-        
+
         const chatId = msg.chat.id;
         const { userId, user } = getSenderData(msg);
 
@@ -61,12 +59,12 @@ function registerMessageHandlers() {
             // СТРИМЕРША (Ника) при этом остается под защитой
             const isAiMention = text.includes('нейроника');
             const isReplyToAi = msg.reply_to_message && msg.reply_to_message.from.is_bot;
-            
+
             if ((foundBadWord || isPromoBlocked) && !isAiMention && !isReplyToAi) {
                 bot.deleteMessage(chatId, msg.message_id).catch(() => { });
                 const newWarns = dbUser.warns + 1;
                 await updateUser(dbUser.id, { warns: newWarns });
-                
+
                 if (newWarns >= 3) {
                     await updateUser(dbUser.id, { warns: 0 });
                     const untilDate = Math.floor(Date.now() / 1000) + 3600;
@@ -126,17 +124,18 @@ function registerMessageHandlers() {
                 const nextXp = getNextLevelXp(dbUser.level);
                 const newLevel = dbUser.xp + xpGain >= nextXp ? dbUser.level + 1 : dbUser.level;
                 await updateUser(dbUser.id, { xp: dbUser.xp + xpGain, level: newLevel, last_message_time: now });
-                
+                console.log(`[XP] ${userTag} получил(а) ${xpGain} XP (Ур: ${newLevel})`);
+
                 if (newLevel > dbUser.level) {
-                   // Повышение уровня!
-                   const levelUpPhrases = [
-                       `👤 <b>${escapeHTML(getUserName(user))}</b>, ты теперь <b>${newLevel} уровня</b>. Растешь, не по дням, а по часам! 📈`,
-                       `О, <b>${escapeHTML(getUserName(user))}</b> дополз до <b>${newLevel} лвла</b>. Неплохо, для начала. 🌟`,
-                       `Смотрите-ка, <b>${escapeHTML(getUserName(user))}</b> апнул <b>${newLevel} уровень</b>! Продолжай в том же духе. 🔥`,
-                       `<b>${newLevel} уровень</b> у <b>${escapeHTML(getUserName(user))}</b>! Скоро меня догонишь (шучу, нет). 🚀`
-                   ];
-                   const levelUpMsg = levelUpPhrases[Math.floor(Math.random() * levelUpPhrases.length)];
-                   sendTimedMessage(chatId, levelUpMsg, 30000, { parse_mode: 'HTML' });
+                    // Повышение уровня!
+                    const levelUpPhrases = [
+                        `👤 <b>${escapeHTML(getUserName(user))}</b>, ты теперь <b>${newLevel} уровня</b>. Растешь, не по дням, а по часам! 📈`,
+                        `О, <b>${escapeHTML(getUserName(user))}</b> дополз до <b>${newLevel} лвла</b>. Неплохо, для начала. 🌟`,
+                        `Смотрите-ка, <b>${escapeHTML(getUserName(user))}</b> апнул <b>${newLevel} уровень</b>! Продолжай в том же духе. 🔥`,
+                        `<b>${newLevel} уровень</b> у <b>${escapeHTML(getUserName(user))}</b>! Скоро меня догонишь (шучу, нет). 🚀`
+                    ];
+                    const levelUpMsg = levelUpPhrases[Math.floor(Math.random() * levelUpPhrases.length)];
+                    sendTimedMessage(chatId, levelUpMsg, 30000, { parse_mode: 'HTML' });
                 }
             }
         }
@@ -153,7 +152,7 @@ function registerMessageHandlers() {
                 if (userId === rId) return;
                 const cooldownKey = `${userId}_${rId}`;
                 if (Date.now() - (reactionCooldowns[cooldownKey] || 0) < 60000) return sendTimedMessage(chatId, '⏳ Подожди минуту перед следующей оценкой!', 10000);
-                
+
                 const receiver = await getUser(chatId, rId, rInfo);
                 if (receiver) {
                     await updateUser(receiver.id, { reputation: receiver.reputation + change });
@@ -165,7 +164,7 @@ function registerMessageHandlers() {
                         `📉 <b>${escapeHTML(getUserName(user))}</b> отнял печеньку у <b>${escapeHTML(getUserName(rInfo))}</b>. Грустно.\n└ Осталось <code>${receiver.reputation + change} 🍪</code>`,
                         `Минус печенька у <b>${escapeHTML(getUserName(rInfo))}</b>. Постарался <b>${escapeHTML(getUserName(user))}</b>.\n└ Теперь их всего <code>${receiver.reputation + change} 🍪</code>`
                     ];
-                    const repMsg = change > 0 
+                    const repMsg = change > 0
                         ? cookiePhrases[Math.floor(Math.random() * cookiePhrases.length)]
                         : lossPhrases[Math.floor(Math.random() * lossPhrases.length)];
                     sendTimedMessage(chatId, repMsg, 60000, { parse_mode: 'HTML' });
