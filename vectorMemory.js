@@ -24,22 +24,25 @@ async function createEmbedding(text) {
 }
 
 // Фоновое извлечение фактов из куска диалога
-async function extractAndSaveFacts(chatId, historyText) {
+async function extractAndSaveFacts(chatId, historyText, participants = []) {
     try {
+        const participantInfo = participants.length > 0 ? 
+            `Участники чата: ${participants.join(', ')}. Используй ТОЛЬКО эти имена для идентификации.` : 
+            "Определи имена участников из диалога.";
+
         const prompt = `Ты — эксперт по верификации данных. Твоя задача — извлечь из диалога ДОЛГОСРОЧНЫЕ факты об участниках чата.
 
-[ПРАВИЛА ИЗВЛЕЧЕНИЯ СВЯЗЕЙ (GraphRAG-lite)]
-1. СУБЪЕКТЫ: Всегда выделяй, КТО совершил действие или О КОМ идет речь (Имя или @username).
-2. СВЯЗИ: Описывай отношения между людьми ("друг", "враг", "вместе играют") и предметами ("купил", "хочет", "владеет").
-3. ПРИОРИТЕТЫ: Крупные покупки, хобби, место работы, важные события, отношения между участниками чата.
-4. ФОРМАТ ТРОЙКИ: Используй структуру [Субъект] [Действие/Связь] [Объект]. Например: "Чика купил iPhone 15", "Марго и Чика дружат", "Темирлан живет в Казахстане".
-5. КОНТЕКСТ: Если факт привязан к событию (вечерний стрим, игра в доту), кратко укажи это.
+[ПРАВИЛА ИЗВЛЕЧЕНИЯ СВЯЗЕЙ (Memory v3)]
+1. СУБЪЕКТЫ: Каждый факт ДОЛЖЕН начинаться с Имени (в точности как в чате). НИКАКИХ "Он", "Она", "Бот".
+2. ФОРМАТ: "Имя: [Действие] [Объект] (Контекст)". Например: "Чика: купил iPhone 15", "Марго: дружит с Чикой", "Темирлан: живет в Казахстане (ночью)".
+3. СВЯЗИ: Описывай отношения между людьми и их владение предметами.
+4. ПРИОРИТЕТЫ: Крупные покупки, хобби, место работы, важные события, отношения.
 
-Формат ответа: JSON объект {"facts": ["Субъект: Связь -> Объект (Контекст)"]}
-Если фактов нет: {"facts": []}
+${participantInfo}
 
 Диалог для анализа:
 ${historyText}`;
+
 
         const completion = await openai.chat.completions.create({
             model: AI_MODEL,
@@ -161,6 +164,25 @@ async function getRelevantFacts(chatId, userMessage, userName = "") {
             }
         });
     }
+
+    // --- СТРИМ 4: ПОИСК ПО СУБЪЕКТАМ (SMART NAME MATCH) ---
+    // Ищем слова с большой буквы или @юзернеймы, которые могут быть именами
+    const potentialNames = userMessage.match(/([А-Я][а-я]+|@[a-zA-Z0-9_]+)/g) || [];
+    const uniqueNames = [...new Set(potentialNames.map(n => n.replace('@', '')))];
+
+    for (const name of uniqueNames) {
+        if (name.length < 3 || name.toLowerCase() === userName.toLowerCase()) continue;
+        
+        // Ищем записи, начинающиеся строго с этого имени "Имя:"
+        const nameResults = await searchKnowledgeByText(chatId, `${name}:`, 5);
+        nameResults.forEach(r => {
+            if (!allFoundFacts.has(r.fact)) {
+                allFoundFacts.add(r.fact);
+                finalFacts.push({ source: 'subject', text: r.fact });
+            }
+        });
+    }
+
 
     if (finalFacts.length === 0) return "";
 

@@ -361,9 +361,19 @@ async function processAI(msg, extra) {
 
     
     // Формируем блок памяти с четким разделением
+    const factsArray = relevantFacts ? relevantFacts.split('\n') : [];
+    const aboutYou = factsArray.filter(f => f.includes('[recent]') || f.includes(userName + ':')).join('\n');
+    const aboutOthers = factsArray.filter(f => f.includes('[subject]')).join('\n');
+    const general = factsArray.filter(f => !aboutYou.includes(f) && !aboutOthers.includes(f)).join('\n');
+
     const memoryBlock = `
-[ТВОИ ВОСПОМИНАНИЯ (Сверхпамять)]
-${relevantFacts || "Ничего конкретного не припоминаю."}
+[ПАМЯТЬ О ТЕБЕ (Сверхпамять)]
+${aboutYou || "Пока ничего личного не припоминаю."}
+
+${aboutOthers ? `[ФАКТЫ ОБ УПОМЯНУТЫХ ЛЮДЯХ]\n${aboutOthers}\n` : ""}
+
+[ОБЩИЕ ВОСПОМИНАНИЯ]
+${general || "Пусто."}
 
 [ЛИЧНОЕ ДОСЬЕ ПОЛЬЗОВАТЕЛЯ (${userName})]
 ${dbUser && dbUser.ai_notes ? dbUser.ai_notes : "Досье пока пусто."}
@@ -372,6 +382,7 @@ ${dbUser && dbUser.ai_notes ? dbUser.ai_notes : "Досье пока пусто.
 Участники: ${recentNicks}
 Время: ${new Date().toLocaleString('ru-RU')}
 `;
+
 
     const finalPrompt = SYSTEM_PROMPT + memoryBlock;
 
@@ -412,10 +423,12 @@ ${dbUser && dbUser.ai_notes ? dbUser.ai_notes : "Досье пока пусто.
         if (!messageCount[chatId]) messageCount[chatId] = 0;
         if (++messageCount[chatId] >= 15) {
             const historyText = chatHistory[chatId].map(m => `${m.role}: ${m.content}`).join('\n');
+            const participants = Object.values(activeParticipants[chatId]).map(p => p.firstName);
             // Запускаем асинхронно, чтобы не тормозить ответ
-            extractAndSaveFacts(chatId, historyText);
+            extractAndSaveFacts(chatId, historyText, participants);
             messageCount[chatId] = 0;
         }
+
     } catch (e) {
         console.error('AI Processing Error:', e.message);
         if (e.message.includes('function response turn') || e.message.includes('messages format')) {
