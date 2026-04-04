@@ -95,12 +95,13 @@ ${historyText}`;
 
             const embedding = await createEmbedding(fact);
             if (embedding) {
-                // Семантическая дедупликация (если мысль совпадает на 90%+, пропускаем)
-                const duplicates = await searchKnowledge(chatId, embedding, 1, 0.90);
+                // Семантическая дедупликация (теперь более деликатная: 95%+)
+                const duplicates = await searchKnowledge(chatId, embedding, 1, 0.95);
                 if (duplicates && duplicates.length > 0) {
-                    console.log(`[MEMORY] Семантический дубликат пропущен. Фраза "${fact}" -> похожа на: "${duplicates[0].fact}"`);
+                    console.log(`[MEMORY] Семантический дубликат пропущен. Фраза "${fact}" почти идентична уже известной.`);
                     continue;
                 }
+
 
                 await insertKnowledge(chatId, fact, embedding);
                 console.log(`[MEMORY] Успешно запомнен факт: ${fact}`);
@@ -112,75 +113,67 @@ ${historyText}`;
     }
 }
 
-// Поиск фактов для ответа (Двухэтапная ассоциативная модель + Усиление личности)
+// Поиск фактов для ответа (ГИБРИДНАЯ МОДЕЛЬ: Векторы + Ключевые слова + История)
 async function getRelevantFacts(chatId, userMessage, userName = "") {
     if (!userMessage || userMessage.trim() === '') return "";
 
-    // 1. ПЕРВЫЙ ЭТАП: Двойной семантический поиск
-    // Мы ищем и по сообщению, и по "Имя: сообщение", чтобы поймать разные смыслы
+    const { searchKnowledgeByText, getRecentKnowledge } = require('./database');
+    const allFoundFacts = new Set();
+    const finalFacts = [];
+
+    // --- СТРИМ 1: СЕМАНТИКА (ВЕКТОРЫ) ---
     const embeddingRaw = await createEmbedding(userMessage);
-    const resultsRaw = await searchKnowledge(chatId, embeddingRaw, 5, 0.40);
-    
-    let resultsPrefixed = [];
-    if (userName) {
-        const embeddingPrefixed = await createEmbedding(`${userName}: ${userMessage}`);
-        resultsPrefixed = await searchKnowledge(chatId, embeddingPrefixed, 5, 0.40);
-    }
-
-    // Объединяем и убираем дубли
-    const directResults = [...resultsRaw, ...resultsPrefixed];
-    const uniqueIds = new Set();
-    const uniqueDirectResults = directResults.filter(r => {
-        if (uniqueIds.has(r.id)) return false;
-        uniqueIds.add(r.id);
-        return true;
+    const vectorResults = await searchKnowledge(chatId, embeddingRaw, 5, 0.40);
+    vectorResults.forEach(r => {
+        if (!allFoundFacts.has(r.fact)) {
+            allFoundFacts.add(r.fact);
+            finalFacts.push({ source: 'semantic', text: r.fact });
+        }
     });
 
-    if (uniqueDirectResults.length === 0 && !userName) return "";
-
-    // Собираем найденные факты и ищем в них Сущности для ассоциаций
-    let facts = uniqueDirectResults.map(r => r.fact);
-    let entities = new Set();
+    // --- СТРИМ 2: КЛЮЧЕВЫЕ СЛОВА (SQL ILIKE) ---
+    // Извлекаем "тяжелые" слова (длиннее 4 символов)
+    const keywords = userMessage.split(/\s+/)
+        .map(w => w.replace(/[.,!?;:()]/g, '').toLowerCase())
+        .filter(w => w.length > 4);
     
-    // ПРИНУДИТЕЛЬНО: Всегда ищем ассоциации про текущего пользователя
-    if (userName) entities.add(userName);
-
-    // Добавляем сущности из сообщения (Имена, Юзернеймы)
-    const entityRegex = /(@[a-zA-Z0-9_]+|[А-Я][а-я]+)/g;
-    
-    // Ищем сущности в самом сообщении пользователя
-    const msgMatches = userMessage.match(entityRegex);
-    if (msgMatches) msgMatches.forEach(m => entities.add(m));
-
-    // Ищем сущности в найденных фактах
-    facts.forEach(f => {
-        const matches = f.match(entityRegex);
-        if (matches) matches.forEach(m => entities.add(m));
-    });
-
-    // 2. ВТОРОЙ ЭТАП: Добор связанных фактов для найденных сущностей
-    let extraFacts = [];
-    if (entities.size > 0) {
-        const entityList = Array.from(entities).slice(0, 5); // До 5 сущностей для глубины
-        console.log(`[MEMORY] Поиск ассоциаций для: ${entityList.join(', ')}`);
-        
-        for (const entity of entityList) {
-            // Поиск по ключевому слову сущности (без эмбеддинга, просто текст)
-            const branchResults = await searchKnowledge(chatId, await createEmbedding(entity), 3, 0.75);
-            branchResults.forEach(r => {
-                if (!facts.includes(r.fact) && !extraFacts.includes(r.fact)) {
-                    extraFacts.push(r.fact);
+    if (keywords.length > 0) {
+        // Берем топ-2 самых длинных слова для поиска
+        const bestKeywords = keywords.sort((a, b) => b.length - a.length).slice(0, 2);
+        for (const kw of bestKeywords) {
+            const textResults = await searchKnowledgeByText(chatId, kw, 3);
+            textResults.forEach(r => {
+                if (!allFoundFacts.has(r.fact)) {
+                    allFoundFacts.add(r.fact);
+                    finalFacts.push({ source: 'keyword', text: r.fact });
                 }
             });
         }
     }
 
-    const allFacts = [...facts, ...extraFacts].slice(0, 15); // До 15 фактов для ИИ
-    const factsText = allFacts.map((f, i) => `${i + 1}. ${f}`).join('\n');
+    // --- СТРИМ 3: ИСТОРИЯ ЛИЧНОСТИ (ПОСЛЕДНИЕ СОБЫТИЯ) ---
+    if (userName) {
+        const recentResults = await getRecentKnowledge(chatId, userName, 7);
+        recentResults.forEach(r => {
+            if (!allFoundFacts.has(r.fact)) {
+                allFoundFacts.add(r.fact);
+                finalFacts.push({ source: 'recent', text: r.fact });
+            }
+        });
+    }
+
+    if (finalFacts.length === 0) return "";
+
+    // Сортируем: сначала семантика, потом ключевые слова, потом история, но ограничиваем общее число
+    const factsText = finalFacts
+        .slice(0, 15)
+        .map((f, i) => `${i + 1}. [${f.source}] ${f.text}`)
+        .join('\n');
     
-    console.log(`[MEMORY] Расширенный поиск (Глубина 2):\n${uniqueDirectResults.length} прямо\n${extraFacts.length} по ассоциациям\nИтого: ${allFacts.length} фактов.`);
+    console.log(`[MEMORY] Гибридный поиск завершен: ${finalFacts.length} найдено всего.`);
     return factsText;
 }
+
 
 
 // Удаление факта из памяти (Безопасное забывание)

@@ -356,12 +356,23 @@ async function processAI(msg, extra) {
         `${msg.reply_to_message.text || ""}. ${userText}` : 
         userText;
 
-    const relevantFacts = await getRelevantFacts(chatId, searchQuery, userName);
-
-    const dossier = (dbUser && dbUser.ai_notes) ? `\n\n[ДОСЬЕ ПОЛЬЗОВАТЕЛЯ: ${userName.toUpperCase()}]\n${dbUser.ai_notes}` : "";
-
     const recentNicks = Object.values(activeParticipants[chatId]).slice(-5).map(p => `${p.firstName}(@${p.username})`).join(', ');
-    const finalPrompt = SYSTEM_PROMPT + dossier + `\n\n[СОЦИАЛЬНЫЙ ГРАФ И КОНТЕКСТ МИРА]\n${relevantFacts || "Нет текущих ассоциаций."}\n\n[СИСТЕМНЫЕ ДАННЫЕ]\nАктивные участники: ${recentNicks}\nВремя: ${new Date().toLocaleString('ru-RU')}`;
+    
+    // Формируем блок памяти с четким разделением
+    const memoryBlock = `
+[ТВОИ ВОСПОМИНАНИЯ (Сверхпамять)]
+${relevantFacts || "Ничего конкретного не припоминаю."}
+
+[ЛИЧНОЕ ДОСЬЕ ПОЛЬЗОВАТЕЛЯ (${userName})]
+${dbUser && dbUser.ai_notes ? dbUser.ai_notes : "Досье пока пусто."}
+
+[ТЕКУЩИЙ КОНТЕКСТ]
+Участники: ${recentNicks}
+Время: ${new Date().toLocaleString('ru-RU')}
+`;
+
+    const finalPrompt = SYSTEM_PROMPT + memoryBlock;
+
 
     chatHistory[chatId].push({ role: 'user', content: fullContent });
     chatHistory[chatId] = trimHistory(chatHistory[chatId], 20);

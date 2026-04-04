@@ -506,39 +506,53 @@ async function searchKnowledge(chatId, queryEmbedding, limit = 3, threshold = 0.
     return data || [];
 }
 
-async function checkFactExists(chatId, factText) {
+// Поиск по тексту (ILIKE) для точных совпадений и "намеков"
+async function searchKnowledgeByText(chatId, query, limit = 5) {
     const { data, error } = await supabase
         .from('bot_knowledge')
-        .select('id')
+        .select('*')
         .eq('chat_id', chatId)
-        .eq('fact', factText)
-        .limit(1)
-        .maybeSingle();
-    if (error) return false;
-    return !!data;
-}
-
-async function deleteKnowledge(chatId, knowledgeId) {
-    const { error } = await supabase
-        .from('bot_knowledge')
-        .delete()
-        .eq('chat_id', chatId)
-        .eq('id', knowledgeId);
+        .ilike('fact', `%${query}%`)
+        .order('id', { ascending: false })
+        .limit(limit);
     
     if (error) {
-        console.error('[DB ERROR] deleteKnowledge:', error.message);
-        return false;
+        console.error('[DB ERROR] searchKnowledgeByText:', error.message);
+        return [];
     }
-    return true;
+    return data || [];
 }
 
+// Получение последних фактов чата (или юзера, если передано ключевое слово)
+async function getRecentKnowledge(chatId, userName = "", limit = 10) {
+    let query = supabase
+        .from('bot_knowledge')
+        .select('*')
+        .eq('chat_id', chatId);
+    
+    if (userName) {
+        query = query.ilike('fact', `${userName}:%`);
+    }
+
+    const { data, error } = await query
+        .order('id', { ascending: false })
+        .limit(limit);
+    
+    if (error) {
+        console.error('[DB ERROR] getRecentKnowledge:', error.message);
+        return [];
+    }
+    return data || [];
+}
 
 module.exports = {
     getUser, updateUser, getBadWords, getNextLevelXp, claimDailyBonus,
     getChatSettings, updateChatSettings,
     setBirthday, setBio, getBirthdaysToday, setBioByUsernameOrName, setNotesByUsernameOrName, setFirstNameByUsernameOrName,
-    getChatMemory, updateChatMemory, insertKnowledge, searchKnowledge, checkFactExists, deleteKnowledge,
+    getChatMemory, updateChatMemory, insertKnowledge, searchKnowledge, searchKnowledgeByText, getRecentKnowledge,
+    checkFactExists, deleteKnowledge,
     getChatStats, searchUserByName, warnUserById, getUpcomingBirthdays,
     messageAuthors, reactionCooldowns, commandCooldowns, userCache,
     supabase, ANONYMOUS_ADMIN_ID, pendingVerifications
 };
+
