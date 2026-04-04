@@ -54,6 +54,8 @@ ${historyText}`;
         const result = JSON.parse(rawContent);
         const facts = result.facts || [];
 
+        const savedNewFacts = [];
+
         for (const fact of facts) {
             const exists = await checkFactExists(chatId, fact);
             if (exists) {
@@ -72,6 +74,7 @@ ${historyText}`;
 
                 await insertKnowledge(chatId, fact, embedding);
                 console.log(`[MEMORY] Успешно запомнен факт: ${fact}`);
+                savedNewFacts.push(fact);
             }
         }
     } catch (e) {

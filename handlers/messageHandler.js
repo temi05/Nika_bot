@@ -117,7 +117,9 @@ function registerMessageHandlers() {
                 const nextXp = getNextLevelXp(dbUser.level);
                 const newLevel = dbUser.xp + xpGain >= nextXp ? dbUser.level + 1 : dbUser.level;
                 await updateUser(dbUser.id, { xp: dbUser.xp + xpGain, level: newLevel, last_message_time: now });
+                
                 if (newLevel > dbUser.level) {
+                   // Повышение уровня!
                    const levelUpPhrases = [
                        `👤 <b>${escapeHTML(getUserName(user))}</b>, ты теперь <b>${newLevel} уровня</b>. Растешь, не по дням, а по часам! 📈`,
                        `О, <b>${escapeHTML(getUserName(user))}</b> дополз до <b>${newLevel} лвла</b>. Неплохо, для начала. 🌟`,
