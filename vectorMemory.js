@@ -28,14 +28,14 @@ async function extractAndSaveFacts(chatId, historyText) {
     try {
         const prompt = `Ты — эксперт по верификации данных. Твоя задача — извлечь из диалога ДОЛГОСРОЧНЫЕ факты об участниках чата.
 
-[ПРАВИЛА ИЗВЛЕЧЕНИЯ ФАКТОВ]
-1. ПЕРВОЕ ЛИЦО И ФАКТЫ О ЖИЗНИ: Записывай факт, если юзер говорит О СЕБЕ: "У меня есть...", "Я купил...", "Я хочу купить...", "Я работаю...", "Люблю..." (включая покупки техники, машин, еды, хобби)и то что ты считаеншь нужным для фактов.
-2. ЧУЖИЕ ДАННЫЕ: Записывай факт, если один юзер прямо просит запомнить информацию о другом человеке.
-3. ЧТО ЗАПОМИНАТЬ: Крупные покупки (телефоны, машины, квартиры), планы на жизнь, место жительства, питомцев, любимую еду (курицу, пиццу и т.д.), увлечения, место работы.
-4. ЧТО ИГНОРИРОВАТЬ (МУСОР): Игнорируй простое общение, приветствия, временные эмоции ("я сегодня злой"), шутки, оскорбления, слухи и вопросы боту.
-5. ФОРМАТ: Формулируй максимально кратко от третьего лица: "Имя (или @username) [купил/имеет/любит/хочет] [факт]".
+[ПРАВИЛА ИЗВЛЕЧЕНИЯ СВЯЗЕЙ (GraphRAG-lite)]
+1. СУБЪЕКТЫ: Всегда выделяй, КТО совершил действие или О КОМ идет речь (Имя или @username).
+2. СВЯЗИ: Описывай отношения между людьми ("друг", "враг", "вместе играют") и предметами ("купил", "хочет", "владеет").
+3. ПРИОРИТЕТЫ: Крупные покупки, хобби, место работы, важные события, отношения между участниками чата.
+4. ФОРМАТ ТРОЙКИ: Используй структуру [Субъект] [Действие/Связь] [Объект]. Например: "Чика купил iPhone 15", "Марго и Чика дружат", "Темирлан живет в Казахстане".
+5. КОНТЕКСТ: Если факт привязан к событию (вечерний стрим, игра в доту), кратко укажи это.
 
-Формат ответа: JSON объект {"facts": ["Пользователь [ИМЯ]: [ФАКТ]"]}
+Формат ответа: JSON объект {"facts": ["Субъект: Связь -> Объект (Контекст)"]}
 Если фактов нет: {"facts": []}
 
 Диалог для анализа:
@@ -112,22 +112,46 @@ ${historyText}`;
     }
 }
 
-// Поиск фактов для ответа
+// Поиск фактов для ответа (Двухэтапная ассоциативная модель)
 async function getRelevantFacts(chatId, userMessage, userName = "") {
     if (!userMessage || userMessage.trim() === '') return "";
 
-    // Добавляем имя юзера в запрос, чтобы векторный поиск лучше находил его данные
+    // 1. ПЕРВЫЙ ЭТАП: Семантический поиск по запросу
     const searchQuery = userName ? `${userName}: ${userMessage}` : userMessage;
+    const directResults = await searchKnowledge(chatId, await createEmbedding(searchQuery), 5, 0.40);
+    
+    if (directResults.length === 0) return "";
 
-    const embedding = await createEmbedding(searchQuery);
-    if (!embedding) return "";
+    // Собираем найденные факты и ищем в них Сущности для ассоциаций
+    let facts = directResults.map(r => r.fact);
+    let entities = new Set();
+    
+    // Простой поиск имен (Слова с большой буквы или @username)
+    const entityRegex = /(@[a-zA-Z0-9_]+|[А-Я][а-я]+)/g;
+    facts.forEach(f => {
+        const matches = f.match(entityRegex);
+        if (matches) matches.forEach(m => entities.add(m));
+    });
 
-    // Снижаем порог до 0.40 для большей гибкости
-    const results = await searchKnowledge(chatId, embedding, 5, 0.40);
-    if (results.length === 0) return "";
+    // 2. ВТОРОЙ ЭТАП: Добор связанных фактов для найденных сущностей
+    let extraFacts = [];
+    if (entities.size > 0) {
+        const entityList = Array.from(entities).slice(0, 3); // Ограничимся 3 сущностями для скорости
+        console.log(`[MEMORY] Найдено сущностей для связи: ${entityList.join(', ')}`);
+        
+        for (const entity of entityList) {
+            // Поиск по ключевому слову сущности (без эмбеддинга, просто текст)
+            const branchResults = await searchKnowledge(chatId, await createEmbedding(entity), 2, 0.60);
+            branchResults.forEach(r => {
+                if (!facts.includes(r.fact)) extraFacts.push(r.fact);
+            });
+        }
+    }
 
-    const factsText = results.map((r, i) => `${i + 1}. ${r.fact}`).join('\n');
-    console.log(`[MEMORY] Вытащены факты для текущего ответа (Запрос: "${searchQuery}"):\n${factsText}`);
+    const allFacts = [...facts, ...extraFacts].slice(0, 10);
+    const factsText = allFacts.map((f, i) => `${i + 1}. ${f}`).join('\n');
+    
+    console.log(`[MEMORY] Цепочка ассоциаций (Глубина 2):\n${directResults.length} прямо\n${extraFacts.length} по связям\nИтого: ${allFacts.length} фактов.`);
     return factsText;
 }
 
