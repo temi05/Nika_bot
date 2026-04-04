@@ -48,7 +48,10 @@ ${historyText}`;
             response_format: { type: 'json_object' }
         });
 
-        const result = JSON.parse(completion.choices[0].message.content);
+        const rawContent = completion.choices[0].message.content;
+        console.log(`[MEMORY EXTRACTOR] Ответ ИИ: ${rawContent}`);
+        
+        const result = JSON.parse(rawContent);
         const facts = result.facts || [];
 
         for (const fact of facts) {

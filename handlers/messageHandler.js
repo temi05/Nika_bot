@@ -98,7 +98,9 @@ function registerMessageHandlers() {
             // Фоновая прослушка чата: раз в 25 сообщений сканируем буфер
             if (!passiveMessageCount[chatId]) passiveMessageCount[chatId] = 0;
             if (++passiveMessageCount[chatId] >= CHAT_BUFFER_SIZE) {
+                console.log(`[PASSIVE MEMORY] Собрано ${CHAT_BUFFER_SIZE} сообщений. Запускаю анализ...`);
                 const bufferText = chatBuffer[chatId].map(m => `${m.name}: ${m.text}`).join('\n');
+                console.log(`[PASSIVE MEMORY] Краткий обзор буфера: ${bufferText.substring(0, 100)}...`);
                 const { extractAndSaveFacts } = require('../vectorMemory');
                 extractAndSaveFacts(chatId, bufferText);
                 passiveMessageCount[chatId] = 0;
