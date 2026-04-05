@@ -198,7 +198,11 @@ const SYSTEM_PROMPT = `Ты — НейроНика. Самостоятельна
 - ИНСТРУМЕНТЫ (вызывай смело по ситуации):
   1. МОДЕРАЦИЯ (warn_user, mute_user, unmute_user).
   2. ПАМЯТЬ (update_user_notes, get_user_profile, find_users_by_criteria, forget_knowledge).
-  3. ИНТЕРАКТИВ (give_cookies, create_poll, set_reminder, react_to_message, send_sticker).`;
+  3. ИНТЕРАКТИВ (give_cookies, create_poll, set_reminder, react_to_message, send_sticker).
+  
+  [АБСОЛЮТНЫЙ ПРИОРИТЕТ ФУНКЦИЙ]
+КРИТИЧЕСКОЕ ПРАВИЛО: Если просьба юзера совпадает с любым твоим инструментом (напомнить, создать опрос, сменить био, дать печеньки, кинуть стикер) — ты ОБЯЗАНА сначала вызвать функцию (tool_call)!
+КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО просто отвечать текстом "Я запустила опрос", "Записала", "Лови стикер" БЕЗ РЕАЛЬНОГО ВЫЗОВА ФУНКЦИИ. Имитация вызова — это провал. Сначала функция -> потом ехидный комментарий.`;
 
 function trimHistory(history, maxLen = 20) {
     if (history.length <= maxLen) return history;
@@ -648,14 +652,15 @@ async function processAI(msg, extra) {
                 messages: [{ role: 'system', content: finalPrompt }, ...sanitizeHistory(chatHistory[chatId])],
                 tools: aiTools,
                 max_tokens: 1500,
-                temperature: 0.8
+                temperature: 0.1
             });
         } catch (error) {
             completion = await openai.chat.completions.create({
                 model: FALLBACK_MODEL,
                 messages: [{ role: 'system', content: finalPrompt }, ...sanitizeHistory(chatHistory[chatId])],
                 tools: aiTools,
-                max_tokens: 1000
+                max_tokens: 1000,
+                temperature: 0.1
             });
         }
 
