@@ -368,7 +368,8 @@ async function executeToolCall(toolCall, chatId, messageId, userName, userId, ca
                     return "Стикер отправлен. Прокомментируй это!";
 
                 } catch (e) {
-                    console.error('[STICKER ERROR] DOCUMENT_INVALID fallback triggered:', e.message);
+                    // ИСПРАВЛЕНИЕ: Делаем лог "тихим", чтобы не пугать красным текстом в консоли Render
+                    console.log('[STICKER INFO] Ошибка отправки стикера, пробуем запасной вариант...');
                     if (nikaStickers.length > 0) {
                         const rnd = nikaStickers[Math.floor(Math.random() * nikaStickers.length)];
                         try {
@@ -451,16 +452,17 @@ async function safeSendMessage(chatId, text, replyId) {
     try {
         await bot.sendMessage(chatId, safeText, { reply_to_message_id: replyId, parse_mode: 'HTML' });
     } catch (error) {
-        console.error('[SEND HTML ERROR]:', error.message);
-        // ИСПРАВЛЕНИЕ: Добавили обработку ошибки DOCUMENT_INVALID
+        // ИСПРАВЛЕНИЕ: Тихо перехватываем DOCUMENT_INVALID без спама в консоль
         if (error.message.includes('parse entities') || error.message.includes('HTML') || error.message.includes('DOCUMENT_INVALID')) {
-            // Если Телеграм ругается на HTML или битый эмодзи - мы вырезаем все теги <tg-emoji> и оставляем сырой текст
             const plainText = safeText.replace(/<tg-emoji[^>]*>(.*?)<\/tg-emoji>/g, '$1').replace(/<[^>]*>/g, '');
             try {
                 await bot.sendMessage(chatId, plainText, { reply_to_message_id: replyId });
             } catch (e2) {
                 console.error('[FALLBACK SEND ERROR]:', e2.message);
             }
+        } else {
+            // Логируем только реальные, непредвиденные ошибки отправки
+            console.error('[SEND ERROR]:', error.message);
         }
     }
 }
