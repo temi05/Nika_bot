@@ -273,7 +273,21 @@ async function executeToolCall(toolCall, chatId, messageId, userName, userId, ca
                     u = await getUser(chatId, userId);
                 }
                 if (!u) return "Человек не найден.";
-                return `Профиль ${u.first_name}: XP ${u.xp}, Лвл ${u.level}, Био: ${u.bio || 'Пусто'}, Досье: ${u.ai_notes || 'Нет'}.`;
+
+                // --- НОВАЯ ЛОГИКА: ПОИСК В ВЕКТОРНОЙ ПАМЯТИ ---
+                // Мы принудительно ищем все факты, связанные с этим именем в bot_knowledge
+                const { getRelevantFacts } = require('./vectorMemory');
+                const extraFacts = await getRelevantFacts(chatId, u.first_name, u.first_name);
+
+                // Чистим результат от системных пометок [semantic] и т.д. для красоты
+                const cleanExtra = extraFacts ? extraFacts.replace(/\[.*?\]/g, '').trim() : "Дополнительных фактов не найдено.";
+
+                return `Профиль ${u.first_name}:
+                📊 XP: ${u.xp}, Лвл: ${u.level}
+                📝 Био: ${u.bio || 'Пусто'}
+                📌 Из досье: ${u.ai_notes || 'Нет записей'}
+                🧠 Вспомнила из чата:
+                ${cleanExtra}`;
             }
             case 'find_users_by_criteria': {
                 const results = await searchUserByName(chatId, args.search_query);
