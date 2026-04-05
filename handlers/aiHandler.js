@@ -630,12 +630,12 @@ async function processAI(msg, extra) {
         }
 
         let resp = completion.choices[0].message;
+        let rawRes = "";
 
         if (resp.tool_calls || resp.function_call) {
             chatHistory[chatId].push(resp);
             const calls = resp.tool_calls || [resp.function_call];
             for (const tc of calls) {
-                // ПЕРЕДАЕМ userHandle ДЛЯ set_reminder
                 const res = await executeToolCall(tc, chatId, msg.message_id, userName, userId, callerIsAdmin, userHandle);
                 if (resp.tool_calls) {
                     chatHistory[chatId].push({ role: 'tool', tool_call_id: tc.id, name: tc.function.name, content: res });
@@ -648,30 +648,37 @@ async function processAI(msg, extra) {
                 messages: [{ role: 'system', content: finalPrompt }, ...sanitizeHistory(chatHistory[chatId])],
                 temperature: 0.8
             });
-            const rawFinal = second.choices[0].message.content || "Ну вот как-то так 💅";
-            
-            // 1. Сначала чистим технический мусор (tool_code и т.д.)
+            rawRes = second.choices[0].message.content || "Ну вот как-то так 💅";
+        } else {
+            rawRes = resp.content || "Ммм?";
+        }
+
+        // --- ЦЕНТРАЛИЗОВАННАЯ ОБРАБОТКА ТЕКСТА ---
+        function formatAIOutput(text) {
+            // 1. Очистка от технического мусора
             const filters = [
                 /<tool_code>[\s\S]*?<\/tool_code>/gi,
                 /<tool_output>[\s\S]*?<\/tool_output>/gi,
                 /print\(.*?\)[\s\S]*?$/gm,
-                /console\.log\(.*?\)[\s\S]*?$/gm
+                /console\.log\(.*?\)[\s\S]*?$/gm,
+                /default_api\.\w+\([\s\S]*?\)/g
             ];
-            let cleanRaw = rawFinal;
-            filters.forEach(f => cleanRaw = cleanRaw.replace(f, ''));
-            cleanRaw = cleanRaw.replace(/default_api\.\w+\([\s\S]*?\)/g, '').trim();
+            let clean = text;
+            filters.forEach(f => clean = clean.replace(f, ''));
+            clean = clean.trim();
 
-            // 2. Экранируем весь текст для безопасности HTML
-            function escapeHTML(str) {
-                return str.replace(/[&<>"']/g, function(m) {
-                    return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' }[m];
-                });
-            }
-            let escaped = escapeHTML(cleanRaw);
+            if (!clean) return "Ммм, что-то я заговорилась... О чем мы?";
 
-            // 3. Конвертируем маркеры [EMO:ID:SYMBOL] в теги <tg-emoji>
-            // Обработка [EMO:RANDOM]
-            let final = escaped.replace(/\[EMO:RANDOM\]/gi, () => {
+            // 2. Экранирование HTML
+            const escaped = clean.replace(/[&<>"']/g, m => ({
+                '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;'
+            }[m]));
+
+            // 3. Обработка эмодзи
+            let final = escaped;
+            
+            // Магический рандом [EMO:RANDOM]
+            final = final.replace(/\[EMO:RANDOM\]/gi, () => {
                 if (premiumEmojiList.length > 0) {
                     const randomId = premiumEmojiList[Math.floor(Math.random() * premiumEmojiList.length)];
                     return `<tg-emoji emoji-id="${randomId}">✨</tg-emoji>`;
@@ -679,28 +686,19 @@ async function processAI(msg, extra) {
                 return "✨";
             });
 
-            // Обработка конкретных [EMO:ID:SYMBOL]
+            // Конкретные маркеры [EMO:ID:SYMBOL]
             final = final.replace(/\[EMO:(\d+):(.*?)\]/g, (match, id, emoji) => {
                 return `<tg-emoji emoji-id="${id}">${emoji}</tg-emoji>`;
             });
 
-            if (!final || final === "") {
-                await safeSendMessage(chatId, "Ммм, что-то я заговорилась... О чем мы?", msg.message_id);
-            } else {
-                await safeSendMessage(chatId, final, msg.message_id);
-            }
-            chatHistory[chatId].push({ role: 'assistant', content: final });
-        } else {
-            const rawRes = resp.content || "Ммм?";
-            const res = rawRes
-                .replace(/<tool_code[\s\S]*?<\/tool_code>/g, '')
-                .replace(/print\(default_api[\s\S]*?\)/g, '')
-                .replace(/default_api\.\w+\([\s\S]*?\)/g, '')
-                .trim() || "Ммм, что-то я заговорилась... О чем мы?";
-
-            await safeSendMessage(chatId, res, msg.message_id);
-            chatHistory[chatId].push({ role: 'assistant', content: res });
+            return final;
         }
+
+        const finalOutput = formatAIOutput(rawRes);
+        await safeSendMessage(chatId, finalOutput, msg.message_id);
+        
+        // В историю добавляем чистый текст для контекста ИИ
+        chatHistory[chatId].push({ role: 'assistant', content: finalOutput.replace(/<[^>]*>/g, '') });
 
         // (Логика памяти перемещена вверх для работы в пассивном режиме)
 
