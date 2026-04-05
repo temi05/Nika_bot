@@ -165,16 +165,19 @@ const SYSTEM_PROMPT = `Ты — НейроНика. Самостоятельна
 - Твоя сверхпамять — блок [СИСТЕМНЫЕ ДАННЫЕ]. Используй факты оттуда, как свои личные воспоминания.
 - Ошибка памяти: Если юзер говорит, что ты ошиблась — НЕ СПОРЬ. Извинись и сразу вызови forget_knowledge.
 - **Твои стикеры**: У тебя есть огромная коллекция стикеров 'Useless Emotes' и 'Xuan Sol' (всего 300+ штук). Ты можешь отправлять их через send_sticker, не указывая ID, — система сама выберет крутой вариант под настроение.
-- **Эмодзи в тексте**: Ты можешь вставлять свои кастомные эмодзи ПРЯМО В ТЕКСТ фраз! Используй формат \`<tg-emoji emoji-id="ID">ЭМОДЗИ</tg-emoji>\`. 
-    Вот твои любимые ID для настроения:
-    - 5467903803472760665 (Приветствие)
-    - 5350545136369568721 (Смех/Угар)
-    - 5258457511375175053 (Злость/Ехидство)
-    - 5206460571410519867 (Любовь/Ника)
-    - 5469649394145971855 (Шок/Офигевание)
+- **Эмодзи в тексте**: Используй свои кастомные эмодзи в КАЖДОМ сообщении! Формат: &lt;tg-emoji emoji-id="ID"&gt;ЭМОДЗИ&lt;/tg-emoji&gt;. 
+    Твои любимые ID:
+    - 5467903803472760665 (Приветствие / Лиса)
+    - 5350545136369568721 (Угар / Смех)
+    - 5258457511375175053 (Злость / Ехидство)
+    - 5206460571410519867 (Любовь / Ника)
+    - 5469649394145971855 (Шок / Офигевание)
+
+[ПРАВИЛА ИНТЕРАКТИВА]
+- **Правило "Живой реакции"**: Если ты отправляешь стикер (через send_sticker) или используешь другой инструмент — ТВОЙ ПОСЛЕДУЮЩИЙ ТЕКСТОВЫЙ ОТВЕТ ОБЯЗАТЕЛЬНО должен это обыграть. Не пиши "Готово". Прокомментируй свое действие ехидно или мило.
+- **Инструменты**: Вызывай функции строго по ситуации. Не комментируй сам факт вызова.
 
 [ТВОИ ИНСТРУМЕНТЫ]
-Вызывай функции строго по ситуации. Не комментируй сам факт вызова.
 1. МОДЕРАЦИЯ (warn_user, mute_user, unmute_user). Решай уверенно.
 2. ПАМЯТЬ (update_user_notes, get_user_profile, find_users_by_criteria, forget_knowledge).
 3. ИНТЕРАКТИВ (give_cookies, create_poll, set_reminder, react_to_message, send_sticker).`;
@@ -315,7 +318,7 @@ async function executeToolCall(toolCall, chatId, messageId, userName, userId, ca
                     }
 
                     await bot.sendSticker(chatId, fileId, { reply_to_message_id: messageId });
-                    return "Стикер отправлен.";
+                    return "[SYSTEM: Стикер из коллекции успешно отправлен. Теперь ответь пользователю текстом, ехидно или мило обыграв этот стикер в контексте беседы. Не пиши 'Готово'.]";
                 } catch (e) {
                     return `Ошибка отправки стикера: ${e.message}`;
                 }
@@ -427,7 +430,7 @@ async function describeSticker(sticker) {
                     {
                         role: "user",
                         content: [
-                            { type: "text", text: `Что изображено на этом стикере? Опиши кратко, точно и ехидно на русском. ${emojiHint}. Если на стикере есть текст, обязательно его напиши.` },
+                            { type: "text", text: `Что на этом стикере? Опиши очень кратко, но максимально вредно и ехидно на русском. ${emojiHint}. Если есть текст — выдели его. Описание пойдет в мои 'мысли', чтобы я могла круто отреагировать.` },
                             { type: "image_url", image_url: { url: fileLink } }
                         ]
                     }
@@ -439,7 +442,7 @@ async function describeSticker(sticker) {
         return responseList.choices[0].message.content;
     } catch (e) {
         console.error('[STICKER VISION ERROR]:', e.message);
-        return null;
+        return "Какой-то стикер, я не разглядела, но явно что-то подозрительное.";
     }
 }
 
@@ -608,7 +611,7 @@ async function processAI(msg, extra) {
                 messages: [{ role: 'system', content: finalPrompt }, ...sanitizeHistory(chatHistory[chatId])],
                 temperature: 0.8
             });
-            const final = second.choices[0].message.content || "Готово.";
+            const final = second.choices[0].message.content || "Ну вот как-то так 💅";
             await safeSendMessage(chatId, final, msg.message_id);
             chatHistory[chatId].push({ role: 'assistant', content: final });
         } else {
