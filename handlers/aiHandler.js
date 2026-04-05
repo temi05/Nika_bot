@@ -138,7 +138,7 @@ const aiTools = [
                 properties: {
                     sticker_file_id: { type: "string", description: "Telegram file_id, emoji_id, ИЛИ слово 'random'." }
                 },
-                required: ["sticker_file_id"] // Обязательно для стабильности Gemini
+                required: ["sticker_file_id"]
             }
         }
     },
@@ -370,21 +370,29 @@ async function executeToolCall(toolCall, chatId, messageId, userName, userId, ca
                 return `Факт об ${u.first_name} добавлен в досье.`;
             }
             case 'create_poll': {
-                if (!args.question || !args.options || args.options.length < 2) return "Мало данных.";
+                // ПРЕДОХРАНИТЕЛЬ: Gemini иногда отдает строку вместо массива
+                let opts = args.options;
+                if (typeof opts === 'string') {
+                    try { opts = JSON.parse(opts); } catch (e) { opts = opts.split(',').map(s => s.trim()); }
+                }
+                if (!Array.isArray(opts) || opts.length < 2) return "Мало данных: нужно минимум 2 варианта ответа.";
+
                 try {
-                    await bot.sendPoll(chatId, args.question, args.options, {
+                    await bot.sendPoll(chatId, args.question, opts.slice(0, 10), { // Telegram лимит 10 вариантов
                         is_anonymous: args.is_anonymous !== undefined ? args.is_anonymous : true,
                         allows_multiple_answers: !!args.allows_multiple_answers
                     });
                     return "Опрос запущен.";
                 } catch (e) {
-                    return `Ошибка: ${e.message}`;
+                    return `Ошибка запуска опроса: ${e.message}`;
                 }
             }
             case 'set_reminder': {
                 const delay = Math.max(1, args.delay_minutes || 1);
                 const text = args.text || "Напоминание!";
                 const triggerTime = new Date(Date.now() + delay * 60 * 1000).toISOString();
+
+                // ПОРЯДОК АРГУМЕНТОВ ИСПРАВЛЕН: userHandle идет в конце!
                 const ok = await insertReminder(chatId, userId, userName, text, triggerTime, userHandle);
                 return ok ? `Записала! Напомню через ${delay} мин.` : "Ошибка базы.";
             }
@@ -633,14 +641,16 @@ async function processAI(msg, extra) {
             const calls = resp.tool_calls || [resp.function_call];
             for (const tc of calls) {
                 const res = await executeToolCall(tc, chatId, msg.message_id, userName, userId, callerIsAdmin, userHandle);
+                const fnName = tc.function ? tc.function.name : tc.name;
+
+                // ИСПРАВЛЕНИЕ ЛОГИКИ ИСТОРИИ (чтобы ИИ не сходил с ума от формата legacy function_call)
                 if (resp.tool_calls) {
-                    chatHistory[chatId].push({ role: 'tool', tool_call_id: tc.id, name: tc.function.name, content: res });
+                    chatHistory[chatId].push({ role: 'tool', tool_call_id: tc.id, name: fnName, content: String(res) });
                 } else {
-                    chatHistory[chatId].push({ role: 'assistant', content: `[SYSTEM: Результат ${tc.name}: ${res}]` });
+                    chatHistory[chatId].push({ role: 'function', name: fnName, content: String(res) });
                 }
             }
 
-            // ИСПРАВЛЕНИЕ 1: ДОБАВЛЕН МАССИВ tools ВО ВТОРОЙ ЗАПРОС
             const second = await openai.chat.completions.create({
                 model: AI_MODEL,
                 messages: [{ role: 'system', content: finalPrompt }, ...sanitizeHistory(chatHistory[chatId])],
