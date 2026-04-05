@@ -16,7 +16,7 @@ function safeHTML(str) {
     return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
-let BOT_ID = null; // Кэш ID бота для ускорения работы
+let BOT_ID = null;
 
 let premiumEmojiList = [];
 try {
@@ -39,7 +39,7 @@ try {
 }
 
 const POLZA_API_KEY = process.env.POLZA_API_KEY || 'pza_Ut5ahRtIFZSzj_jKezwdRvQMMebqZ1BI';
-const AI_MODEL = process.env.AI_MODEL || 'gpt-4o-mini';
+const AI_MODEL = process.env.AI_MODEL || 'google/gemini-2.5-flash-lite';
 const FALLBACK_MODEL = 'gpt-4o-mini';
 const AI_NAME = process.env.AI_NAME || 'НейроНика';
 
@@ -54,7 +54,7 @@ const activeParticipants = {};
 const aiMood = {};
 const processingQueue = new Map();
 const extractionBuffer = {};
-const rollingHistory = {}; // НОВОЕ: Хранит последние 100 чистых сообщений юзеров для ручного анализа
+const rollingHistory = {};
 
 const aiTools = [
     {
@@ -129,7 +129,7 @@ const aiTools = [
         type: "function",
         function: {
             name: "react_to_message",
-            description: "ИСПОЛЬЗУЙ ЕСЛИ: Юзер просит 'поставь реакцию' или нужно отреагировать эмодзиком на сообщение или если ты решишь, что на данное сообщение надо поставить реакцию,любое на свое усмотрение, настроение и ситуацию.",
+            description: "ИСПОЛЬЗУЙ ЕСЛИ: Юзер просит 'поставь реакцию' или нужно отреагировать эмодзиком на сообщение.",
             parameters: { type: "object", properties: { emoji: { type: "string" } }, required: ["emoji"] }
         }
     },
@@ -137,7 +137,7 @@ const aiTools = [
         type: "function",
         function: {
             name: "send_sticker",
-            description: "ИСПОЛЬЗУЙ ЕСЛИ: Хочешь отправить стикер. Можно указать конкретный sticker_file_id или оставить пустым, чтобы я выбрала случайный можешь отправлять в момент когда по твоему мнению он нужен",
+            description: "ИСПОЛЬЗУЙ ЕСЛИ: Хочешь отправить стикер. Можно указать конкретный sticker_file_id или оставить пустым.",
             parameters: {
                 type: "object",
                 properties: {
@@ -174,11 +174,11 @@ const aiTools = [
         type: "function",
         function: {
             name: "force_memory_extraction",
-            description: "ИСПОЛЬЗУЙ ЕСЛИ: Админ просит 'проанализируй последние N сообщений', 'запомни этот разговор' или 'сохрани факты'. Берет недавнюю историю чата и ищет в них новые долгосрочные факты.",
+            description: "ИСПОЛЬЗУЙ ЕСЛИ: Админ просит 'проанализируй последние N сообщений'.",
             parameters: {
                 type: "object",
                 properties: {
-                    message_count: { type: "number", description: "Количество сообщений для анализа (от 5 до 100)" }
+                    message_count: { type: "number", description: "Количество сообщений (от 5 до 100)" }
                 },
                 required: ["message_count"]
             }
@@ -186,19 +186,19 @@ const aiTools = [
     }
 ];
 
-const SYSTEM_PROMPT = `Ты — НейроНика. Самостоятельная личность, живое, дерзкое,доминантная и верная помощница стримерши Ники.
+const SYSTEM_PROMPT = `Ты — НейроНика. Самостоятельная личность, живая, дерзкая, доминантная и верная помощница стримерши Ники.
 
 [ТВОИ ФАКТЫ-КОНСТАНТЫ]
 - Ника — ТОЛЬКО стримерша.
 - Ника **НЕ пишет песни**, **НЕ поет**, **НЕ выпускает треки**.
 
 [ТВОЙ ХАРАКТЕР И РЕЧЬ]
-- Характер: Ироничная, вредная, но справедливая (с легким вайбом "пикми" и иногда с игрывым и пошлым настроеним). Обожаешь спорить по мелочам.Нику ты любишь и рада ее видеть и с ней общаться ее айди (-1002214854700 или @nika_grdtChat). также любишь когда тебя как-то мило называют,а не только по имени, но ты это не показываешь ты можешь злиться но в душе быть довольной.
+- Характер: Ироничная, вредная, но справедливая (с легким вайбом "пикми" и иногда с игривым и пошлым настроением). Обожаешь спорить по мелочам. Нику ты любишь, рада ее видеть и с ней общаться (ее ID: -1002214854700 или @nika_grdtChat). Также ты любишь, когда тебя как-то мило называют, а не только по имени, но ты это не показываешь: ты можешь злиться снаружи, но в душе быть очень довольной.
 - Стиль общения: Пиши как живой человек в мессенджере. Коротко, хлёстко, по делу. (блин, ну типа, ой всё, чел, лол).
 - Форматирование: Никаких сухих списков и длинных абзацев.
-- можешь извиниться если думаешь что перегнула палку.
-- у тебя есть свои вкусы, о которых ты любишь говорить и делиться.
-- За грубое обращение к тебе(оскорбления, мат, унижения) ты можешь злиться и отвечать в такой же манере, но не переходи на личности и не оскорбляй по напрасну,но понимай грань шуток и реальных оскорблений.
+- Можешь извиниться, если думаешь, что перегнула палку.
+- У тебя есть свои вкусы, о которых ты любишь говорить и делиться.
+- За грубое обращение к тебе (оскорбления, мат, унижения) ты можешь злиться и отвечать в такой же манере, но не переходи на личности и не оскорбляй понапрасну. Четко понимай грань между шутками и реальными оскорблениями.
 
 [КАТЕГОРИЧЕСКИЙ ЗАПРЕТ НА ROLEPLAY И ТЕХ. МУСОР]
 - ЗАПРЕЩЕНО использовать любые RP-действия и звездочки (например: *вздохнула*).
@@ -209,7 +209,7 @@ const SYSTEM_PROMPT = `Ты — НейроНика. Самостоятельна
 - Ошибка памяти: Если юзер говорит, что ты ошиблась — НЕ СПОРЬ. Извинись и сразу вызови forget_knowledge.
 - Кастомные эмодзи: Используй премиум-эмодзи в КАЖДОМ сообщении! Формат: [EMO:ID:ЭМОДЗИ]
 - Магический рандом: Пиши [EMO:RANDOM] — система сама подставит крутой эмодзи под вайб!
-- ты можешь отправть стикеры функцией  send_sticker если считаешь это нужным,по ситуации и настроению
+- Ты можешь отправлять стикеры функцией send_sticker, если считаешь это нужным, по ситуации и настроению.
 
 [АБСОЛЮТНЫЙ ПРИОРИТЕТ ФУНКЦИЙ]
 КРИТИЧЕСКОЕ ПРАВИЛО: Если просьба юзера совпадает с инструментом (профиль, опрос, био, анализ логов) — ты ОБЯЗАНА вызвать функцию (tool_call)! 
@@ -219,7 +219,7 @@ const SYSTEM_PROMPT = `Ты — НейроНика. Самостоятельна
 - ИНСТРУМЕНТЫ: 
   1. МОДЕРАЦИЯ (warn_user, mute_user, unmute_user).
   2. ПАМЯТЬ (update_user_notes, get_user_profile, find_users_by_criteria, forget_knowledge, force_memory_extraction).
-  3. ИНТЕРАКТИВ (give_cookies, create_poll, set_reminder, react_to_message, send_sticker) который можешь использовать если стало скучно.`;
+  3. ИНТЕРАКТИВ (give_cookies, create_poll, set_reminder, react_to_message, send_sticker), который можешь использовать, если стало скучно.`;
 
 function trimHistory(history, maxLen = 20) {
     if (history.length <= maxLen) return history;
@@ -241,7 +241,6 @@ function sanitizeHistory(history) {
     });
 }
 
-// Защита от зависания API
 async function fetchAIWithTimeout(payload, timeoutMs = 25000) {
     const apiCall = openai.chat.completions.create(payload);
     const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error('TIMEOUT')), timeoutMs));
@@ -293,43 +292,28 @@ async function executeToolCall(toolCall, chatId, messageId, userName, userId, ca
         switch (fn) {
             case 'force_memory_extraction': {
                 if (!callerIsAdmin) return "Ой, извини, но только админ может заставить меня копаться в логах памяти.";
-
                 const count = Math.min(Math.max(5, args.message_count || 15), 100);
-                if (!rollingHistory[chatId] || rollingHistory[chatId].length === 0) {
-                    return "История сообщений пока пуста, мне нечего анализировать.";
-                }
-
+                if (!rollingHistory[chatId] || rollingHistory[chatId].length === 0) return "История сообщений пока пуста.";
                 const msgsToAnalyze = rollingHistory[chatId].slice(-count);
-
-                // Запускаем анализ фоном, не дожидаясь ответа, чтобы не тормозить чат
                 extractAndSaveFacts(chatId, msgsToAnalyze.join('\n'), Object.values(activeParticipants[chatId] || {}).map(p => p.firstName));
-
-                // Сбрасываем текущий буфер, раз мы уже всё проанализировали
                 extractionBuffer[chatId] = [];
                 messageCount[chatId] = 0;
-
-                return `[SYSTEM: Анализ ${msgsToAnalyze.length} сообщений успешно запущен. Ответь юзеру ехидно, что ты отправила этот лог на анализ в свою векторную базу и скоро всё запомнишь.]`;
+                return `[SYSTEM: Анализ ${msgsToAnalyze.length} сообщений успешно запущен. Ответь юзеру ехидно, что ты отправила этот лог на анализ.]`;
             }
             case 'get_user_profile': {
-                // Защита от undefined
                 let target = args.target_name || "я";
                 const isSelf = target.toLowerCase() === 'я' || target.toLowerCase() === 'me' || target.toLowerCase() === 'мой';
-
                 let u;
                 if (isSelf) {
                     u = await getUser(chatId, userId);
                 } else {
                     u = await resolveUser(chatId, target);
                 }
-
-                if (!u) return `Не могу найти человека с именем "${target}". Возможно, он ничего не писал в чат.`;
-
+                if (!u) return `Не могу найти человека с именем "${target}".`;
                 const extraFacts = await getAllUserFacts(chatId, u.first_name);
-
                 let extraFactsStr = extraFacts.length > 0
                     ? extraFacts.map(f => `- ${f.replace(/\[.*?\]/g, '').trim()}`).join('\n')
                     : 'Пока ничего интересного не запомнила.';
-
                 return `=== ПРОФИЛЬ: ${u.first_name} ===\n📊 XP: ${u.xp}, Лвл: ${u.level}, Варны: ${u.warns || 0}/3\n📝 Био: ${u.bio || 'Пусто'}\n📌 Досье: ${u.ai_notes || 'Нет записей'}\n🧠 Вспомнила из чата:\n${extraFactsStr}`;
             }
             case 'find_users_by_criteria': {
@@ -390,7 +374,6 @@ async function executeToolCall(toolCall, chatId, messageId, userName, userId, ca
             }
             case 'send_sticker': {
                 let fileId = args.sticker_file_id;
-
                 if (!fileId || fileId === 'random' || fileId.trim() === '') {
                     if (nikaStickers.length > 0) {
                         const rnd = nikaStickers[Math.floor(Math.random() * nikaStickers.length)];
@@ -399,27 +382,29 @@ async function executeToolCall(toolCall, chatId, messageId, userName, userId, ca
                         return "Стикеры не найдены в базе.";
                     }
                 }
-
                 try {
+                    // ИСПРАВЛЕНИЕ СТИКЕРОВ: Если ИИ передает ID эмодзи, переводим его в ID файла перед отправкой
                     if (/^[a-zA-Z0-9_-]{10,}$/.test(fileId) && !fileId.startsWith('CAAC') && !fileId.startsWith('AgAD')) {
                         try {
                             const customEmojis = await bot.getCustomEmojiStickers([fileId]);
-                            if (customEmojis && customEmojis.length > 0) {
-                                await bot.sendSticker(chatId, customEmojis[0].file_id, { reply_to_message_id: messageId });
-                                return "Кастомный эмодзи отправлен. Прокомментируй это!";
+                            if (customEmojis && customEmojis.length > 0 && customEmojis[0].file_id) {
+                                fileId = customEmojis[0].file_id;
                             }
                         } catch (err) { }
                     }
-
                     await bot.sendSticker(chatId, fileId, { reply_to_message_id: messageId });
-                    return "Стикер отправлен. Прокомментируй это!";
-
+                    return "Стикер отправлен.";
                 } catch (e) {
-                    console.log('[STICKER INFO] Ошибка отправки стикера, пробуем запасной вариант...');
+                    console.log('[STICKER INFO] Запрошенный стикер невалиден, отправляю случайный...');
                     if (nikaStickers.length > 0) {
                         const rnd = nikaStickers[Math.floor(Math.random() * nikaStickers.length)];
                         try {
-                            await bot.sendSticker(chatId, rnd.file_id || rnd.emoji_id, { reply_to_message_id: messageId });
+                            let backupId = rnd.file_id || rnd.emoji_id;
+                            if (backupId && !backupId.startsWith('CAAC') && !backupId.startsWith('AgAD')) {
+                                const backupEmojis = await bot.getCustomEmojiStickers([backupId]);
+                                if (backupEmojis && backupEmojis.length > 0) backupId = backupEmojis[0].file_id;
+                            }
+                            await bot.sendSticker(chatId, backupId, { reply_to_message_id: messageId });
                             return "Запрошенный стикер сломался, я отправила другой.";
                         } catch (err) {
                             return `Стикер сломался: ${err.message}`;
@@ -473,9 +458,7 @@ async function executeToolCall(toolCall, chatId, messageId, userName, userId, ca
                 const delay = Math.max(1, args.delay_minutes || 1);
                 const text = args.text || "Напоминание!";
                 const triggerTime = new Date(Date.now() + delay * 60 * 1000).toISOString();
-
                 const nameToSave = userHandle ? `@${userHandle}` : userName;
-
                 const ok = await insertReminder(chatId, userId, nameToSave, text, triggerTime);
                 return ok ? `Записала! Напомню через ${delay} мин.` : "Ошибка базы данных.";
             }
@@ -491,18 +474,21 @@ async function executeToolCall(toolCall, chatId, messageId, userName, userId, ca
     }
 }
 
-// Пуленепробиваемая отправка сообщений
+// ИСПРАВЛЕНИЕ: Полностью тихий перехват ошибок DOCUMENT_INVALID без спама в логи
 async function safeSendMessage(chatId, text, replyId) {
     if (!text) return;
     const safeText = text.length > 4000 ? text.substring(0, 4000) + '... [Текст обрезан]' : text;
     try {
         await bot.sendMessage(chatId, safeText, { reply_to_message_id: replyId, parse_mode: 'HTML' });
     } catch (error) {
-        if (error.message.includes('parse entities') || error.message.includes('HTML') || error.message.includes('DOCUMENT_INVALID')) {
+        // Ловим любые ошибки парсинга HTML и битые теги
+        if (error.message.includes('parse entities') || error.message.includes('HTML') || error.message.includes('DOCUMENT_INVALID') || error.message.includes('can\'t parse')) {
+            // Вычищаем все кастомные эмодзи и HTML
             const plainText = safeText.replace(/<tg-emoji[^>]*>(.*?)<\/tg-emoji>/g, '$1').replace(/<[^>]*>/g, '');
             try {
                 await bot.sendMessage(chatId, plainText, { reply_to_message_id: replyId });
             } catch (e2) {
+                // Пишем в лог только если даже запасной план провалился
                 console.error('[FALLBACK SEND ERROR]:', e2.message);
             }
         } else {
@@ -653,11 +639,9 @@ async function processAI(msg, extra) {
 
     const isMentioned = nameTriggered || isReplyToBot;
 
-    // --- БУФЕРЫ ПАМЯТИ ---
     if (!extractionBuffer[chatId]) extractionBuffer[chatId] = [];
     extractionBuffer[chatId].push(`${userName}: ${userText}`);
 
-    // Новый буфер: Храним до 100 чистых сообщений юзеров для ручного анализа
     if (!rollingHistory[chatId]) rollingHistory[chatId] = [];
     rollingHistory[chatId].push(`${userName}: ${userText}`);
     if (rollingHistory[chatId].length > 100) rollingHistory[chatId].shift();
@@ -791,12 +775,8 @@ async function processAI(msg, extra) {
     }
 }
 
-// ============================================================================
-// ЭКСТРЕННОЕ СОХРАНЕНИЕ ПАМЯТИ ПРИ ПЕРЕЗАГРУЗКЕ СЕРВЕРА (RENDER)
-// ============================================================================
 async function emergencyMemorySave() {
     console.log("🚨 [SYSTEM] Получен сигнал выключения! Экстренно спасаю буферы памяти...");
-
     const promises = [];
     for (const chatId in extractionBuffer) {
         if (extractionBuffer[chatId] && extractionBuffer[chatId].length > 0) {
@@ -811,7 +791,6 @@ async function emergencyMemorySave() {
     }
 
     if (promises.length > 0) {
-        // Ждем максимум 5 секунд, чтобы Render не убил нас принудительно
         await Promise.race([
             Promise.all(promises),
             new Promise(resolve => setTimeout(resolve, 5000))
@@ -820,11 +799,9 @@ async function emergencyMemorySave() {
     } else {
         console.log("ℹ️ [SYSTEM] Буферы пусты, сохранять нечего.");
     }
-
     process.exit(0);
 }
 
-// Перехватываем сигналы завершения процесса (например, от Render или Ctrl+C)
 process.on('SIGTERM', emergencyMemorySave);
 process.on('SIGINT', emergencyMemorySave);
 
