@@ -564,11 +564,9 @@ async function processAI(msg, extra) {
     const dbUser = await getUser(chatId, userId, realUser);
 
     let userName = (dbUser && dbUser.first_name) ? dbUser.first_name : (realUser.first_name || 'Аноним');
-    let userHandle = realUser.username || ""; // Захватываем username
+    let userHandle = realUser.username || "";
     let userText = msg.text || "";
     let photoDescription = "";
-
-    console.log(`[INCOMING] Chat: ${chatId} | User: ${userName} | Text: ${userText.replace(/\n/g, ' ').slice(0, 100)}`);
 
     if (msg.sticker) {
         const s = msg.sticker;
@@ -663,7 +661,7 @@ async function processAI(msg, extra) {
 
         let resp = completion.choices[0].message;
         let rawRes = "";
-        let directInjectedData = ""; // НОВАЯ ПЕРЕМЕННАЯ ДЛЯ ПРИНУДИТЕЛЬНОГО ВЫВОДА
+        let directInjectedData = "";
 
         if (resp.tool_calls || resp.function_call) {
             chatHistory[chatId].push(resp);
@@ -678,7 +676,6 @@ async function processAI(msg, extra) {
                     chatHistory[chatId].push({ role: 'function', name: fnName, content: String(res) });
                 }
 
-                // ПРИНУДИТЕЛЬНО ДОБАВЛЯЕМ ДАННЫЕ В ЧАТ (если это поиск или профиль)
                 if (['get_user_profile', 'find_users_by_criteria'].includes(fnName)) {
                     directInjectedData += `\n\n${res}`;
                 }
@@ -691,7 +688,6 @@ async function processAI(msg, extra) {
                 temperature: 0.8
             });
 
-            // Склеиваем дерзкий комментарий Ники с жесткими системными данными из базы
             rawRes = (second.choices[0].message.content || "Секундочку...") + directInjectedData;
 
         } else {
@@ -706,14 +702,19 @@ async function processAI(msg, extra) {
                 /console\.log\(.*?\)[\s\S]*?$/gm,
                 /default_api\.\w+\([\s\S]*?\)/g
             ];
-            let clean = text;
+
+            // Фикс легаси-фактов в базе данных, которые могли содержать &#039;
+            let clean = text.replace(/&#039;/g, "'");
+
             filters.forEach(f => clean = clean.replace(f, ''));
             clean = clean.trim();
 
             if (!clean) return "Ммм, что-то я заговорилась... О чем мы?";
 
-            const escaped = clean.replace(/[&<>"']/g, m => ({
-                '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;'
+            // ТУТ БЫЛА ОШИБКА: Телеграм не поддерживает экранирование одинарных кавычек (&#039;) в HTML!
+            // Убрали одинарную кавычку ' из регулярки и замены
+            const escaped = clean.replace(/[&<>"]/g, m => ({
+                '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'
             }[m]));
 
             let final = escaped;
@@ -726,7 +727,7 @@ async function processAI(msg, extra) {
                 return "✨";
             });
 
-            // ИСПРАВЛЕННАЯ РЕГУЛЯРКА: Теперь поддерживает БУКВЫ в ID эмодзи (hex-коды)
+            // Исправлена регулярка: теперь поддерживает буквы в ID стикеров (hex коды типа 5ff05...)
             final = final.replace(/\[EMO:([a-zA-Z0-9_-]+):(.*?)\]/g, (match, id, emoji) => {
                 return `<tg-emoji emoji-id="${id}">${emoji}</tg-emoji>`;
             });
