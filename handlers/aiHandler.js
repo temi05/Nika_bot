@@ -13,11 +13,6 @@ const path = require('path');
 
 let BOT_ID = null; // Кэш ID бота для ускорения работы
 
-function safeHTML(str) {
-    if (!str) return '';
-    return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-}
-
 let premiumEmojiList = [];
 try {
     const stickersData = JSON.parse(fs.readFileSync(path.join(__dirname, '../data/stickers.json'), 'utf8'));
@@ -80,7 +75,7 @@ const aiTools = [
         type: "function",
         function: {
             name: "get_user_profile",
-            description: "ИСПОЛЬЗУЙ ЕСЛИ: Просят показать профиль, стату, левел, био. ВАЖНО: Если юзер спрашивает ПРО СЕБЯ, передай в target_name слово 'я'. Просто коротко и дерзко прокомментируй запрос, сами данные я прикреплю автоматически.",
+            description: "ИСПОЛЬЗУЙ ЕСЛИ: Просят показать профиль, стату, левел, био. ВАЖНО: Если юзер спрашивает ПРО СЕБЯ (мой профиль), передай в target_name слово 'я'.",
             parameters: { type: "object", properties: { target_name: { type: "string" } }, required: ["target_name"] }
         }
     },
@@ -88,7 +83,7 @@ const aiTools = [
         type: "function",
         function: {
             name: "find_users_by_criteria",
-            description: "ИСПОЛЬЗУЙ ЕСЛИ: Вопросы вида 'кто тут любит X?', 'есть кто из Y?'. Просто прокомментируй запрос, сам список я выведу автоматически.",
+            description: "ИСПОЛЬЗУЙ ЕСЛИ: Вопросы вида 'кто тут любит X?', 'есть кто из Y?'.",
             parameters: { type: "object", properties: { search_query: { type: "string" } }, required: ["search_query"] }
         }
     },
@@ -218,6 +213,13 @@ function sanitizeHistory(history) {
     });
 }
 
+// Защита от зависания API
+async function fetchAIWithTimeout(payload, timeoutMs = 25000) {
+    const apiCall = openai.chat.completions.create(payload);
+    const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error('TIMEOUT')), timeoutMs));
+    return Promise.race([apiCall, timeout]);
+}
+
 async function resolveUser(chatId, targetName) {
     if (!targetName) return null;
     let cleanName = targetName.replace('@', '').toLowerCase().trim();
@@ -262,16 +264,18 @@ async function executeToolCall(toolCall, chatId, messageId, userName, userId, ca
     try {
         switch (fn) {
             case 'get_user_profile': {
-                let u;
-                const isSelf = args.target_name.toLowerCase() === 'я' || args.target_name.toLowerCase() === 'me' || args.target_name.toLowerCase() === 'мой';
+                // Защита от undefined
+                let target = args.target_name || "я";
+                const isSelf = target.toLowerCase() === 'я' || target.toLowerCase() === 'me' || target.toLowerCase() === 'мой';
 
+                let u;
                 if (isSelf) {
                     u = await getUser(chatId, userId);
                 } else {
-                    u = await resolveUser(chatId, args.target_name);
+                    u = await resolveUser(chatId, target);
                 }
 
-                if (!u) return `Не могу найти человека с именем "${args.target_name}". Возможно, он ничего не писал в чат.`;
+                if (!u) return `Не могу найти человека с именем "${target}". Возможно, он ничего не писал в чат.`;
 
                 const extraFacts = await getAllUserFacts(chatId, u.first_name);
 
@@ -340,7 +344,6 @@ async function executeToolCall(toolCall, chatId, messageId, userName, userId, ca
             case 'send_sticker': {
                 let fileId = args.sticker_file_id;
 
-                // Если ID пустое или random, берем случайный из базы
                 if (!fileId || fileId === 'random' || fileId.trim() === '') {
                     if (nikaStickers.length > 0) {
                         const rnd = nikaStickers[Math.floor(Math.random() * nikaStickers.length)];
@@ -351,31 +354,28 @@ async function executeToolCall(toolCall, chatId, messageId, userName, userId, ca
                 }
 
                 try {
-                    // Пробуем проверить, может это Custom Emoji (буквенно-цифровой код)
                     if (/^[a-zA-Z0-9_-]{10,}$/.test(fileId) && !fileId.startsWith('CAAC') && !fileId.startsWith('AgAD')) {
                         try {
                             const customEmojis = await bot.getCustomEmojiStickers([fileId]);
                             if (customEmojis && customEmojis.length > 0) {
                                 await bot.sendSticker(chatId, customEmojis[0].file_id, { reply_to_message_id: messageId });
-                                return "Кастомный эмодзи отправлен как стикер. Прокомментируй это!";
+                                return "Кастомный эмодзи отправлен. Прокомментируй это!";
                             }
-                        } catch (err) { /* Игнорируем ошибку и пробуем как обычный стикер */ }
+                        } catch (err) { }
                     }
 
-                    // Отправка как стандартного стикера Telegram
                     await bot.sendSticker(chatId, fileId, { reply_to_message_id: messageId });
                     return "Стикер отправлен. Прокомментируй это!";
 
                 } catch (e) {
                     console.error('[STICKER ERROR] DOCUMENT_INVALID fallback triggered:', e.message);
-                    // БРОНЕБОЙНЫЙ ФОЛЛБЕК: Если Telegram выдал ошибку DOCUMENT_INVALID, просто отправляем случайный стикер!
                     if (nikaStickers.length > 0) {
                         const rnd = nikaStickers[Math.floor(Math.random() * nikaStickers.length)];
                         try {
                             await bot.sendSticker(chatId, rnd.file_id || rnd.emoji_id, { reply_to_message_id: messageId });
-                            return "Запрошенный тобой стикер сломался, поэтому я отправила случайный из своей коллекции.";
+                            return "Запрошенный стикер сломался, я отправила другой.";
                         } catch (err) {
-                            return `Даже запасной стикер сломался: ${err.message}`;
+                            return `Стикер сломался: ${err.message}`;
                         }
                     }
                     return `Ошибка отправки стикера: ${e.message}`;
@@ -419,7 +419,6 @@ async function executeToolCall(toolCall, chatId, messageId, userName, userId, ca
                     });
                     return "Опрос успешно запущен.";
                 } catch (e) {
-                    console.error('[POLL ERROR]', e);
                     return `Ошибка запуска опроса: ${e.message}`;
                 }
             }
@@ -445,21 +444,27 @@ async function executeToolCall(toolCall, chatId, messageId, userName, userId, ca
     }
 }
 
+// Пуленепробиваемая отправка сообщений
 async function safeSendMessage(chatId, text, replyId) {
     if (!text) return;
+    const safeText = text.length > 4000 ? text.substring(0, 4000) + '... [Текст обрезан]' : text;
     try {
-        await bot.sendMessage(chatId, text, { reply_to_message_id: replyId, parse_mode: 'HTML' });
+        await bot.sendMessage(chatId, safeText, { reply_to_message_id: replyId, parse_mode: 'HTML' });
     } catch (error) {
+        console.error('[SEND HTML ERROR]:', error.message);
         if (error.message.includes('parse entities') || error.message.includes('HTML')) {
-            await bot.sendMessage(chatId, text, { reply_to_message_id: replyId });
-        } else {
-            console.error('[SEND ERROR]:', error.message);
+            // Если Телеграм ругается на HTML (например, битый эмодзи) - мы вырезаем все теги <tg-emoji> и оставляем сырой смайл
+            const plainText = safeText.replace(/<tg-emoji[^>]*>(.*?)<\/tg-emoji>/g, '$1').replace(/<[^>]*>/g, '');
+            try {
+                await bot.sendMessage(chatId, plainText, { reply_to_message_id: replyId });
+            } catch (e2) {
+                console.error('[FALLBACK SEND ERROR]:', e2.message);
+            }
         }
     }
 }
 
 function startReminderWorker() {
-    console.log('[REMINDER WORKER] Запущен.');
     setInterval(async () => {
         try {
             const due = await getDueReminders();
@@ -469,24 +474,20 @@ function startReminderWorker() {
                 if (rem.user_name && rem.user_name.startsWith('@')) {
                     mention = rem.user_name;
                 } else if (rem.user_id > 0) {
-                    mention = `<a href="tg://user?id=${rem.user_id}">${safeHTML(rem.user_name) || 'Слушай'}</a>`;
+                    mention = `<a href="tg://user?id=${rem.user_id}">${String(rem.user_name).replace(/[&<>]/g, '') || 'Слушай'}</a>`;
                 } else {
-                    mention = `<b>${safeHTML(rem.user_name) || 'Аноним'}</b>`;
+                    mention = `<b>${String(rem.user_name).replace(/[&<>]/g, '') || 'Аноним'}</b>`;
                 }
 
-                const safeText = safeHTML(rem.text);
+                const safeText = String(rem.text).replace(/[&<>]/g, '');
                 const msg = `🔔 ${mention}, ты просил напомнить: <b>${safeText}</b>`;
 
                 try {
                     await bot.sendMessage(rem.chat_id, msg, { parse_mode: 'HTML' });
                     await markReminderAsSent(rem.id);
-                } catch (e) {
-                    console.error(`[REMINDER ERROR] ID ${rem.id}:`, e.message);
-                }
+                } catch (e) { }
             }
-        } catch (e) {
-            console.error('[REMINDER WORKER ERROR]:', e.message);
-        }
+        } catch (e) { }
     }, 30000);
 }
 
@@ -496,70 +497,37 @@ async function describeSticker(sticker) {
         if ((sticker.is_animated || sticker.is_video) && sticker.thumbnail) {
             fileIdToFetch = sticker.thumbnail.file_id;
         }
-
         const fileLink = await bot.getFileLink(fileIdToFetch);
         const emojiHint = sticker.emoji ? ` (Привязанный эмодзи: ${sticker.emoji})` : "";
-
-        const responseList = await Promise.race([
-            openai.chat.completions.create({
-                model: AI_MODEL,
-                messages: [
-                    {
-                        role: "user",
-                        content: [
-                            { type: "text", text: `Что на этом стикере? Опиши очень кратко, но максимально вредно и ехидно на русском. ${emojiHint}. Если есть текст — выдели его. Описание пойдет в мои 'мысли', чтобы я могла круто отреагировать.` },
-                            { type: "image_url", image_url: { url: fileLink } }
-                        ]
-                    }
-                ],
-                max_tokens: 150
-            }),
-            new Promise((_, reject) => setTimeout(() => reject(new Error('Vision Timeout')), 10000))
-        ]);
+        const responseList = await fetchAIWithTimeout({
+            model: AI_MODEL,
+            messages: [{ role: "user", content: [{ type: "text", text: `Что на этом стикере? Опиши очень кратко, но максимально вредно на русском. ${emojiHint}.` }, { type: "image_url", image_url: { url: fileLink } }] }],
+            max_tokens: 150
+        }, 15000);
         return responseList.choices[0].message.content;
     } catch (e) {
-        console.error('[STICKER VISION ERROR]:', e.message);
-        return "Какой-то стикер, я не разглядела, но явно что-то подозрительное.";
+        return "Какой-то стикер, я не разглядела.";
     }
 }
 
 async function describeCustomEmoji(emojiId) {
     try {
         const stickers = await bot.getCustomEmojiStickers([emojiId]);
-        if (stickers && stickers.length > 0) {
-            return await describeSticker(stickers[0]);
-        }
+        if (stickers && stickers.length > 0) return await describeSticker(stickers[0]);
         return null;
-    } catch (e) {
-        console.error('[CUSTOM EMOJI ERROR]:', e.message);
-        return null;
-    }
+    } catch (e) { return null; }
 }
 
 async function describePhoto(fileId) {
     try {
         const fileLink = await bot.getFileLink(fileId);
-        const responseList = await Promise.race([
-            openai.chat.completions.create({
-                model: AI_MODEL,
-                messages: [
-                    {
-                        role: "user",
-                        content: [
-                            { type: "text", text: "Что на фото? Опиши кратко, ехидно и дерзко на русском." },
-                            { type: "image_url", image_url: { url: fileLink } }
-                        ]
-                    }
-                ],
-                max_tokens: 200
-            }),
-            new Promise((_, reject) => setTimeout(() => reject(new Error('Vision Timeout')), 10000))
-        ]);
+        const responseList = await fetchAIWithTimeout({
+            model: AI_MODEL,
+            messages: [{ role: "user", content: [{ type: "text", text: "Что на фото? Опиши кратко, ехидно и дерзко на русском." }, { type: "image_url", image_url: { url: fileLink } }] }],
+            max_tokens: 200
+        }, 15000);
         return responseList.choices[0].message.content;
-    } catch (e) {
-        console.error('[VISION ERROR]:', e.message);
-        return null;
-    }
+    } catch (e) { return null; }
 }
 
 startReminderWorker();
@@ -570,7 +538,7 @@ async function handleAIChat(msg, extra = {}) {
     const turn = processingQueue.get(chatId).then(async () => {
         try { await processAI(msg, extra); } catch (e) {
             console.error('[AI FATAL ERROR]:', e.message);
-            await bot.sendMessage(chatId, "Ой, что-то пошло не так... Попробуй еще раз.");
+            await safeSendMessage(chatId, "Блин, у меня процессор завис, повтори позже.", msg.message_id);
         }
     });
     processingQueue.set(chatId, turn);
@@ -586,32 +554,25 @@ async function processAI(msg, extra) {
     let userName = (dbUser && dbUser.first_name) ? dbUser.first_name : (realUser.first_name || 'Аноним');
     let userHandle = realUser.username || "";
     let userText = msg.text || "";
-    let photoDescription = "";
 
-    // Кэшируем ID бота, чтобы понимать, когда нам ответили реплаем
     if (!BOT_ID) {
         try {
             const me = await bot.getMe();
             BOT_ID = me.id;
-        } catch (e) {
-            console.error("Не удалось получить ID бота", e);
-        }
+        } catch (e) { }
     }
 
     if (msg.sticker) {
         const s = msg.sticker;
         const visualDesc = await describeSticker(s);
-
         let typeInfo = "";
         if (s.is_animated) typeInfo += "Анимированный ";
         if (s.is_video) typeInfo += "Видео-";
         if (s.is_premium) typeInfo += "Премиум ";
-
-        const info = `${typeInfo}стикер (эмодзи: ${s.emoji || "?"})`;
-        userText = `[${info}: ${visualDesc || "Ника не смогла разглядеть"}]`;
+        userText = `[${typeInfo}стикер (эмодзи: ${s.emoji || "?"}): ${visualDesc || "Ника не смогла разглядеть"}]`;
     } else if (msg.photo) {
         const fileId = msg.photo[msg.photo.length - 1].file_id;
-        photoDescription = await describePhoto(fileId);
+        const photoDescription = await describePhoto(fileId);
         userText = `[Фото] ${msg.caption || ""}`;
         if (photoDescription) userText += ` (Ника видит: ${photoDescription})`;
     }
@@ -626,9 +587,7 @@ async function processAI(msg, extra) {
                 const desc = await describeCustomEmoji(id);
                 if (desc) emojiDescriptions.push(desc);
             }
-            if (emojiDescriptions.length > 0) {
-                userText += ` (В сообщении также премиум-эмодзи: ${emojiDescriptions.join(', ')})`;
-            }
+            if (emojiDescriptions.length > 0) userText += ` (В сообщении также премиум-эмодзи: ${emojiDescriptions.join(', ')})`;
         }
     }
 
@@ -641,7 +600,7 @@ async function processAI(msg, extra) {
 
     const fullContent = `${userName} ${replyPrefix}: ${userText}`;
 
-    // ИСПРАВЛЕНИЕ ИМЕН: Реагируем ТОЛЬКО на имя "Нейроника" и его склонения. Слово "Ника" полностью убрано из триггеров!
+    // ИСПРАВЛЕНИЕ: Реагируем только на имя "Нейроника", "Нейронику", "Neironika". Имя "Ника" полностью исключено!
     const textLower = userText.toLowerCase();
     const nameTriggered = textLower.includes('нейроника') || textLower.includes('нейронику') || textLower.includes('нейронике') || textLower.includes('neironika');
     const isReplyToBot = msg.reply_to_message && BOT_ID && msg.reply_to_message.from.id === BOT_ID;
@@ -676,7 +635,7 @@ async function processAI(msg, extra) {
         await bot.sendChatAction(chatId, 'typing');
         let completion;
         try {
-            completion = await openai.chat.completions.create({
+            completion = await fetchAIWithTimeout({
                 model: AI_MODEL,
                 messages: [{ role: 'system', content: finalPrompt }, ...sanitizeHistory(chatHistory[chatId])],
                 tools: aiTools,
@@ -684,7 +643,8 @@ async function processAI(msg, extra) {
                 temperature: 0.1
             });
         } catch (error) {
-            completion = await openai.chat.completions.create({
+            if (error.message === 'TIMEOUT') throw error; // Проброс таймаута дальше
+            completion = await fetchAIWithTimeout({
                 model: FALLBACK_MODEL,
                 messages: [{ role: 'system', content: finalPrompt }, ...sanitizeHistory(chatHistory[chatId])],
                 tools: aiTools,
@@ -705,20 +665,22 @@ async function processAI(msg, extra) {
                 const fnName = tc.function ? tc.function.name : tc.name;
 
                 if (resp.tool_calls) {
-                    chatHistory[chatId].push({ role: 'tool', tool_call_id: tc.id, content: String(res) });
+                    chatHistory[chatId].push({ role: 'tool', tool_call_id: tc.id, name: fnName, content: String(res) });
                 } else {
                     chatHistory[chatId].push({ role: 'function', name: fnName, content: String(res) });
                 }
 
+                // Предотвращаем дублирование профиля в ответе
                 if (['get_user_profile', 'find_users_by_criteria'].includes(fnName)) {
-                    directInjectedData += `\n\n${res}`;
+                    if (!directInjectedData.includes(res)) {
+                        directInjectedData += `\n\n${res}`;
+                    }
                 }
             }
 
-            const second = await openai.chat.completions.create({
+            const second = await fetchAIWithTimeout({
                 model: AI_MODEL,
                 messages: [{ role: 'system', content: finalPrompt }, ...sanitizeHistory(chatHistory[chatId])],
-                tools: aiTools,
                 temperature: 0.8
             });
 
@@ -737,11 +699,13 @@ async function processAI(msg, extra) {
                 /default_api\.\w+\([\s\S]*?\)/g
             ];
 
+            // Фикс кавычек из базы
             let clean = text.replace(/&#039;/g, "'").replace(/&quot;/g, '"');
 
             filters.forEach(f => clean = clean.replace(f, ''));
             clean = clean.trim();
 
+            // Экранируем только критичные символы
             const escaped = clean.replace(/[&<>]/g, m => ({
                 '&': '&amp;', '<': '&lt;', '>': '&gt;'
             }[m]));
@@ -770,7 +734,11 @@ async function processAI(msg, extra) {
 
     } catch (e) {
         console.error('AI Error:', e.message);
-        await safeSendMessage(chatId, "Что-то не так с головой... Попробуй позже.", msg.message_id);
+        if (e.message === 'TIMEOUT') {
+            await safeSendMessage(chatId, "Блин, нейросеть задумалась слишком надолго... Повтори вопрос.", msg.message_id);
+        } else {
+            await safeSendMessage(chatId, "Что-то не так с головой... Попробуй позже.", msg.message_id);
+        }
     }
 }
 
