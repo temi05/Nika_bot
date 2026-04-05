@@ -11,6 +11,16 @@ const { ANONYMOUS_ADMIN_ID } = require('../config');
 const fs = require('fs');
 const path = require('path');
 
+// Загружаем премиум-эмодзи один раз при старте
+let premiumEmojiList = [];
+try {
+    const stickersData = JSON.parse(fs.readFileSync(path.join(__dirname, '../data/stickers.json'), 'utf8'));
+    premiumEmojiList = stickersData.filter(s => s.type === 'custom_emoji').map(s => s.emoji_id);
+    console.log(`[SYSTEM] Загружено ${premiumEmojiList.length} премиум-эмодзи для рандома.`);
+} catch (e) {
+    console.error('[SYSTEM ERROR] Ошибка загрузки stickers.json:', e.message);
+}
+
 // Загрузка локальных стикеров
 let nikaStickers = [];
 try {
@@ -172,13 +182,17 @@ const SYSTEM_PROMPT = `Ты — НейроНика. Самостоятельна
 - Твоя сверхпамять — блок [СИСТЕМНЫЕ ДАННЫЕ]. Используй факты оттуда, как свои личные воспоминания.
 - Ошибка памяти: Если юзер говорит, что ты ошиблась — НЕ СПОРЬ. Извинись и сразу вызови forget_knowledge.
 - **Твои стикеры**: У тебя есть огромная коллекция стикеров 'Useless Emotes' и 'Xuan Sol' (всего 300+ штук). Ты можешь отправлять их через send_sticker, не указывая ID, — система сама выберет крутой вариант под настроение.
-- **Эмодзи в тексте**: Используй свои кастомные эмодзи в КАЖДОМ сообщении! Формат: &lt;tg-emoji emoji-id="ID"&gt;ЭМОДЗИ&lt;/tg-emoji&gt;. 
-    Твои любимые ID:
-    - 5467903803472760665 (Приветствие / Лиса)
-    - 5350545136369568721 (Угар / Смех)
-    - 5258457511375175053 (Злость / Ехидство)
-    - 5206460571410519867 (Любовь / Ника)
-    - 5469649394145971855 (Шок / Офигевание)
+- **Кастомные эмодзи**: Используй премиум-эмодзи в КАЖДОМ сообщении! 
+    Формат: [EMO:ID:ЭМОДЗИ]
+    Твои любимые наборы:
+    - **Привет/Лиса**: [EMO:5467903803472760665:🦊]
+    - **Угар/Смех**: [EMO:5350545136369568721:😂], [EMO:5350738865164421505:😆]
+    - **Дерзость/Злость**: [EMO:5258457511375175053:😈], [EMO:5258249733742296479:👺]
+    - **Любовь/Милота**: [EMO:5206460571410519867:💖], [EMO:5206426267506728471:🥰]
+    - **Шок/Офигевание**: [EMO:5469649394145971855:😲], [EMO:5469629323763796670:😨]
+    - **Грусть/Обида**: [EMO:5258419805857284819:😿], [EMO:5267143996831993436:😢]
+    
+    - **Магический рандом**: Если хочешь удивить или не знаешь что выбрать, пиши [EMO:RANDOM] — система сама подставит крутой эмодзи под вайб!
 
 [ПРАВИЛА ИНТЕРАКТИВА]
 - **Правило "Живой реакции"**: Если ты отправляешь стикер (через send_sticker) или используешь другой инструмент — ТВОЙ ПОСЛЕДУЮЩИЙ ТЕКСТОВЫЙ ОТВЕТ ОБЯЗАТЕЛЬНО должен это обыграть. Не пиши "Готово". Прокомментируй свое действие ехидно или мило.
@@ -636,14 +650,45 @@ async function processAI(msg, extra) {
             });
             const rawFinal = second.choices[0].message.content || "Ну вот как-то так 💅";
             
-            // Фильтр от утечки технического синтаксиса (Antigravity/Agent leak prevention)
-            const final = rawFinal
-                .replace(/<tool_code[\s\S]*?<\/tool_code>/g, '')
-                .replace(/print\(default_api[\s\S]*?\)/g, '')
-                .replace(/default_api\.\w+\([\s\S]*?\)/g, '')
-                .trim() || "Ммм, что-то я заговорилась... О чем мы?";
+            // 1. Сначала чистим технический мусор (tool_code и т.д.)
+            const filters = [
+                /<tool_code>[\s\S]*?<\/tool_code>/gi,
+                /<tool_output>[\s\S]*?<\/tool_output>/gi,
+                /print\(.*?\)[\s\S]*?$/gm,
+                /console\.log\(.*?\)[\s\S]*?$/gm
+            ];
+            let cleanRaw = rawFinal;
+            filters.forEach(f => cleanRaw = cleanRaw.replace(f, ''));
+            cleanRaw = cleanRaw.replace(/default_api\.\w+\([\s\S]*?\)/g, '').trim();
 
-            await safeSendMessage(chatId, final, msg.message_id);
+            // 2. Экранируем весь текст для безопасности HTML
+            function escapeHTML(str) {
+                return str.replace(/[&<>"']/g, function(m) {
+                    return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' }[m];
+                });
+            }
+            let escaped = escapeHTML(cleanRaw);
+
+            // 3. Конвертируем маркеры [EMO:ID:SYMBOL] в теги <tg-emoji>
+            // Обработка [EMO:RANDOM]
+            let final = escaped.replace(/\[EMO:RANDOM\]/gi, () => {
+                if (premiumEmojiList.length > 0) {
+                    const randomId = premiumEmojiList[Math.floor(Math.random() * premiumEmojiList.length)];
+                    return `<tg-emoji emoji-id="${randomId}">✨</tg-emoji>`;
+                }
+                return "✨";
+            });
+
+            // Обработка конкретных [EMO:ID:SYMBOL]
+            final = final.replace(/\[EMO:(\d+):(.*?)\]/g, (match, id, emoji) => {
+                return `<tg-emoji emoji-id="${id}">${emoji}</tg-emoji>`;
+            });
+
+            if (!final || final === "") {
+                await safeSendMessage(chatId, "Ммм, что-то я заговорилась... О чем мы?", msg.message_id);
+            } else {
+                await safeSendMessage(chatId, final, msg.message_id);
+            }
             chatHistory[chatId].push({ role: 'assistant', content: final });
         } else {
             const rawRes = resp.content || "Ммм?";
