@@ -518,6 +518,9 @@ async function processAI(msg, extra) {
     let userText = msg.text || "";
     let photoDescription = "";
 
+    // [LOGGING] Логируем входящее сообщение в консоль Рендера сразу
+    console.log(`[INCOMING] Chat: ${chatId} | User: ${userName} | Text: ${userText.replace(/\n/g, ' ').slice(0, 100)}`);
+
     // Корректная обработка стикеров, фото и премиум-эмодзи
     if (msg.sticker) {
         const s = msg.sticker;
@@ -564,6 +567,19 @@ async function processAI(msg, extra) {
     const fullContent = `${userName} ${replyPrefix}: ${userText}`;
     const isMentioned = userText.toLowerCase().includes(AI_NAME.toLowerCase()) ||
         (msg.reply_to_message && msg.reply_to_message.from.id === (await bot.getMe()).id);
+
+    // [PASSIVE MEMORY] Собираем сообщения в буфер ДО выхода из функции, 
+    // чтобы Ника знала контекст, даже если ее не звали.
+    if (!extractionBuffer[chatId]) extractionBuffer[chatId] = [];
+    extractionBuffer[chatId].push(`${userName}: ${userText}`);
+
+    if (!messageCount[chatId]) messageCount[chatId] = 0;
+    if (++messageCount[chatId] >= 15) {
+        console.log(`[MEMORY] Запуск анализа логов для чата ${chatId} (${extractionBuffer[chatId].length} сообщ.)`);
+        extractAndSaveFacts(chatId, extractionBuffer[chatId].join('\n'), Object.values(activeParticipants[chatId] || {}).map(p => p.firstName));
+        messageCount[chatId] = 0;
+        extractionBuffer[chatId] = extractionBuffer[chatId].slice(-5);
+    }
 
     if (msg.chat.type !== 'private' && !isMentioned) return;
 
@@ -641,15 +657,7 @@ async function processAI(msg, extra) {
             chatHistory[chatId].push({ role: 'assistant', content: res });
         }
 
-        // Логика фоновой памяти (сохранение контекста каждые 15 сообщений)
-        if (!messageCount[chatId]) messageCount[chatId] = 0;
-        if (++messageCount[chatId] >= 15) {
-            if (!extractionBuffer[chatId]) extractionBuffer[chatId] = [];
-            extractionBuffer[chatId].push(`${userName}: ${userText}`);
-            extractAndSaveFacts(chatId, extractionBuffer[chatId].join('\n'), Object.values(activeParticipants[chatId]).map(p => p.firstName));
-            messageCount[chatId] = 0;
-            extractionBuffer[chatId] = extractionBuffer[chatId].slice(-10);
-        }
+        // (Логика памяти перемещена вверх для работы в пассивном режиме)
 
     } catch (e) {
         console.error('AI Error:', e.message);

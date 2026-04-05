@@ -15,6 +15,10 @@ function registerMessageHandlers() {
         const chatId = msg.chat.id;
         const { userId, user } = getSenderData(msg);
 
+        // [GLOBAL LOG] Видим всё, что прилетает от Telegram
+        if (msg.text) console.log(`[MSG] ID: ${msg.message_id} | Chat: ${chatId} | User: ${userId} | Text: ${msg.text.slice(0, 30)}...`);
+        else if (msg.sticker) console.log(`[STICKER] ID: ${msg.message_id} | Chat: ${chatId} | User: ${userId} | Sticker: ${msg.sticker.emoji || '?'}`);
+
         if (pendingVerifications[userId]) return; // Пропускаем, пока не пройдет капчу
 
         // 1. Пропускаем другие обработчики (капча и т.д.) если нужно
@@ -128,7 +132,7 @@ function registerMessageHandlers() {
                 const nextXp = getNextLevelXp(dbUser.level);
                 const newLevel = dbUser.xp + xpGain >= nextXp ? dbUser.level + 1 : dbUser.level;
                 await updateUser(dbUser.id, { xp: dbUser.xp + xpGain, level: newLevel, last_message_time: now });
-                console.log(`[DB DEBUG] ${userTag} получил(а) ${xpGain} XP (Ур: ${newLevel})`);
+                console.log(`[XP] ${userTag}: +${xpGain} XP (Level: ${newLevel})`);
 
                 if (newLevel > dbUser.level) {
                     // Повышение уровня!
@@ -160,6 +164,7 @@ function registerMessageHandlers() {
                 const receiver = await getUser(chatId, rId, rInfo);
                 if (receiver) {
                     await updateUser(receiver.id, { reputation: receiver.reputation + change });
+                    console.log(`[REP] ${userTag} изменил репутацию ${rInfo.first_name}: ${change}. Total: ${receiver.reputation + change}`);
                     const cookiePhrases = [
                         `🌟 <b>${escapeHTML(getUserName(user))}</b> передал печеньку <b>${escapeHTML(getUserName(rInfo))}</b>!\n└ Теперь у него <code>${receiver.reputation + change} 🍪</code>`,
                         `Держи, <b>${escapeHTML(getUserName(rInfo))}</b>, тебе прилетела печенька от <b>${escapeHTML(getUserName(user))}</b>. \n└ В копилке теперь <code>${receiver.reputation + change} 🍪</code>`

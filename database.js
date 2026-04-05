@@ -73,15 +73,15 @@ async function getUser(chatId, userId, userInfo = {}) {
 }
 
 async function updateUser(id, updates) {
-    console.log(`[DB DEBUG] updateUser (DB_ID: ${id}) updates:`, updates);
-    const { error } = await supabase.from('users').update(updates).eq('id', id);
+    console.log(`[DB UPDATE] User ID ${id}: ${Object.keys(updates).join(', ')}`);
+    const { data, error } = await supabase.from('users').update(updates).eq('id', id).select();
     if (error) {
         console.error('[DB ERROR] updateUser:', error.message);
         return;
     }
     const cacheKey = Object.keys(userCache).find(key => userCache[key].data.id === id);
     if (cacheKey) {
-        userCache[cacheKey].data = { ...userCache[cacheKey].data, ...updates };
+        userCache[cacheKey].data = { ...userCache[cacheKey].data, ...data[0] };
         userCache[cacheKey].expires = Date.now() + USER_CACHE_TTL;
     }
 }
