@@ -2,7 +2,6 @@
 const { insertKnowledge, searchKnowledge, checkFactExists } = require('./database');
 
 const POLZA_API_KEY = process.env.POLZA_API_KEY || 'pza_Ut5ahRtIFZSzj_jKezwdRvQMMebqZ1BI';
-// По умолчанию теперь используем твой gpt-4o-mini
 const AI_MODEL = process.env.AI_MODEL || 'gpt-4o-mini';
 
 const openai = new OpenAI({
@@ -10,11 +9,10 @@ const openai = new OpenAI({
     baseURL: 'https://polza.ai/api/v1',
 });
 
-// Создает вектор (embedding) из текста
 async function createEmbedding(text) {
     try {
         const res = await openai.embeddings.create({
-            model: 'text-embedding-3-small', // ЭТУ МОДЕЛЬ НЕ МЕНЯЕМ! Она идеальна и жестко связана с БД.
+            model: 'text-embedding-3-small',
             input: text,
         });
         return res.data[0].embedding;
@@ -24,45 +22,46 @@ async function createEmbedding(text) {
     }
 }
 
-// Фоновое извлечение фактов из куска диалога
 async function extractAndSaveFacts(chatId, historyText, participants = []) {
     try {
         const participantInfo = participants.length > 0 ?
-            "Участники чата: " + participants.join(', ') + ". Используй ТОЛЬКО эти имена для идентификации." :
+            "Участники чата: " + participants.join(', ') + ". Используй ТОЛЬКО эти имена." :
             "Определи имена участников из диалога.";
 
-        const prompt = `Ты — строгий фильтр долговременной памяти НейроНики. Твоя задача — извлекать из логов ТОЛЬКО вечные, фундаментальные факты и пикантные секреты пользователей.
+        const prompt = `Ты — безжалостный фильтр долговременной памяти НейроНики. Твоя задача — извлекать из логов ТОЛЬКО вечные, фундаментальные факты и пикантные секреты пользователей.
 
-[ГЛАВНОЕ ПРАВИЛО УСПЕХА]
-95% диалогов — это пустая болтовня. Твоя ИДЕАЛЬНАЯ и самая частая реакция на обычный треп — вернуть ПУСТОЙ МАССИВ: {"facts": []}. Не выдумывай факты ради того, чтобы что-то вернуть!
+[ГЛАВНОЕ ПРАВИЛО: АНТИ-ВОДА И ОБОБЩЕНИЕ]
+95% диалогов — это пустая болтовня. Твоя ИДЕАЛЬНАЯ реакция на треп — вернуть ПУСТОЙ МАССИВ: {"facts": []}. 
+Если человек много говорит об одном и том же (например, ругает игру), ОБОБЩИ это в ОДИН короткий факт. Не создавай 5 фактов про одно событие!
 
 [БЕЛЫЙ СПИСОК (Сохранять ТОЛЬКО это)]:
-1. Секреты и Пошлости: Тайные фетиши, кинки, пикантные признания (например: "любит доминирование", "просит называть себя грязной тряпкой", "фетиш на ноги"). Сохраняй ПРЯМО и БЕЗ ЦЕНЗУРЫ.
+1. Секреты и Пошлости: Тайные фетиши, кинки, пикантные признания. Сохраняй ПРЯМО и БЕЗ ЦЕНЗУРЫ.
 2. Биография: Имя, возраст, город.
-3. Статус: Профессия, место работы/учебы, наличие партнера.
-4. Хобби: Глобальные увлечения (программирование, гейминг, спорт).
-5. Здоровье/Техника: Серьезные фобии, аллергии, характеристики ПК/авто.
+3. Статус: Профессия, должность, наличие партнера.
+4. Глобальные Хобби: "любит играть в Майнкрафт", "играет на гитаре".
+5. Устойчивые черты: "считает Валорант детской игрой" (Один факт! Не расписывай подробности про тильт).
 
 [ЧЕРНЫЙ СПИСОК (Мгновенно в мусорку)]:
-❌ Еда и напитки: "хочет шаурму", "пьет пиво", "ел пиццу", "хочет кушать", "любит рыбку". (ЭТО СТРОГО ЗАПРЕЩЕНО СОХРАНЯТЬ!)
-❌ Эмоции и планы: "устал", "разозлился", "завтра буду играть", "идет спать", "идет в душ".
-❌ Ситуативный ролплей: действия со звездочками, которые не несут фактов (*обнял*, *вздохнул*).
+❌ Еда и напитки: "хочет шаурму", "пьет пиво", "ел пиццу". 
+❌ Временные состояния: "находится на работе", "пошел спать", "заболела голова", "сейчас тильтует".
+❌ Временные планы/Сроки: "через 2 дня позовут в игру", "завтра пойдет гулять", "сегодня забанили".
+❌ Ситуативный ролплей: действия со звездочками (*обнял*, *вздохнул*).
 
 [ПРАВИЛА ИЗВЛЕЧЕНИЯ]
-- Записывай факт строго на Имя того, кто это сказал. Никаких "Он/Она".
-- Не додумывай визуал. Если на фото собака — пиши "прислал фото собаки", не пиши "любит собак".
+- Записывай факт строго на Имя того, кто это сказал.
+- МАКСИМАЛЬНАЯ КРАТКОСТЬ: Суть без воды. (Вместо "имеет проблемы с головой и беды с башкой" -> "имеет проблемы с кукухой").
 
 [ФОРМАТ ОТВЕТА (СТРОГО JSON)]
-Возвращай ТОЛЬКО валидный JSON-объект. Без маркдауна (никаких \`\`\`json). Никакого текста до или после.
+Возвращай ТОЛЬКО валидный JSON-объект. Без маркдауна.
 
-Пример ПУСТОГО ответа (для болтовни и еды):
+Пример ПУСТОГО ответа (для болтовни, временного нытья и еды):
 {"facts": []}
 
 Пример ответа с фактами:
 {
   "facts": [
-    { "name": "Sanechk_aaa", "fact": "любит волосатых мужиков в масле и просит называть себя грязной тряпкой" },
-    { "name": "Алекс", "fact": "работает DevOps инженером в Москве" }
+    { "name": "Sanechk_aaa", "fact": "любит доминирование и просит называть себя грязной тряпкой" },
+    { "name": "Лексон42", "fact": "ненавидит Валорант и предпочитает Майнкрафт" }
   ]
 }
 
@@ -77,8 +76,8 @@ ${historyText}`;
             messages: [
                 { role: 'system', content: prompt + "\n\nОТВЕТЬ ТОЛЬКО В ФОРМАТЕ JSON." }
             ],
-            temperature: 0.0, // Для извлечения фактов нужна машинная сухость (0.0)
-            response_format: { type: 'json_object' } // gpt-4o-mini идеально поддерживает этот параметр
+            temperature: 0.0,
+            response_format: { type: 'json_object' }
         });
 
         const rawContent = completion.choices[0].message.content;
@@ -101,11 +100,9 @@ ${historyText}`;
         const items = Array.isArray(result) ? result : (result?.facts || []);
 
         for (const f of items) {
-            // ИСПРАВЛЕНИЕ: Склеиваем имя и факт в единую строку!
             if (typeof f === 'object' && f.name && f.fact) {
                 facts.push(`${f.name}: ${f.fact}`);
             } else if (typeof f === 'object' && f.fact) {
-                // Если ИИ почему-то не вернул имя, сохраняем хотя бы факт
                 facts.push(f.fact);
             } else if (typeof f === 'string') {
                 facts.push(f);
@@ -120,9 +117,10 @@ ${historyText}`;
 
             const embedding = await createEmbedding(fact);
             if (embedding) {
-                const duplicates = await searchKnowledge(chatId, embedding, 1, 0.95);
+                // ИСПРАВЛЕНИЕ: Снизили порог до 0.85, чтобы отсекать факты с похожим смыслом!
+                const duplicates = await searchKnowledge(chatId, embedding, 1, 0.85);
                 if (duplicates && duplicates.length > 0) {
-                    console.log("[MEMORY] Семантический дубликат пропущен: " + fact);
+                    console.log("[MEMORY] Семантический дубликат (похожий смысл) пропущен: " + fact);
                     continue;
                 }
 
@@ -135,7 +133,6 @@ ${historyText}`;
     }
 }
 
-// Поиск фактов для ответа (ГИБРИДНАЯ МОДЕЛЬ v3.3.1: Векторы + Широкие Ключи + Стеммы имен)
 async function getRelevantFacts(chatId, userMessage, userName = "", activeParticipants = []) {
     if (!userMessage || userMessage.trim() === '') return "";
 
@@ -143,7 +140,6 @@ async function getRelevantFacts(chatId, userMessage, userName = "", activePartic
     const allFoundFacts = new Set();
     const finalFacts = [];
 
-    // Стоп-слова
     const stopWords = new Set(['меня', 'тебя', 'чтобы', 'какой', 'такой', 'зачем', 'почему', 'когда', 'будет', 'очень', 'просто', 'может', 'нужно', 'хочу', 'люблю']);
 
     const getStemLocal = (word) => {
@@ -154,7 +150,6 @@ async function getRelevantFacts(chatId, userMessage, userName = "", activePartic
             .replace(/(s|es|ed|ing)$/i, '');
     };
 
-    // --- СТРИМ 1: СЕМАНТИКА (ВЕКТОРЫ) ---
     const embeddingRaw = await createEmbedding(userMessage);
     const vectorResults = await searchKnowledge(chatId, embeddingRaw, 10, 0.45);
     vectorResults.forEach(r => {
@@ -164,7 +159,6 @@ async function getRelevantFacts(chatId, userMessage, userName = "", activePartic
         }
     });
 
-    // --- СТРИМ 2: ШИРОКИЕ КЛЮЧЕВЫЕ СЛОВА ---
     const words = userMessage.split(/\s+/)
         .map(w => w.replace(/[.,!?;:()]/g, '').toLowerCase())
         .filter(w => w.length > 3 && !stopWords.has(w));
@@ -182,7 +176,6 @@ async function getRelevantFacts(chatId, userMessage, userName = "", activePartic
         }
     }
 
-    // --- СТРИМ 3: ИСТОРИЯ КОНКРЕТНОГО ЮЗЕРА ---
     if (userName) {
         const recentResults = await getRecentKnowledge(chatId, userName, 10);
         recentResults.forEach(r => {
@@ -193,7 +186,6 @@ async function getRelevantFacts(chatId, userMessage, userName = "", activePartic
         });
     }
 
-    // --- СТРИМ 4: АГРЕССИВНЫЙ ПОИСК ПО СУБЪЕКТАМ ---
     const searchStems = new Set();
     const addTargetWithStem = (name) => {
         if (!name || name.length < 3) return;
@@ -233,11 +225,11 @@ async function getRelevantFacts(chatId, userMessage, userName = "", activePartic
     });
 
     const factsText = sortedFacts
-        .slice(0, 25)
-        .map((f, i) => (i + 1) + ". [" + f.source + "] " + f.text)
+        .slice(0, 15) // ИСПРАВЛЕНИЕ: Выводим не больше 15 фактов, чтобы не спамить в чат простыней!
+        .map((f, i) => "- " + f.text)
         .join('\n');
 
-    console.log("[MEMORY] Сверхпамять v3.3.1: " + finalFacts.length + " найдено.");
+    console.log("[MEMORY] Сверхпамять v4.0: " + finalFacts.length + " найдено.");
     return factsText;
 }
 
