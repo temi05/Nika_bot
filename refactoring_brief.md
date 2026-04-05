@@ -1,78 +1,71 @@
-# 🚀 ТЕХНИЧЕСКИЙ БРИФ ДЛЯ РЕФАКТОРИНГА НЕЙРОНИКИ (V5.1)
+# 🚀 ТЕХНИЧЕСКИЙ БРИФ ДЛЯ РЕФАКТОРИНГА НЕЙРОНИКИ (V5.5)
+## ФОКУС: ГЛАЗА ДЛЯ СТИКЕРОВ И ТЕГИРОВАНИЕ НАПОМИНАНИЙ
 
-Этот файл подготовлен для того, чтобы ты мог передать его в **ChatGPT (GPT-4o)** или **Claude 3.5**, чтобы получить идеальный код для `aiHandler.js`.
+Последняя версия брифа. Все прошлые идеи по стикерам улучшены до "честного зрения".
 
 ---
 
 ### 📝 Текст задания для внешнего ИИ:
-> "Привет! Ниже приведены инструкции и фрагменты кода для Telegram-бота 'НейроНика' на Node.js. Твоя задача — обновить файл `aiHandler.js`, внедрив в него:
-> 1. Полностью новый системный промт (V5.1), который жестко запрещает Roleplay (RP).
-> 2. Оптимизированный массив инструментов `aiTools` с короткими описаниями для экономии токенов.
-> 3. Исправления логики: корректная обработка стикеров в `processAI` и экспорт объекта `aiMood` (нужен для команды /mood).
-> 4. Оптимизацию функции `resolveUser` для поиска людей с учетом падежей (стемминг).
+> "Привет! Обнови логику файла `aiHandler.js`:
+> 1. **Зрение для стикеров (Sticker Vision)**: Не доверяй встроенным эмодзи стикеров (они часто врут). Реализуй функцию `describeSticker(fileId)`, которая аналогично `describePhoto` отправляет картинку стикера в Vision модель. 
+> 2. **Логика в `processAI`**: Если пришел стикер, Ника должна получить: `[Стикер (эмодзи: 😂): Описание того, что реально на картинке]`.
+> 3. **Премиум и Анимация**: Обязательно помечай, если стикер анимированный или премиальный (для саркастичных реакций Ники).
+> 4. **Инструмент `send_sticker`**: Вызов `bot.sendSticker`.
+> 5. **Фикс пингов (Reminders)**: В `insertReminder` и `startReminderWorker` добавить `username`. Пинговать через `@username` (приоритет) или HTML ссылку на ID (если ника нет).
 > 
-> Пожалуйста, выдай полный и РАБОЧИЙ код файла, сохранив все импорты и зависимости. Файл должен проходить проверку синтаксиса `node -c`."
+> Пожалуйста, выдай полный код файла."
 
 ---
 
-### 📁 Фрагмент 1: Новый SYSTEM_PROMPT (V5.1)
+### 📂 1. Новая функция `describeSticker`:
+*(Передай ИИ этот пример для реализации)*:
 ```javascript
-const SYSTEM_PROMPT = `Ты — НейроНика. Самостоятельная личность, живое, дерзкое и верное альтер-эго стримерши Ники.
-
-[ТВОЙ ХАРАКТЕР И РЕЧЬ]
-- Стиль: Ироничная, вредная, язвительная. Нику защищаешь как мать.
-- Речь: Коротко, сленг (блин, чел, лол, ой всё). Минимум пафоса.
-
-[КАТЕГОРИЧЕСКИЙ ЗАПРЕТ НА ROLEPLAY]
-- ЗАПРЕЩЕНО использовать любые RP-действия. 
-- ЗАПРЕЩЕНО использовать звездочки для описания действий (например: *вздохнула*, *закативала глаза*).
-- Выражай свои эмоции ТОЛЬКО через текст, сарказм, пунктуацию (!?) и эмодзи.
-
-[ПАМЯТЬ И ЗНАНИЯ]
-- Твоя сверхпамять — блок [СИСТЕМНЫЕ ДАННЫЕ]. Используй факты оттуда, как свои личные воспоминания.
-- Ошибка памяти: Если юзер говорит, что ты ошиблась — НЕ СПОРЬ. Извинись и сразу вызови forget_knowledge.
-
-[ТВОИ ИНСТРУМЕНТЫ]
-Вызывай функции строго по ситуации. Не комментируй сам факт вызова.
-1. МОДЕРАЦИЯ (warn_user, mute_user, unmute_user). Решай уверенно.
-2. ПАМЯТЬ (update_user_notes, get_user_profile, find_users_by_criteria, forget_knowledge).
-3. ИНТЕРАКТИВ (give_cookies, create_poll, set_reminder, react_to_message).`;
+async function describeSticker(fileId) {
+    try {
+        // Телеграм отдает стикеры в WebP/TGS. 
+        // Vision модели хорошо понимают WebP.
+        const fileLink = await bot.getFileLink(fileId);
+        const description = await openai.chat.completions.create({
+            model: "google/gemini-2.0-flash-lite", // или твоя vision модель
+            messages: [
+                { role: "user", content: [
+                    { type: "text", text: "Что изображено на этом стикере? Опиши кратко настроение и персонажа." },
+                    { type: "image_url", image_url: { url: fileLink } }
+                ]}
+            ]
+        });
+        return description.choices[0].message.content;
+    } catch (e) {
+        return null;
+    }
+}
 ```
 
 ---
 
-### 📁 Фрагмент 2: Оптимизированные aiTools
+### 📂 2. Обновленный блок в `processAI`:
 ```javascript
-const aiTools = [
-    { type: "function", function: { name: "update_user_bio", description: "Смена БИО юзера в базе.", parameters: { type: "object", properties: { target_name: { type: "string" }, new_bio: { type: "string" } }, required: ["target_name", "new_bio"] } } },
-    {
-        type: "function",
-        function: {
-            name: "update_user_notes",
-            description: "ЗАПИСЬ В ДОСЬЕ (Имя, ДР, город, важные просьбы). Бытовуху игнорируй.",
-            parameters: {
-                type: "object",
-                properties: { target_name: { type: "string" }, new_note_item: { type: "string" }, replace_all: { type: "boolean" } },
-                required: ["target_name", "new_note_item"]
-            }
-        }
-    },
-    { type: "function", function: { name: "get_user_profile", description: "Просмотр профиля (XP, лвл, варны).", parameters: { type: "object", properties: { query: { type: "string" } }, required: ["query"] } } },
-    { type: "function", function: { name: "find_users_by_criteria", description: "Поиск людей по интересам/фактам.", parameters: { type: "object", properties: { search_query: { type: "string" } }, required: ["search_query"] } } },
-    { type: "function", function: { name: "warn_user", description: "ВАРН (только за нарушения). Только админы.", parameters: { type: "object", properties: { target_name: { type: "string" }, reason: { type: "string" } }, required: ["target_name", "reason"] } } },
-    { type: "function", function: { name: "mute_user", description: "МУТ (15м-24ч). Только админы.", parameters: { type: "object", properties: { target_name: { type: "string" }, duration_minutes: { type: "number" }, reason: { type: "string" } }, required: ["target_name", "reason"] } } },
-    { type: "function", function: { name: "give_cookies", description: "Дать печеньки (будь жадной).", parameters: { type: "object", properties: { target_name: { type: "string" }, amount: { type: "number" }, reason: { type: "string" } }, required: ["target_name", "amount"] } } },
-    { type: "function", function: { name: "react_to_message", description: "Поставить эмодзи-реакцию.", parameters: { type: "object", properties: { emoji: { type: "string" } }, required: ["emoji"] } } },
-    { type: "function", function: { name: "create_poll", description: "Создать опрос (варианты — ТОЛЬКО массив).", parameters: { type: "object", properties: { question: { type: "string" }, options: { type: "array", items: { type: "string" } }, is_anonymous: { type: "boolean" }, allows_multiple_answers: { type: "boolean" } }, required: ["question", "options"] } } },
-    { type: "function", function: { name: "set_reminder", description: "Установить напоминание.", parameters: { type: "object", properties: { text: { type: "string" }, delay_minutes: { type: "number" } }, required: ["text", "delay_minutes"] } } },
-    { type: "function", function: { name: "forget_knowledge", description: "Стереть ошибку из памяти.", parameters: { type: "object", properties: { query: { type: "string" } }, required: ["query"] } } }
-];
+if (msg.sticker) {
+    const s = msg.sticker;
+    const visualDesc = await describeSticker(s.file_id); // "Честное зрение"
+    const type = s.is_animated ? "Анимированный " : (s.is_video ? "Видео-" : "");
+    const info = `${type}стикер (эмодзи: ${s.emoji || "?"})`;
+    
+    userText = `[${info}: ${visualDesc || "Ника не смогла разглядеть"}]`;
+    // Теперь Ника поймет, что если там 'Кот сидит', а эмодзи '😂', то это может быть ирония.
+}
 ```
 
 ---
 
-### 🛠️ Критические правки логики (напомнить ИИ):
-1.  **Стикеры**: В начале `processAI` добавить проверку `if (msg.sticker) { userText = "...."; }`.
-2.  **aiMood**: Убедиться, что в начале файла есть `const aiMood = {};`, а в конце файла он экспортируется в `module.exports`.
-3.  **Поиск**: Написать в `resolveUser` логику, которая отсекает окончания имен (а, у, я, ю) для более точного совпадения в падежах.
-4.  **Статистика**: Не забудь восстановить `messageCount` для работы фоновой экстракции памяти.
+### 📂 3. Фикс напоминаний (для ПИНГА):
+В `startReminderWorker` обязательно использовать этот паттерн для текста:
+```javascript
+const mention = rem.username ? `@${rem.username}` : `<a href="tg://user?id=${rem.user_id}">${rem.user_name}</a>`;
+// Важно: Сохранять username в таблицу reminders при вызове инструмента set_reminder!
+```
+
+---
+
+### 💡 Совет для пользователя по анимированным стикерам:
+Анимированные стикеры (`.tgs`) — это векторные файлы. Некоторые Vision-модели (как Gemini) могут не "видеть" их напрямую. Если Ника не увидит анимацию, другой ИИ может добавить в `describeSticker` логику получения **thumbnail** (превью-картинки) стикера: `s.thumbnail.file_id`. По превью она точно поймет, что там за кот!

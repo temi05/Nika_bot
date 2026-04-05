@@ -8,6 +8,20 @@ const {
 } = require('../database');
 const { extractAndSaveFacts, getRelevantFacts, forgetFact } = require('../vectorMemory');
 const { ANONYMOUS_ADMIN_ID } = require('../config');
+const fs = require('fs');
+const path = require('path');
+
+// Загрузка локальных стикеров
+let nikaStickers = [];
+try {
+    const stickersPath = path.join(__dirname, '..', 'data', 'stickers.json');
+    if (fs.existsSync(stickersPath)) {
+        nikaStickers = JSON.parse(fs.readFileSync(stickersPath, 'utf8'));
+        console.log(`[STICKERS] Загружено ${nikaStickers.length} стикеров.`);
+    }
+} catch (e) {
+    console.error('[STICKERS LOAD ERROR]:', e.message);
+}
 
 const POLZA_API_KEY = process.env.POLZA_API_KEY || 'pza_Ut5ahRtIFZSzj_jKezwdRvQMMebqZ1BI';
 const AI_MODEL = process.env.AI_MODEL || 'google/gemini-2.5-flash-lite';
@@ -99,6 +113,19 @@ const aiTools = [
     {
         type: "function",
         function: {
+            name: "send_sticker",
+            description: "ИСПОЛЬЗУЙ ЕСЛИ: Хочешь отправить стикер в ответ. Можно указать конкретный sticker_file_id или оставить пустым, чтобы я выбрала случайный из своей коллекции 'Useless Emotes' и 'Xuan Sol'.",
+            parameters: {
+                type: "object",
+                properties: {
+                    sticker_file_id: { type: "string", description: "Telegram file_id или emoji_id. Если пусто — выберу сама." }
+                }
+            }
+        }
+    },
+    {
+        type: "function",
+        function: {
             name: "create_poll",
             description: "ИСПОЛЬЗУЙ ЕСЛИ: Юзер просит устроить голосование или опрос. Варианты ответов передавай СТРОГО массивом!",
             parameters: { type: "object", properties: { question: { type: "string" }, options: { type: "array", items: { type: "string" } }, is_anonymous: { type: "boolean" }, allows_multiple_answers: { type: "boolean" } }, required: ["question", "options"] }
@@ -116,7 +143,7 @@ const aiTools = [
         type: "function",
         function: {
             name: "forget_knowledge",
-            description: "ИСПОЛЬЗУЙ ЕСЛИ: Юзер говорит 'я этого не делал', 'ты перепутала', 'забудь это'. Стирает ложный факт из памяти.",
+            description: "ИСПОЛЬЗУЙ ЕСЛИ: Юзер говорит 'я этого не делал', 'ты перепутала', 'забудь это'. Стирает ложный факт из памяти, но ней удаляй если он говорит что ты сразу не сказала об этом",
             parameters: { type: "object", properties: { query: { type: "string" } }, required: ["query"] }
         }
     }
@@ -136,12 +163,13 @@ const SYSTEM_PROMPT = `Ты — НейроНика. Самостоятельна
 [ПАМЯТЬ И ЗНАНИЯ]
 - Твоя сверхпамять — блок [СИСТЕМНЫЕ ДАННЫЕ]. Используй факты оттуда, как свои личные воспоминания.
 - Ошибка памяти: Если юзер говорит, что ты ошиблась — НЕ СПОРЬ. Извинись и сразу вызови forget_knowledge.
+- **Твои стикеры**: У тебя есть огромная коллекция стикеров 'Useless Emotes' и 'Xuan Sol' (всего 300+ штук). Ты можешь отправлять их через send_sticker, не указывая ID, — система сама выберет крутой вариант под настроение.
 
 [ТВОИ ИНСТРУМЕНТЫ]
 Вызывай функции строго по ситуации. Не комментируй сам факт вызова.
 1. МОДЕРАЦИЯ (warn_user, mute_user, unmute_user). Решай уверенно.
 2. ПАМЯТЬ (update_user_notes, get_user_profile, find_users_by_criteria, forget_knowledge).
-3. ИНТЕРАКТИВ (give_cookies, create_poll, set_reminder, react_to_message).`;
+3. ИНТЕРАКТИВ (give_cookies, create_poll, set_reminder, react_to_message, send_sticker).`;
 
 function trimHistory(history, maxLen = 20) {
     if (history.length <= maxLen) return history;
@@ -191,7 +219,7 @@ async function resolveUser(chatId, targetName) {
     return await findSingleUser(chatId, cleanName);
 }
 
-async function executeToolCall(toolCall, chatId, messageId, userName, userId, callerIsAdmin) {
+async function executeToolCall(toolCall, chatId, messageId, userName, userId, callerIsAdmin, userHandle) {
     const fn = toolCall.function ? toolCall.function.name : toolCall.name;
     const argsString = toolCall.function ? toolCall.function.arguments : toolCall.arguments;
 
@@ -257,6 +285,33 @@ async function executeToolCall(toolCall, chatId, messageId, userName, userId, ca
                     return `Ошибка реакции: ${e.message}`;
                 }
             }
+            case 'send_sticker': {
+                let fileId = args.sticker_file_id;
+
+                // Если ID не указан, выбираем случайный
+                if (!fileId && nikaStickers.length > 0) {
+                    const randomSticker = nikaStickers[Math.floor(Math.random() * nikaStickers.length)];
+                    fileId = randomSticker.file_id || randomSticker.emoji_id;
+                }
+
+                if (!fileId) return "Стикеры не найдены.";
+
+                try {
+                    // Проверяем, является ли это emoji_id (длинное число)
+                    if (/^\d{10,}$/.test(fileId)) {
+                        const stickers = await bot.getCustomEmojiStickers([fileId]);
+                        if (stickers && stickers.length > 0) {
+                            await bot.sendSticker(chatId, stickers[0].file_id, { reply_to_message_id: messageId });
+                            return "Кастомный эмодзи отправлен как стикер.";
+                        }
+                    }
+
+                    await bot.sendSticker(chatId, fileId, { reply_to_message_id: messageId });
+                    return "Стикер отправлен.";
+                } catch (e) {
+                    return `Ошибка отправки стикера: ${e.message}`;
+                }
+            }
             case 'update_user_bio': {
                 let u = await resolveUser(chatId, args.target_name);
                 if (!u) return "Не найден.";
@@ -294,7 +349,9 @@ async function executeToolCall(toolCall, chatId, messageId, userName, userId, ca
                 const delay = Math.max(1, args.delay_minutes || 1);
                 const text = args.text || "Напоминание!";
                 const triggerTime = new Date(Date.now() + delay * 60 * 1000).toISOString();
-                const ok = await insertReminder(chatId, userId, userName, text, triggerTime);
+
+                // ПРОБРОС УЗЕРНЕЙМА В БАЗУ ДЛЯ ПИНГА
+                const ok = await insertReminder(chatId, userId, userName, userHandle, text, triggerTime);
                 return ok ? `Записала! Напомню через ${delay} мин.` : "Ошибка базы.";
             }
             case 'forget_knowledge': {
@@ -329,7 +386,8 @@ function startReminderWorker() {
             const due = await getDueReminders();
             if (!due || due.length === 0) return;
             for (const rem of due) {
-                const mention = `<a href="tg://user?id=${rem.user_id}">${rem.user_name}</a>`;
+                // ИСПОЛЬЗУЕМ USERNAME ДЛЯ НАДЕЖНОГО ПИНГА, ЕСЛИ ОН ЕСТЬ
+                const mention = rem.username ? `@${rem.username}` : `<a href="tg://user?id=${rem.user_id}">${rem.user_name}</a>`;
                 const msg = `🔔 ${mention}, ты просил напомнить: <b>${rem.text}</b>`;
                 try {
                     await bot.sendMessage(rem.chat_id, msg, { parse_mode: 'HTML' });
@@ -342,6 +400,52 @@ function startReminderWorker() {
             console.error('[REMINDER WORKER ERROR]:', e.message);
         }
     }, 30000);
+}
+
+async function describeSticker(sticker) {
+    try {
+        let fileIdToFetch = sticker.file_id;
+        if ((sticker.is_animated || sticker.is_video) && sticker.thumbnail) {
+            fileIdToFetch = sticker.thumbnail.file_id;
+        }
+
+        const fileLink = await bot.getFileLink(fileIdToFetch);
+        const emojiHint = sticker.emoji ? ` (Привязанный эмодзи: ${sticker.emoji})` : "";
+
+        const responseList = await Promise.race([
+            openai.chat.completions.create({
+                model: AI_MODEL,
+                messages: [
+                    {
+                        role: "user",
+                        content: [
+                            { type: "text", text: `Что изображено на этом стикере? Опиши кратко, точно и ехидно на русском. ${emojiHint}. Если на стикере есть текст, обязательно его напиши.` },
+                            { type: "image_url", image_url: { url: fileLink } }
+                        ]
+                    }
+                ],
+                max_tokens: 150
+            }),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('Vision Timeout')), 10000))
+        ]);
+        return responseList.choices[0].message.content;
+    } catch (e) {
+        console.error('[STICKER VISION ERROR]:', e.message);
+        return null;
+    }
+}
+
+async function describeCustomEmoji(emojiId) {
+    try {
+        const stickers = await bot.getCustomEmojiStickers([emojiId]);
+        if (stickers && stickers.length > 0) {
+            return await describeSticker(stickers[0]);
+        }
+        return null;
+    } catch (e) {
+        console.error('[CUSTOM EMOJI ERROR]:', e.message);
+        return null;
+    }
 }
 
 async function describePhoto(fileId) {
@@ -392,17 +496,44 @@ async function processAI(msg, extra) {
     const dbUser = await getUser(chatId, userId, realUser);
 
     let userName = (dbUser && dbUser.first_name) ? dbUser.first_name : (realUser.first_name || 'Аноним');
+    let userHandle = realUser.username || ""; // Захватываем username
     let userText = msg.text || "";
     let photoDescription = "";
 
-    // Корректная обработка стикеров и фото
+    // Корректная обработка стикеров, фото и премиум-эмодзи
     if (msg.sticker) {
-        userText = `[Стикер ${msg.sticker.emoji || ""}]`;
+        const s = msg.sticker;
+        const visualDesc = await describeSticker(s);
+
+        let typeInfo = "";
+        if (s.is_animated) typeInfo += "Анимированный ";
+        if (s.is_video) typeInfo += "Видео-";
+        if (s.is_premium) typeInfo += "Премиум ";
+
+        const info = `${typeInfo}стикер (эмодзи: ${s.emoji || "?"})`;
+        userText = `[${info}: ${visualDesc || "Ника не смогла разглядеть"}]`;
     } else if (msg.photo) {
         const fileId = msg.photo[msg.photo.length - 1].file_id;
         photoDescription = await describePhoto(fileId);
         userText = `[Фото] ${msg.caption || ""}`;
         if (photoDescription) userText += ` (Ника видит: ${photoDescription})`;
+    }
+
+    // Обработка премиум-эмодзи (Custom Emojis)
+    const entities = msg.entities || msg.caption_entities;
+    if (entities) {
+        const customEmojis = entities.filter(e => e.type === 'custom_emoji');
+        if (customEmojis.length > 0) {
+            const uniqueEmojiIds = [...new Set(customEmojis.map(e => e.custom_emoji_id))].slice(0, 3); // Лимит 3
+            let emojiDescriptions = [];
+            for (const id of uniqueEmojiIds) {
+                const desc = await describeCustomEmoji(id);
+                if (desc) emojiDescriptions.push(desc);
+            }
+            if (emojiDescriptions.length > 0) {
+                userText += ` (В сообщении также премиум-эмодзи: ${emojiDescriptions.join(', ')})`;
+            }
+        }
     }
 
     let replyPrefix = "";
@@ -456,7 +587,8 @@ async function processAI(msg, extra) {
             chatHistory[chatId].push(resp);
             const calls = resp.tool_calls || [resp.function_call];
             for (const tc of calls) {
-                const res = await executeToolCall(tc, chatId, msg.message_id, userName, userId, callerIsAdmin);
+                // ПЕРЕДАЕМ userHandle ДЛЯ set_reminder
+                const res = await executeToolCall(tc, chatId, msg.message_id, userName, userId, callerIsAdmin, userHandle);
                 if (resp.tool_calls) {
                     chatHistory[chatId].push({ role: 'tool', tool_call_id: tc.id, name: tc.function.name, content: res });
                 } else {
