@@ -37,10 +37,6 @@ async function getUser(chatId, userId, userInfo = {}) {
         .eq('chat_id', chatId)
         .eq('user_id', userId)
         .single();
-    
-    if (user) {
-        // console.log(`[DB DEBUG] getUser FOUND: userId ${userId} -> dbId ${user.id}`);
-    }
 
     if (error && error.code !== 'PGRST116') {
         console.error('[DB ERROR] getUser:', error.message);
@@ -52,7 +48,7 @@ async function getUser(chatId, userId, userInfo = {}) {
         if (userId < 0 && (name === 'Инкогнито' || name === '')) {
             name = `Канал ${Math.abs(userId)}`;
         }
-        
+
         const newUser = {
             chat_id: chatId,
             user_id: userId,
@@ -110,12 +106,10 @@ async function getChatSettings(chatId) {
 
     if (error) {
         console.error('[DB ERROR] getChatSettings:', error.message);
-        // Возвращаем настройки по умолчанию в случае ошибки
         return { link_filter_enabled: true };
     }
 
     if (!data) {
-        // Если настроек нет — создаём запись с дефолтными значениями
         const { data: newData, error: insertError } = await supabase
             .from('chats')
             .insert([{ chat_id: chatId, link_filter_enabled: true }])
@@ -130,9 +124,7 @@ async function getChatSettings(chatId) {
 }
 
 async function updateChatSettings(chatId, updates) {
-    // Убеждаемся, что запись существует
     await getChatSettings(chatId);
-
     const { error } = await supabase
         .from('chats')
         .update({ ...updates, updated_at: new Date().toISOString() })
@@ -143,7 +135,6 @@ async function updateChatSettings(chatId, updates) {
         return false;
     }
 
-    // Сброс кэша для этого чата
     delete chatSettingsCache[chatId];
     return true;
 }
@@ -152,7 +143,6 @@ function cleanupStores() {
     const now = Date.now();
     const oneDay = 24 * 60 * 60 * 1000;
 
-    // Очистка авторов сообщений
     for (const chatId in messageAuthors) {
         const keys = Object.keys(messageAuthors[chatId]);
         if (keys.length > 1000) {
@@ -160,7 +150,6 @@ function cleanupStores() {
         }
     }
 
-    // Очистка кулдаунов и кэша пользователей
     [reactionCooldowns, commandCooldowns, userCache, chatSettingsCache].forEach(store => {
         for (const key in store) {
             const time = store[key].expires || store[key];
@@ -175,7 +164,6 @@ async function claimDailyBonus(chatId, userId) {
     if (!user) return { success: false, message: 'Пользователь не найден' };
 
     const now = new Date();
-    // Проверяем кулдаун в 24 часа
     if (user.last_daily_claim) {
         const lastClaim = new Date(user.last_daily_claim);
         const diffHours = (now - lastClaim) / (1000 * 60 * 60);
@@ -187,13 +175,9 @@ async function claimDailyBonus(chatId, userId) {
         }
     }
 
-    // Вычисляем бонус: 50-150 XP, 10% шанс на +1 к репе.
-    const bonusXp = Math.floor(Math.random() * 101) + 50; 
+    const bonusXp = Math.floor(Math.random() * 101) + 50;
     const isRepGained = Math.random() < 0.10;
-    
-    // Подготовка обновлений. Проверяем повышение уровня в messageHandler, либо здесь.
-    // Удобнее просто вернуть новый статус, а левелап проверять при следующем сообщении, или прямо тут.
-    // Сделаем тут проверку:
+
     let newXp = (user.xp || 0) + bonusXp;
     let newLevel = user.level || 1;
     let nextXp = getNextLevelXp(newLevel);
@@ -205,7 +189,7 @@ async function claimDailyBonus(chatId, userId) {
         levelUp = true;
     }
 
-    const updates = { 
+    const updates = {
         xp: newXp,
         level: newLevel,
         last_daily_claim: now.toISOString()
@@ -216,12 +200,12 @@ async function claimDailyBonus(chatId, userId) {
 
     await updateUser(user.id, updates);
 
-    return { 
-        success: true, 
-        bonusXp, 
-        isRepGained, 
-        newXp, 
-        newLevel, 
+    return {
+        success: true,
+        bonusXp,
+        isRepGained,
+        newXp,
+        newLevel,
         levelUp,
         newReputation: updates.reputation || user.reputation
     };
@@ -231,7 +215,6 @@ function getNextLevelXp(level) {
     return 50 * level * level + 50 * level;
 }
 
-// Новые функции для профиля
 async function setBirthday(chatId, userId, birthday) {
     const user = await getUser(chatId, userId);
     if (!user) return false;
@@ -250,8 +233,7 @@ async function setBioByUsernameOrName(chatId, queryName, bio) {
     if (!queryName) return null;
     let cleanName = queryName.replace('@', '').toLowerCase();
     const latinName = transliterate(cleanName);
-    
-    // Ищем по username или first_name
+
     const { data, error } = await supabase
         .from('users')
         .select('id, first_name')
@@ -263,7 +245,7 @@ async function setBioByUsernameOrName(chatId, queryName, bio) {
     if (!data || error) return null;
 
     await updateUser(data.id, { bio });
-    return data.first_name; // Возвращаем имя того, кому поменяли
+    return data.first_name;
 }
 
 async function setNotesByUsernameOrName(chatId, queryName, notes) {
@@ -271,9 +253,7 @@ async function setNotesByUsernameOrName(chatId, queryName, notes) {
     let cleanName = queryName.replace('@', '').toLowerCase().trim();
     const stem = getStem(cleanName);
     const latinStem = transliterate(stem);
-    
-    // Сначала ищем по точному имени/юзернейму в кэше активных
-    // Но так как у нас нет доступа к кэшу ИИ тут, используем общий поиск
+
     const { data, error } = await supabase
         .from('users')
         .select('id, first_name')
@@ -292,7 +272,7 @@ async function setFirstNameByUsernameOrName(chatId, queryName, newName) {
     if (!queryName || !newName) return null;
     let cleanName = queryName.replace('@', '').toLowerCase().trim();
     const latinStem = transliterate(cleanName);
-    
+
     const { data, error } = await supabase
         .from('users')
         .select('id, first_name')
@@ -304,12 +284,9 @@ async function setFirstNameByUsernameOrName(chatId, queryName, newName) {
     if (!data || error) return null;
 
     await updateUser(data.id, { first_name: newName });
-    return data.first_name; // Старое имя или новое? Лучше вернуть подтверждение
+    return data.first_name;
 }
 
-// ==================== ФУНКЦИИ ДЛЯ ИИ-ИНСТРУМЕНТОВ ====================
-
-// Статистика чата: топ юзеров + общее количество
 async function getChatStats(chatId) {
     const { data: topUsers, error: topError } = await supabase
         .from('users')
@@ -338,24 +315,20 @@ async function getChatStats(chatId) {
     };
 }
 
-// Улучшенное выделение корня слова для интеллектуального поиска
 function getStem(word) {
     if (!word || word.length < 3) return word;
-    // Отсекаем типичные окончания падежей и множественного числа (рус/англ)
     return word.toLowerCase()
-        .replace(/[уаеяюиыо]$/i, '') // Русские окончания (ед.ч.)
-        .replace(/(ов|ев|ий|ый|ые|ие|ах|ях|ом|ем)$/i, '') // Более сложные русские окончания
-        .replace(/(s|es|ed|ing)$/i, ''); // Английские окончания
+        .replace(/[уаеяюиыо]$/i, '')
+        .replace(/(ов|ев|ий|ый|ые|ие|ах|ях|ом|ем)$/i, '')
+        .replace(/(s|es|ed|ing)$/i, '');
 }
 
-// Поиск пользователя по имени или @username (Интеллектуальный)
 async function searchUserByName(chatId, query) {
     if (!query) return null;
     const cleanQuery = query.replace('@', '').toLowerCase().trim();
     const stem = getStem(cleanQuery);
     const latinStem = transliterate(stem);
 
-    // Ищем по оригиналу, транслитерации и их корням (стеммам)
     const { data, error } = await supabase
         .from('users')
         .select('user_id, first_name, username, level, xp, reputation, bio, ai_notes, warns, birthday')
@@ -376,7 +349,6 @@ async function searchUserByName(chatId, query) {
     }));
 }
 
-// Выдать варн пользователю (возвращает новое количество варнов или null при ошибке)
 async function warnUserById(chatId, targetName) {
     if (!targetName) return null;
     const cleanName = targetName.replace('@', '').toLowerCase();
@@ -403,9 +375,7 @@ async function warnUserById(chatId, targetName) {
     };
 }
 
-// Ближайшие дни рождения (в ближайшие 7 дней)
 async function getUpcomingBirthdays(chatId) {
-    // Получаем всех юзеров с ДР в этом чате
     const { data, error } = await supabase
         .from('users')
         .select('first_name, username, birthday')
@@ -424,11 +394,9 @@ async function getUpcomingBirthdays(chatId) {
         if (parts.length < 2) continue;
 
         const day = parseInt(parts[0]);
-        const month = parseInt(parts[1]) - 1; // JS months 0-indexed
+        const month = parseInt(parts[1]) - 1;
 
-        // Создаём дату ДР в этом году
         const bdayThisYear = new Date(today.getFullYear(), month, day);
-        // Если уже прошёл — берём следующий год
         if (bdayThisYear < today) bdayThisYear.setFullYear(today.getFullYear() + 1);
 
         const diffDays = Math.ceil((bdayThisYear - today) / (1000 * 60 * 60 * 24));
@@ -449,7 +417,6 @@ async function getUpcomingBirthdays(chatId) {
     });
 }
 
-// Поиск одного пользователя по имени/нику (для resolveUser)
 async function findSingleUser(chatId, query) {
     if (!query) return null;
     const cleanQuery = query.replace('@', '').toLowerCase().trim();
@@ -482,7 +449,7 @@ async function getBirthdaysToday(chatId) {
         .select('*')
         .eq('chat_id', chatId)
         .ilike('birthday', `${dateStr}%`);
-    
+
     if (error) return [];
     return data;
 }
@@ -526,7 +493,6 @@ async function searchKnowledge(chatId, queryEmbedding, limit = 3, threshold = 0.
     return data || [];
 }
 
-// Поиск по тексту (ILIKE) для точных совпадений и "намеков"
 async function searchKnowledgeByText(chatId, query, limit = 5) {
     const { data, error } = await supabase
         .from('bot_knowledge')
@@ -535,7 +501,7 @@ async function searchKnowledgeByText(chatId, query, limit = 5) {
         .ilike('fact', `%${query}%`)
         .order('id', { ascending: false })
         .limit(limit);
-    
+
     if (error) {
         console.error('[DB ERROR] searchKnowledgeByText:', error.message);
         return [];
@@ -543,13 +509,12 @@ async function searchKnowledgeByText(chatId, query, limit = 5) {
     return data || [];
 }
 
-// Получение последних фактов чата (или юзера, если передано ключевое слово)
 async function getRecentKnowledge(chatId, userName = "", limit = 10) {
     let query = supabase
         .from('bot_knowledge')
         .select('*')
         .eq('chat_id', chatId);
-    
+
     if (userName) {
         query = query.ilike('fact', `${userName}:%`);
     }
@@ -557,7 +522,7 @@ async function getRecentKnowledge(chatId, userName = "", limit = 10) {
     const { data, error } = await query
         .order('id', { ascending: false })
         .limit(limit);
-    
+
     if (error) {
         console.error('[DB ERROR] getRecentKnowledge:', error.message);
         return [];
@@ -583,7 +548,7 @@ async function deleteKnowledge(chatId, knowledgeId) {
         .delete()
         .eq('chat_id', chatId)
         .eq('id', knowledgeId);
-    
+
     if (error) {
         console.error('[DB ERROR] deleteKnowledge:', error.message);
         return false;
@@ -591,7 +556,7 @@ async function deleteKnowledge(chatId, knowledgeId) {
     return true;
 }
 
-// v4.0: Работа с напоминаниями
+// Строго 5 аргументов (чтобы БД не выдавала ошибку!)
 async function insertReminder(chatId, userId, userName, text, triggerTime) {
     const { data, error } = await supabase.from('reminders').insert([{
         chat_id: chatId,
@@ -601,7 +566,7 @@ async function insertReminder(chatId, userId, userName, text, triggerTime) {
         trigger_time: triggerTime,
         is_sent: false
     }]).select().single();
-    
+
     if (error) {
         console.error('[DB ERROR] insertReminder:', error.message);
         return null;
@@ -616,7 +581,7 @@ async function getDueReminders() {
         .select('*')
         .eq('is_sent', false)
         .lte('trigger_time', now);
-    
+
     if (error) {
         console.error('[DB ERROR] getDueReminders:', error.message);
         return [];
@@ -645,4 +610,3 @@ module.exports = {
     messageAuthors, reactionCooldowns, commandCooldowns, userCache,
     supabase, ANONYMOUS_ADMIN_ID, pendingVerifications
 };
-

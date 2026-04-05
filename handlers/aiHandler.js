@@ -49,7 +49,6 @@ const activeParticipants = {};
 const aiMood = {};
 const processingQueue = new Map();
 const extractionBuffer = {};
-const activeReminders = new Set();
 
 const aiTools = [
     {
@@ -132,7 +131,7 @@ const aiTools = [
         type: "function",
         function: {
             name: "send_sticker",
-            description: "ИСПОЛЬЗУЙ ЕСЛИ: Хочешь отправить стикер. Если не знаешь точный ID, передай слово 'random', чтобы отправить случайный стикер из коллекции Ники.",
+            description: "ИСПОЛЬЗУЙ ЕСЛИ: Хочешь отправить стикер. Если не знаешь точный ID, передай слово 'random'.",
             parameters: {
                 type: "object",
                 properties: {
@@ -162,7 +161,7 @@ const aiTools = [
         type: "function",
         function: {
             name: "forget_knowledge",
-            description: "ИСПОЛЬЗУЙ ЕСЛИ: Юзер говорит 'я этого не делал', 'ты перепутала', 'забудь это'. Стирает ложный факт.",
+            description: "ИСПОЛЬЗУЙ ЕСЛИ: Юзер говорит 'я этого не делал', 'забудь это'. Стирает ложный факт, но не удаляй если он говорит что ты сразу не сказала об этом.",
             parameters: { type: "object", properties: { query: { type: "string" } }, required: ["query"] }
         }
     }
@@ -370,20 +369,29 @@ async function executeToolCall(toolCall, chatId, messageId, userName, userId, ca
                 return `Факт об ${u.first_name} добавлен в досье.`;
             }
             case 'create_poll': {
-                // ПРЕДОХРАНИТЕЛЬ: Gemini иногда отдает строку вместо массива
+                // ПРЕДОХРАНИТЕЛЬ 1: Иногда ИИ отдает строку вместо массива
                 let opts = args.options;
                 if (typeof opts === 'string') {
                     try { opts = JSON.parse(opts); } catch (e) { opts = opts.split(',').map(s => s.trim()); }
                 }
-                if (!Array.isArray(opts) || opts.length < 2) return "Мало данных: нужно минимум 2 варианта ответа.";
+
+                // ПРЕДОХРАНИТЕЛЬ 2: Проверка минимума
+                if (!Array.isArray(opts) || opts.length < 2) {
+                    return "Ошибка: нужно минимум 2 варианта ответа (массив).";
+                }
+
+                // ПРЕДОХРАНИТЕЛЬ 3: Лимиты Telegram API
+                const safeQuestion = String(args.question).substring(0, 295);
+                const safeOptions = opts.slice(0, 10).map(opt => String(opt).substring(0, 95));
 
                 try {
-                    await bot.sendPoll(chatId, args.question, opts.slice(0, 10), { // Telegram лимит 10 вариантов
+                    await bot.sendPoll(chatId, safeQuestion, safeOptions, {
                         is_anonymous: args.is_anonymous !== undefined ? args.is_anonymous : true,
                         allows_multiple_answers: !!args.allows_multiple_answers
                     });
-                    return "Опрос запущен.";
+                    return "Опрос успешно запущен.";
                 } catch (e) {
+                    console.error('[POLL ERROR]', e);
                     return `Ошибка запуска опроса: ${e.message}`;
                 }
             }
@@ -392,9 +400,12 @@ async function executeToolCall(toolCall, chatId, messageId, userName, userId, ca
                 const text = args.text || "Напоминание!";
                 const triggerTime = new Date(Date.now() + delay * 60 * 1000).toISOString();
 
-                // ПОРЯДОК АРГУМЕНТОВ ИСПРАВЛЕН: userHandle идет в конце!
-                const ok = await insertReminder(chatId, userId, userName, text, triggerTime, userHandle);
-                return ok ? `Записала! Напомню через ${delay} мин.` : "Ошибка базы.";
+                // ХИТРЫЙ ТРЮК: Записываем @username прямо в имя, чтобы не ломать структуру БД
+                const nameToSave = userHandle ? `@${userHandle}` : userName;
+
+                // Передаем ровно 5 аргументов, как и ждет database.js
+                const ok = await insertReminder(chatId, userId, nameToSave, text, triggerTime);
+                return ok ? `Записала! Напомню через ${delay} мин.` : "Ошибка базы данных.";
             }
             case 'forget_knowledge': {
                 const deletedFact = await forgetFact(chatId, args.query);
@@ -428,7 +439,11 @@ function startReminderWorker() {
             const due = await getDueReminders();
             if (!due || due.length === 0) return;
             for (const rem of due) {
-                const mention = rem.username ? `@${rem.username}` : `<a href="tg://user?id=${rem.user_id}">${rem.user_name}</a>`;
+                // Если мы сохранили с @, это юзернейм, иначе делаем кликабельную HTML ссылку
+                const mention = (rem.user_name && rem.user_name.startsWith('@'))
+                    ? rem.user_name
+                    : `<a href="tg://user?id=${rem.user_id}">${rem.user_name || 'Слушай'}</a>`;
+
                 const msg = `🔔 ${mention}, ты просил напомнить: <b>${rem.text}</b>`;
                 try {
                     await bot.sendMessage(rem.chat_id, msg, { parse_mode: 'HTML' });
@@ -641,12 +656,12 @@ async function processAI(msg, extra) {
             const calls = resp.tool_calls || [resp.function_call];
             for (const tc of calls) {
                 const res = await executeToolCall(tc, chatId, msg.message_id, userName, userId, callerIsAdmin, userHandle);
-                const fnName = tc.function ? tc.function.name : tc.name;
 
-                // ИСПРАВЛЕНИЕ ЛОГИКИ ИСТОРИИ (чтобы ИИ не сходил с ума от формата legacy function_call)
+                // Правильное сохранение в историю (role: tool)
                 if (resp.tool_calls) {
-                    chatHistory[chatId].push({ role: 'tool', tool_call_id: tc.id, name: fnName, content: String(res) });
+                    chatHistory[chatId].push({ role: 'tool', tool_call_id: tc.id, content: String(res) });
                 } else {
+                    const fnName = tc.function ? tc.function.name : tc.name;
                     chatHistory[chatId].push({ role: 'function', name: fnName, content: String(res) });
                 }
             }
@@ -701,7 +716,6 @@ async function processAI(msg, extra) {
         const finalOutput = formatAIOutput(rawRes);
         await safeSendMessage(chatId, finalOutput, msg.message_id);
 
-        // ИСПРАВЛЕНИЕ 2: Сохраняем в историю ТОЛЬКО финальный результат один раз
         chatHistory[chatId].push({ role: 'assistant', content: finalOutput.replace(/<[^>]*>/g, '') });
 
     } catch (e) {
