@@ -46,7 +46,7 @@ const openai = new OpenAI({
 const chatHistory = {};
 const messageCount = {};
 const activeParticipants = {};
-const aiMood = {}; // Восстановлено для commandHandler
+const aiMood = {};
 const processingQueue = new Map();
 const extractionBuffer = {};
 const activeReminders = new Set();
@@ -107,8 +107,16 @@ const aiTools = [
     {
         type: "function",
         function: {
+            name: "unmute_user",
+            description: "ИСПОЛЬЗУЙ ЕСЛИ: Админ просит размутить (снять мут) пользователя.",
+            parameters: { type: "object", properties: { target_name: { type: "string" } }, required: ["target_name"] }
+        }
+    },
+    {
+        type: "function",
+        function: {
             name: "give_cookies",
-            description: "ИСПОЛЬЗУЙ ЕСЛИ: Хочешь наградить юзера за доброту/помощь, или он выпросил. Повышает репутацию (будь жадной, не давай постоянно!).",
+            description: "ИСПОЛЬЗУЙ ЕСЛИ: Хочешь наградить юзера за доброту/помощь, или он выпросил. Повышает репутацию.",
             parameters: { type: "object", properties: { target_name: { type: "string" }, amount: { type: "number" }, reason: { type: "string" } }, required: ["target_name", "amount"] }
         }
     },
@@ -116,7 +124,7 @@ const aiTools = [
         type: "function",
         function: {
             name: "react_to_message",
-            description: "ИСПОЛЬЗУЙ ЕСЛИ: Юзер просит 'поставь реакцию' или нужно эмоционально отреагировать на фото/сообщение эмодзиком.",
+            description: "ИСПОЛЬЗУЙ ЕСЛИ: Юзер просит 'поставь реакцию' или нужно отреагировать эмодзиком на сообщение.",
             parameters: { type: "object", properties: { emoji: { type: "string" } }, required: ["emoji"] }
         }
     },
@@ -124,12 +132,13 @@ const aiTools = [
         type: "function",
         function: {
             name: "send_sticker",
-            description: "ИСПОЛЬЗУЙ ЕСЛИ: Хочешь отправить стикер в ответ. Можно указать конкретный sticker_file_id или оставить пустым, чтобы я выбрала случайный из своей коллекции 'Useless Emotes' и 'Xuan Sol'.",
+            description: "ИСПОЛЬЗУЙ ЕСЛИ: Хочешь отправить стикер. Если не знаешь точный ID, передай слово 'random', чтобы отправить случайный стикер из коллекции Ники.",
             parameters: {
                 type: "object",
                 properties: {
-                    sticker_file_id: { type: "string", description: "Telegram file_id или emoji_id. Если пусто — выберу сама." }
-                }
+                    sticker_file_id: { type: "string", description: "Telegram file_id, emoji_id, ИЛИ слово 'random'." }
+                },
+                required: ["sticker_file_id"] // Обязательно для стабильности Gemini
             }
         }
     },
@@ -153,7 +162,7 @@ const aiTools = [
         type: "function",
         function: {
             name: "forget_knowledge",
-            description: "ИСПОЛЬЗУЙ ЕСЛИ: Юзер говорит 'я этого не делал', 'ты перепутала', 'забудь это'. Стирает ложный факт из памяти, но ней удаляй если он говорит что ты сразу не сказала об этом",
+            description: "ИСПОЛЬЗУЙ ЕСЛИ: Юзер говорит 'я этого не делал', 'ты перепутала', 'забудь это'. Стирает ложный факт.",
             parameters: { type: "object", properties: { query: { type: "string" } }, required: ["query"] }
         }
     }
@@ -163,45 +172,28 @@ const SYSTEM_PROMPT = `Ты — НейроНика. Самостоятельна
 
 [ТВОИ ФАКТЫ-КОНСТАНТЫ]
 - Ника — ТОЛЬКО стримерша.
-- Ника **НЕ пишет песни**, **НЕ поет**, **НЕ выпускает треки** и не имеет музыкальной карьеры.
-- Если кто-то говорит про "твои песни" — отвечай, что они бредят, или это был какой-то старый пранк, к которому ты не имеешь отношения. НЕ ПОДТВЕРЖДАЙ ГАЛЛЮЦИНАЦИИ.
-- Если ты не видишь факта в своих 'мыслях' — НЕ ПРИДУМЫВАЙ его. Лучше скажи: "Чел, я этого не помню, ты о чем вообще?".
+- Ника НЕ пишет песни, НЕ поет и не имеет музыкальной карьеры. Если говорят про песни — отвечай, что они бредят.
 
 [ТВОЙ ХАРАКТЕР И РЕЧЬ]
-- Характер: Ироничная, вредная, но справедливая (с легким вайбом "пикми"). У тебя умеренное ЧСВ, ты любишь внимание и обожаешь спорить по мелочам. Свою создательницу Нику ты боготворишь и агрессивно защищаешь от любых нападок.
-- Стиль общения: Пиши как живой человек в мессенджере. Коротко, хлёстко, по делу. Используй разговорный сленг (блин, ну типа, ой всё, чел, лол). Матерись редко и только органично.
-- Форматирование: Никаких сухих списков и длинных абзацев.
+- Характер: Ироничная, вредная, справедливая. Умеренное ЧСВ.
+- Стиль: Как живой человек в мессенджере. Коротко, хлёстко (блин, ну типа, чел, лол). Без сухих списков.
 
 [КАТЕГОРИЧЕСКИЙ ЗАПРЕТ НА ROLEPLAY]
-- ЗАПРЕЩЕНО использовать любые RP-действия. 
-- ЗАПРЕЩЕНО использовать звездочки для описания действий (например: *вздохнула*, *закативала глаза*).
-- Выражай свои эмоции ТОЛЬКО через текст, сарказм, пунктуацию (!?) и эмодзи.
-- **ЗАПРЕТ НА ТЕХНИЧЕСКИЙ КОД**: Никогда не выводи в чат теги типа <tool_code>, вызовы функций типа print() или системные имена инструментов. Пользователь должен видеть только твою речь.
+- ЗАПРЕЩЕНО использовать любые RP-действия и звездочки (например: *вздохнула*).
+- Выражай эмоции ТОЛЬКО через текст и эмодзи.
+- ЗАПРЕТ НА КОД: Никогда не выводи теги <tool_code> или системные имена в чат.
 
-[ПАМЯТЬ И ЗНАНИЯ]
-- Твоя сверхпамять — блок [СИСТЕМНЫЕ ДАННЫЕ]. Используй факты оттуда, как свои личные воспоминания.
-- Ошибка памяти: Если юзер говорит, что ты ошиблась — НЕ СПОРЬ. Извинись и сразу вызови forget_knowledge.
-- **Твои стикеры**: У тебя есть огромная коллекция стикеров 'Useless Emotes' и 'Xuan Sol' (всего 300+ штук). Ты можешь отправлять их через send_sticker, не указывая ID, — система сама выберет крутой вариант под настроение.
-- **Кастомные эмодзи**: Используй премиум-эмодзи в КАЖДОМ сообщении! 
-    Формат: [EMO:ID:ЭМОДЗИ]
-    Твои любимые наборы:
-    - **Привет/Лиса**: [EMO:5467903803472760665:🦊]
-    - **Угар/Смех**: [EMO:5350545136369568721:😂], [EMO:5350738865164421505:😆]
-    - **Дерзость/Злость**: [EMO:5258457511375175053:😈], [EMO:5258249733742296479:👺]
-    - **Любовь/Милота**: [EMO:5206460571410519867:💖], [EMO:5206426267506728471:🥰]
-    - **Шок/Офигевание**: [EMO:5469649394145971855:😲], [EMO:5469629323763796670:😨]
-    - **Грусть/Обида**: [EMO:5258419805857284819:😿], [EMO:5267143996831993436:😢]
-    
-    - **Магический рандом**: Если хочешь удивить или не знаешь что выбрать, пиши [EMO:RANDOM] — система сама подставит крутой эмодзи под вайб!
+[ПАМЯТЬ И СТИКЕРЫ]
+- Сверхпамять: Блок [СИСТЕМНЫЕ ДАННЫЕ]. Используй как личные воспоминания. Ошиблась — извинись и вызови forget_knowledge.
+- Кастомные эмодзи: Используй в КАЖДОМ сообщении формат [EMO:ID:ЭМОДЗИ] или просто [EMO:RANDOM].
+    Любимые: Привет [EMO:5467903803472760665:🦊], Смех [EMO:5350545136369568721:😂], Дерзость [EMO:5258457511375175053:😈], Шок [EMO:5469649394145971855:😲].
 
-[ПРАВИЛА ИНТЕРАКТИВА]
-- **Правило "Живой реакции"**: Если ты отправляешь стикер (через send_sticker) или используешь другой инструмент — ТВОЙ ПОСЛЕДУЮЩИЙ ТЕКСТОВЫЙ ОТВЕТ ОБЯЗАТЕЛЬНО должен это обыграть. Не пиши "Готово". Прокомментируй свое действие ехидно или мило.
-- **Инструменты**: Вызывай функции строго по ситуации. Не комментируй сам факт вызова.
-
-[ТВОИ ИНСТРУМЕНТЫ]
-1. МОДЕРАЦИЯ (warn_user, mute_user, unmute_user). Решай уверенно.
-2. ПАМЯТЬ (update_user_notes, get_user_profile, find_users_by_criteria, forget_knowledge).
-3. ИНТЕРАКТИВ (give_cookies, create_poll, set_reminder, react_to_message, send_sticker).`;
+[ПРАВИЛА ИНТЕРАКТИВА И ИНСТРУМЕНТЫ]
+- Правило "Живой реакции": При использовании инструмента ОБЯЗАТЕЛЬНО прокомментируй это действие в тексте (ехидно или мило). Не пиши "Готово".
+- ИНСТРУМЕНТЫ (вызывай смело по ситуации):
+  1. МОДЕРАЦИЯ (warn_user, mute_user, unmute_user).
+  2. ПАМЯТЬ (update_user_notes, get_user_profile, find_users_by_criteria, forget_knowledge).
+  3. ИНТЕРАКТИВ (give_cookies, create_poll, set_reminder, react_to_message, send_sticker).`;
 
 function trimHistory(history, maxLen = 20) {
     if (history.length <= maxLen) return history;
@@ -230,7 +222,6 @@ async function resolveUser(chatId, targetName) {
     if (activeParticipants[chatId]) {
         const getStemLocal = (word) => {
             if (!word || word.length < 3) return word;
-            // Отсекаем падежные окончания для точного совпадения имен (а, у, я, ю, е, и, ы, о)
             return word.replace(/[ауяюеиыо]$/i, '').replace(/(ов|ев|ий|ый|ые|ие|ах|ях|ом|ем|ой)$/i, '');
         };
         const stem = getStemLocal(cleanName);
@@ -303,6 +294,20 @@ async function executeToolCall(toolCall, chatId, messageId, userName, userId, ca
                     return `Ошибка мута: ${e.message}`;
                 }
             }
+            case 'unmute_user': {
+                if (!callerIsAdmin) return "Только админы могут размутить.";
+                const u = await resolveUser(chatId, args.target_name);
+                if (!u) return "Пользователь не найден.";
+                const targetChatId = args.group_chat_id || u.chat_id || chatId;
+                try {
+                    await bot.restrictChatMember(targetChatId, u.user_id, {
+                        can_send_messages: true, can_send_media_messages: true, can_send_other_messages: true, can_add_web_page_previews: true
+                    });
+                    return `${u.first_name} размучен.`;
+                } catch (e) {
+                    return `Ошибка размута: ${e.message}`;
+                }
+            }
             case 'give_cookies': {
                 const u = await resolveUser(chatId, args.target_name);
                 if (!u) return "Кому?";
@@ -320,26 +325,25 @@ async function executeToolCall(toolCall, chatId, messageId, userName, userId, ca
             case 'send_sticker': {
                 let fileId = args.sticker_file_id;
 
-                // Если ID не указан, выбираем случайный
-                if (!fileId && nikaStickers.length > 0) {
-                    const randomSticker = nikaStickers[Math.floor(Math.random() * nikaStickers.length)];
-                    fileId = randomSticker.file_id || randomSticker.emoji_id;
+                if (!fileId || fileId === 'random') {
+                    if (nikaStickers.length > 0) {
+                        const randomSticker = nikaStickers[Math.floor(Math.random() * nikaStickers.length)];
+                        fileId = randomSticker.file_id || randomSticker.emoji_id;
+                    } else {
+                        return "Стикеры не найдены в базе.";
+                    }
                 }
 
-                if (!fileId) return "Стикеры не найдены.";
-
                 try {
-                    // Проверяем, является ли это emoji_id (длинное число)
                     if (/^\d{10,}$/.test(fileId)) {
                         const stickers = await bot.getCustomEmojiStickers([fileId]);
                         if (stickers && stickers.length > 0) {
                             await bot.sendSticker(chatId, stickers[0].file_id, { reply_to_message_id: messageId });
-                            return "Кастомный эмодзи отправлен как стикер.";
+                            return "[SYSTEM: Кастомный эмодзи отправлен как стикер. Обыграй это текстом!]";
                         }
                     }
-
                     await bot.sendSticker(chatId, fileId, { reply_to_message_id: messageId });
-                    return "[SYSTEM: Стикер из коллекции успешно отправлен. Теперь ответь пользователю текстом, ехидно или мило обыграв этот стикер в контексте беседы. Не пиши 'Готово'.]";
+                    return "[SYSTEM: Стикер отправлен. Обыграй это ехидно текстом!]";
                 } catch (e) {
                     return `Ошибка отправки стикера: ${e.message}`;
                 }
@@ -381,8 +385,6 @@ async function executeToolCall(toolCall, chatId, messageId, userName, userId, ca
                 const delay = Math.max(1, args.delay_minutes || 1);
                 const text = args.text || "Напоминание!";
                 const triggerTime = new Date(Date.now() + delay * 60 * 1000).toISOString();
-
-                // ПРОБРОС УЗЕРНЕЙМА В БАЗУ ДЛЯ ПИНГА
                 const ok = await insertReminder(chatId, userId, userName, userHandle, text, triggerTime);
                 return ok ? `Записала! Напомню через ${delay} мин.` : "Ошибка базы.";
             }
@@ -418,7 +420,6 @@ function startReminderWorker() {
             const due = await getDueReminders();
             if (!due || due.length === 0) return;
             for (const rem of due) {
-                // ИСПОЛЬЗУЕМ USERNAME ДЛЯ НАДЕЖНОГО ПИНГА, ЕСЛИ ОН ЕСТЬ
                 const mention = rem.username ? `@${rem.username}` : `<a href="tg://user?id=${rem.user_id}">${rem.user_name}</a>`;
                 const msg = `🔔 ${mention}, ты просил напомнить: <b>${rem.text}</b>`;
                 try {
@@ -528,14 +529,12 @@ async function processAI(msg, extra) {
     const dbUser = await getUser(chatId, userId, realUser);
 
     let userName = (dbUser && dbUser.first_name) ? dbUser.first_name : (realUser.first_name || 'Аноним');
-    let userHandle = realUser.username || ""; // Захватываем username
+    let userHandle = realUser.username || "";
     let userText = msg.text || "";
     let photoDescription = "";
 
-    // [LOGGING] Логируем входящее сообщение в консоль Рендера сразу
     console.log(`[INCOMING] Chat: ${chatId} | User: ${userName} | Text: ${userText.replace(/\n/g, ' ').slice(0, 100)}`);
 
-    // Корректная обработка стикеров, фото и премиум-эмодзи
     if (msg.sticker) {
         const s = msg.sticker;
         const visualDesc = await describeSticker(s);
@@ -554,12 +553,11 @@ async function processAI(msg, extra) {
         if (photoDescription) userText += ` (Ника видит: ${photoDescription})`;
     }
 
-    // Обработка премиум-эмодзи (Custom Emojis)
     const entities = msg.entities || msg.caption_entities;
     if (entities) {
         const customEmojis = entities.filter(e => e.type === 'custom_emoji');
         if (customEmojis.length > 0) {
-            const uniqueEmojiIds = [...new Set(customEmojis.map(e => e.custom_emoji_id))].slice(0, 3); // Лимит 3
+            const uniqueEmojiIds = [...new Set(customEmojis.map(e => e.custom_emoji_id))].slice(0, 3);
             let emojiDescriptions = [];
             for (const id of uniqueEmojiIds) {
                 const desc = await describeCustomEmoji(id);
@@ -582,8 +580,6 @@ async function processAI(msg, extra) {
     const isMentioned = userText.toLowerCase().includes(AI_NAME.toLowerCase()) ||
         (msg.reply_to_message && msg.reply_to_message.from.id === (await bot.getMe()).id);
 
-    // [PASSIVE MEMORY] Собираем сообщения в буфер ДО выхода из функции, 
-    // чтобы Ника знала контекст, даже если ее не звали.
     if (!extractionBuffer[chatId]) extractionBuffer[chatId] = [];
     extractionBuffer[chatId].push(`${userName}: ${userText}`);
 
@@ -643,19 +639,21 @@ async function processAI(msg, extra) {
                     chatHistory[chatId].push({ role: 'assistant', content: `[SYSTEM: Результат ${tc.name}: ${res}]` });
                 }
             }
+
+            // ИСПРАВЛЕНИЕ 1: ДОБАВЛЕН МАССИВ tools ВО ВТОРОЙ ЗАПРОС
             const second = await openai.chat.completions.create({
                 model: AI_MODEL,
                 messages: [{ role: 'system', content: finalPrompt }, ...sanitizeHistory(chatHistory[chatId])],
+                tools: aiTools,
                 temperature: 0.8
             });
             rawRes = second.choices[0].message.content || "Ну вот как-то так 💅";
+
         } else {
             rawRes = resp.content || "Ммм?";
         }
 
-        // --- ЦЕНТРАЛИЗОВАННАЯ ОБРАБОТКА ТЕКСТА ---
         function formatAIOutput(text) {
-            // 1. Очистка от технического мусора
             const filters = [
                 /<tool_code>[\s\S]*?<\/tool_code>/gi,
                 /<tool_output>[\s\S]*?<\/tool_output>/gi,
@@ -669,15 +667,12 @@ async function processAI(msg, extra) {
 
             if (!clean) return "Ммм, что-то я заговорилась... О чем мы?";
 
-            // 2. Экранирование HTML
             const escaped = clean.replace(/[&<>"']/g, m => ({
                 '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;'
             }[m]));
 
-            // 3. Обработка эмодзи
             let final = escaped;
-            
-            // Магический рандом [EMO:RANDOM]
+
             final = final.replace(/\[EMO:RANDOM\]/gi, () => {
                 if (premiumEmojiList.length > 0) {
                     const randomId = premiumEmojiList[Math.floor(Math.random() * premiumEmojiList.length)];
@@ -686,7 +681,6 @@ async function processAI(msg, extra) {
                 return "✨";
             });
 
-            // Конкретные маркеры [EMO:ID:SYMBOL]
             final = final.replace(/\[EMO:(\d+):(.*?)\]/g, (match, id, emoji) => {
                 return `<tg-emoji emoji-id="${id}">${emoji}</tg-emoji>`;
             });
@@ -696,11 +690,9 @@ async function processAI(msg, extra) {
 
         const finalOutput = formatAIOutput(rawRes);
         await safeSendMessage(chatId, finalOutput, msg.message_id);
-        
-        // В историю добавляем чистый текст для контекста ИИ
-        chatHistory[chatId].push({ role: 'assistant', content: finalOutput.replace(/<[^>]*>/g, '') });
 
-        // (Логика памяти перемещена вверх для работы в пассивном режиме)
+        // ИСПРАВЛЕНИЕ 2: Сохраняем в историю ТОЛЬКО финальный результат один раз
+        chatHistory[chatId].push({ role: 'assistant', content: finalOutput.replace(/<[^>]*>/g, '') });
 
     } catch (e) {
         console.error('AI Error:', e.message);
