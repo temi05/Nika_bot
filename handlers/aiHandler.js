@@ -284,7 +284,7 @@ async function executeToolCall(toolCall, chatId, messageId, userName, userId, ca
 
                 return `Профиль ${u.first_name}:
                 📊 XP: ${u.xp}, Лвл: ${u.level}
-                📝 Био: ${u.bio || 'Пусто'}
+                📝 Био: ${u.bio || 'Пока пусто'}
                 📌 Из досье: ${u.ai_notes || 'Нет записей'}
                 🧠 Вспомнила из чата:
                 ${cleanExtra}`;
