@@ -301,7 +301,8 @@ async function executeToolCall(toolCall, chatId, messageId, userName, userId, ca
                 return `[SYSTEM: Анализ ${msgsToAnalyze.length} сообщений успешно запущен. Ответь юзеру ехидно, что ты отправила этот лог на анализ.]`;
             }
             case 'get_user_profile': {
-                let target = args.target_name || "я";
+                // ИСПРАВЛЕНИЕ: Добавлен фоллбек на args.query, если ИИ перепутает названия параметров
+                let target = args.target_name || args.query || "я";
                 const isSelf = target.toLowerCase() === 'я' || target.toLowerCase() === 'me' || target.toLowerCase() === 'мой';
                 let u;
                 if (isSelf) {
@@ -383,7 +384,6 @@ async function executeToolCall(toolCall, chatId, messageId, userName, userId, ca
                     }
                 }
                 try {
-                    // ИСПРАВЛЕНИЕ СТИКЕРОВ: Если ИИ передает ID эмодзи, переводим его в ID файла перед отправкой
                     if (/^[a-zA-Z0-9_-]{10,}$/.test(fileId) && !fileId.startsWith('CAAC') && !fileId.startsWith('AgAD')) {
                         try {
                             const customEmojis = await bot.getCustomEmojiStickers([fileId]);
@@ -474,21 +474,17 @@ async function executeToolCall(toolCall, chatId, messageId, userName, userId, ca
     }
 }
 
-// ИСПРАВЛЕНИЕ: Полностью тихий перехват ошибок DOCUMENT_INVALID без спама в логи
 async function safeSendMessage(chatId, text, replyId) {
     if (!text) return;
     const safeText = text.length > 4000 ? text.substring(0, 4000) + '... [Текст обрезан]' : text;
     try {
         await bot.sendMessage(chatId, safeText, { reply_to_message_id: replyId, parse_mode: 'HTML' });
     } catch (error) {
-        // Ловим любые ошибки парсинга HTML и битые теги
         if (error.message.includes('parse entities') || error.message.includes('HTML') || error.message.includes('DOCUMENT_INVALID') || error.message.includes('can\'t parse')) {
-            // Вычищаем все кастомные эмодзи и HTML
             const plainText = safeText.replace(/<tg-emoji[^>]*>(.*?)<\/tg-emoji>/g, '$1').replace(/<[^>]*>/g, '');
             try {
                 await bot.sendMessage(chatId, plainText, { reply_to_message_id: replyId });
             } catch (e2) {
-                // Пишем в лог только если даже запасной план провалился
                 console.error('[FALLBACK SEND ERROR]:', e2.message);
             }
         } else {
