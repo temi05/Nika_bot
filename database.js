@@ -4,17 +4,14 @@ const userCache = {}; // { chatId_userId: { data: userObj, expires: timestamp } 
 const USER_CACHE_TTL = 300000; // 5 минут
 const badWordsCache = {}; // { chatId: { words: [], expires: timestamp } }
 const BAD_WORDS_CACHE_TTL = 600000; // 10 минут
-
 const chatSettingsCache = {}; // { chatId: { settings: {}, expires: timestamp } }
 const CHAT_SETTINGS_CACHE_TTL = 300000; // 5 минут
 
-// Хранилища для очистки
 const messageAuthors = {};
 const reactionCooldowns = {};
 const commandCooldowns = {};
 const pendingVerifications = {};
 
-// Функция транслитерации для поиска (Ника -> Nika)
 function transliterate(text) {
     const map = {
         'а': 'a', 'б': 'b', 'в': 'v', 'г': 'g', 'д': 'd', 'е': 'e', 'ё': 'yo', 'ж': 'zh',
@@ -69,7 +66,6 @@ async function getUser(chatId, userId, userInfo = {}) {
 }
 
 async function updateUser(id, updates) {
-    console.log(`[DB UPDATE] User ID ${id}: ${Object.keys(updates).join(', ')}`);
     const { data, error } = await supabase.from('users').update(updates).eq('id', id).select();
     if (error) {
         console.error('[DB ERROR] updateUser:', error.message);
@@ -83,9 +79,7 @@ async function updateUser(id, updates) {
 }
 
 async function getBadWords(chatId) {
-    if (badWordsCache[chatId] && Date.now() < badWordsCache[chatId].expires) {
-        return badWordsCache[chatId].words;
-    }
+    if (badWordsCache[chatId] && Date.now() < badWordsCache[chatId].expires) return badWordsCache[chatId].words;
     const { data, error } = await supabase.from('bad_words').select('word').eq('chat_id', chatId);
     if (error) return [];
     const words = data.map(item => item.word);
@@ -94,47 +88,22 @@ async function getBadWords(chatId) {
 }
 
 async function getChatSettings(chatId) {
-    if (chatSettingsCache[chatId] && Date.now() < chatSettingsCache[chatId].expires) {
-        return chatSettingsCache[chatId].settings;
-    }
-
-    let { data, error } = await supabase
-        .from('chats')
-        .select('*')
-        .eq('chat_id', chatId)
-        .maybeSingle();
-
-    if (error) {
-        console.error('[DB ERROR] getChatSettings:', error.message);
-        return { link_filter_enabled: true };
-    }
-
+    if (chatSettingsCache[chatId] && Date.now() < chatSettingsCache[chatId].expires) return chatSettingsCache[chatId].settings;
+    let { data, error } = await supabase.from('chats').select('*').eq('chat_id', chatId).maybeSingle();
+    if (error) return { link_filter_enabled: true };
     if (!data) {
-        const { data: newData, error: insertError } = await supabase
-            .from('chats')
-            .insert([{ chat_id: chatId, link_filter_enabled: true }])
-            .select()
-            .single();
+        const { data: newData, error: insertError } = await supabase.from('chats').insert([{ chat_id: chatId, link_filter_enabled: true }]).select().single();
         if (insertError) return { link_filter_enabled: true };
         data = newData;
     }
-
     chatSettingsCache[chatId] = { settings: data, expires: Date.now() + CHAT_SETTINGS_CACHE_TTL };
     return data;
 }
 
 async function updateChatSettings(chatId, updates) {
     await getChatSettings(chatId);
-    const { error } = await supabase
-        .from('chats')
-        .update({ ...updates, updated_at: new Date().toISOString() })
-        .eq('chat_id', chatId);
-
-    if (error) {
-        console.error('[DB ERROR] updateChatSettings:', error.message);
-        return false;
-    }
-
+    const { error } = await supabase.from('chats').update({ ...updates, updated_at: new Date().toISOString() }).eq('chat_id', chatId);
+    if (error) return false;
     delete chatSettingsCache[chatId];
     return true;
 }
@@ -142,14 +111,10 @@ async function updateChatSettings(chatId, updates) {
 function cleanupStores() {
     const now = Date.now();
     const oneDay = 24 * 60 * 60 * 1000;
-
     for (const chatId in messageAuthors) {
         const keys = Object.keys(messageAuthors[chatId]);
-        if (keys.length > 1000) {
-            keys.slice(0, keys.length - 1000).forEach(k => delete messageAuthors[chatId][k]);
-        }
+        if (keys.length > 1000) keys.slice(0, keys.length - 1000).forEach(k => delete messageAuthors[chatId][k]);
     }
-
     [reactionCooldowns, commandCooldowns, userCache, chatSettingsCache].forEach(store => {
         for (const key in store) {
             const time = store[key].expires || store[key];
@@ -159,10 +124,13 @@ function cleanupStores() {
 }
 setInterval(cleanupStores, 3600000);
 
+function getNextLevelXp(level) {
+    return 50 * level * level + 50 * level;
+}
+
 async function claimDailyBonus(chatId, userId) {
     const user = await getUser(chatId, userId);
     if (!user) return { success: false, message: 'Пользователь не найден' };
-
     const now = new Date();
     if (user.last_daily_claim) {
         const lastClaim = new Date(user.last_daily_claim);
@@ -174,45 +142,21 @@ async function claimDailyBonus(chatId, userId) {
             return { success: false, timeRemaining: { hours, minutes }, message: `⏳ Бонус будет доступен через ${hours} ч. ${minutes} мин.` };
         }
     }
-
     const bonusXp = Math.floor(Math.random() * 101) + 50;
     const isRepGained = Math.random() < 0.10;
-
     let newXp = (user.xp || 0) + bonusXp;
     let newLevel = user.level || 1;
     let nextXp = getNextLevelXp(newLevel);
     let levelUp = false;
-
     while (newXp >= nextXp) {
         newLevel++;
         nextXp = getNextLevelXp(newLevel);
         levelUp = true;
     }
-
-    const updates = {
-        xp: newXp,
-        level: newLevel,
-        last_daily_claim: now.toISOString()
-    };
-    if (isRepGained) {
-        updates.reputation = (user.reputation || 0) + 1;
-    }
-
+    const updates = { xp: newXp, level: newLevel, last_daily_claim: now.toISOString() };
+    if (isRepGained) updates.reputation = (user.reputation || 0) + 1;
     await updateUser(user.id, updates);
-
-    return {
-        success: true,
-        bonusXp,
-        isRepGained,
-        newXp,
-        newLevel,
-        levelUp,
-        newReputation: updates.reputation || user.reputation
-    };
-}
-
-function getNextLevelXp(level) {
-    return 50 * level * level + 50 * level;
+    return { success: true, bonusXp, isRepGained, newXp, newLevel, levelUp, newReputation: updates.reputation || user.reputation };
 }
 
 async function setBirthday(chatId, userId, birthday) {
@@ -233,17 +177,9 @@ async function setBioByUsernameOrName(chatId, queryName, bio) {
     if (!queryName) return null;
     let cleanName = queryName.replace('@', '').toLowerCase();
     const latinName = transliterate(cleanName);
-
-    const { data, error } = await supabase
-        .from('users')
-        .select('id, first_name')
-        .eq('chat_id', chatId)
-        .or(`username.ilike.%${cleanName}%,first_name.ilike.%${cleanName}%,username.ilike.%${latinName}%,first_name.ilike.%${latinName}%`)
-        .limit(1)
-        .maybeSingle();
-
+    const { data, error } = await supabase.from('users').select('id, first_name').eq('chat_id', chatId)
+        .or(`username.ilike.%${cleanName}%,first_name.ilike.%${cleanName}%,username.ilike.%${latinName}%,first_name.ilike.%${latinName}%`).limit(1).maybeSingle();
     if (!data || error) return null;
-
     await updateUser(data.id, { bio });
     return data.first_name;
 }
@@ -253,17 +189,9 @@ async function setNotesByUsernameOrName(chatId, queryName, notes) {
     let cleanName = queryName.replace('@', '').toLowerCase().trim();
     const stem = getStem(cleanName);
     const latinStem = transliterate(stem);
-
-    const { data, error } = await supabase
-        .from('users')
-        .select('id, first_name')
-        .eq('chat_id', chatId)
-        .or(`username.ilike.%${cleanName}%,first_name.ilike.%${cleanName}%,username.ilike.%${latinStem}%,first_name.ilike.%${latinStem}%`)
-        .limit(1)
-        .maybeSingle();
-
+    const { data, error } = await supabase.from('users').select('id, first_name').eq('chat_id', chatId)
+        .or(`username.ilike.%${cleanName}%,first_name.ilike.%${cleanName}%,username.ilike.%${latinStem}%,first_name.ilike.%${latinStem}%`).limit(1).maybeSingle();
     if (!data || error) return null;
-
     await updateUser(data.id, { ai_notes: notes });
     return data.first_name;
 }
@@ -272,55 +200,27 @@ async function setFirstNameByUsernameOrName(chatId, queryName, newName) {
     if (!queryName || !newName) return null;
     let cleanName = queryName.replace('@', '').toLowerCase().trim();
     const latinStem = transliterate(cleanName);
-
-    const { data, error } = await supabase
-        .from('users')
-        .select('id, first_name')
-        .eq('chat_id', chatId)
-        .or(`username.ilike.%${cleanName}%,first_name.ilike.%${cleanName}%,username.ilike.%${latinStem}%,first_name.ilike.%${latinStem}%`)
-        .limit(1)
-        .maybeSingle();
-
+    const { data, error } = await supabase.from('users').select('id, first_name').eq('chat_id', chatId)
+        .or(`username.ilike.%${cleanName}%,first_name.ilike.%${cleanName}%,username.ilike.%${latinStem}%,first_name.ilike.%${latinStem}%`).limit(1).maybeSingle();
     if (!data || error) return null;
-
     await updateUser(data.id, { first_name: newName });
     return data.first_name;
 }
 
 async function getChatStats(chatId) {
-    const { data: topUsers, error: topError } = await supabase
-        .from('users')
-        .select('first_name, username, level, xp, reputation')
-        .eq('chat_id', chatId)
-        .order('level', { ascending: false })
-        .order('xp', { ascending: false })
-        .limit(5);
-
-    const { count, error: countError } = await supabase
-        .from('users')
-        .select('*', { count: 'exact', head: true })
-        .eq('chat_id', chatId);
-
+    const { data: topUsers, error: topError } = await supabase.from('users').select('first_name, username, level, xp, reputation').eq('chat_id', chatId)
+        .order('level', { ascending: false }).order('xp', { ascending: false }).limit(5);
+    const { count, error: countError } = await supabase.from('users').select('*', { count: 'exact', head: true }).eq('chat_id', chatId);
     if (topError || countError) return null;
-
     return {
         totalUsers: count || 0,
-        topUsers: (topUsers || []).map((u, i) => ({
-            place: i + 1,
-            name: u.username ? `@${u.username}` : u.first_name,
-            level: u.level,
-            xp: u.xp,
-            cookies: u.reputation
-        }))
+        topUsers: (topUsers || []).map((u, i) => ({ place: i + 1, name: u.username ? `@${u.username}` : u.first_name, level: u.level, xp: u.xp, cookies: u.reputation }))
     };
 }
 
 function getStem(word) {
     if (!word || word.length < 3) return word;
-    return word.toLowerCase()
-        .replace(/[уаеяюиыо]$/i, '')
-        .replace(/(ов|ев|ий|ый|ые|ие|ах|ях|ом|ем)$/i, '')
-        .replace(/(s|es|ed|ing)$/i, '');
+    return word.toLowerCase().replace(/[уаеяюиыо]$/i, '').replace(/(ов|ев|ий|ый|ые|ие|ах|ях|ом|ем)$/i, '').replace(/(s|es|ed|ing)$/i, '');
 }
 
 async function searchUserByName(chatId, query) {
@@ -328,88 +228,42 @@ async function searchUserByName(chatId, query) {
     const cleanQuery = query.replace('@', '').toLowerCase().trim();
     const stem = getStem(cleanQuery);
     const latinStem = transliterate(stem);
-
-    const { data, error } = await supabase
-        .from('users')
-        .select('user_id, first_name, username, level, xp, reputation, bio, ai_notes, warns, birthday')
-        .eq('chat_id', chatId)
-        .or(`username.ilike.%${stem}%,first_name.ilike.%${stem}%,username.ilike.%${latinStem}%,first_name.ilike.%${latinStem}%,ai_notes.ilike.%${stem}%,bio.ilike.%${stem}%`)
-        .limit(5);
-
+    const { data, error } = await supabase.from('users').select('user_id, first_name, username, level, xp, reputation, bio, ai_notes, warns, birthday')
+        .eq('chat_id', chatId).or(`username.ilike.%${stem}%,first_name.ilike.%${stem}%,username.ilike.%${latinStem}%,first_name.ilike.%${latinStem}%,ai_notes.ilike.%${stem}%,bio.ilike.%${stem}%`).limit(5);
     if (error || !data || data.length === 0) return null;
-    return data.map(u => ({
-        user_id: u.user_id,
-        name: u.username ? `@${u.username}` : u.first_name,
-        level: u.level,
-        xp: u.xp,
-        cookies: u.reputation,
-        bio: u.bio || 'Нет био',
-        warns: u.warns,
-        birthday: u.birthday || 'Не указан'
-    }));
+    return data.map(u => ({ user_id: u.user_id, name: u.username ? `@${u.username}` : u.first_name, level: u.level, xp: u.xp, cookies: u.reputation, bio: u.bio || 'Нет био', warns: u.warns, birthday: u.birthday || 'Не указан' }));
 }
 
 async function warnUserById(chatId, targetName) {
     if (!targetName) return null;
     const cleanName = targetName.replace('@', '').toLowerCase();
     const latinName = transliterate(cleanName);
-
-    const { data, error } = await supabase
-        .from('users')
-        .select('id, first_name, username, warns, user_id')
-        .eq('chat_id', chatId)
-        .or(`username.ilike.%${cleanName}%,first_name.ilike.%${cleanName}%,username.ilike.%${latinName}%,first_name.ilike.%${latinName}%`)
-        .limit(1)
-        .maybeSingle();
-
+    const { data, error } = await supabase.from('users').select('id, first_name, username, warns, user_id').eq('chat_id', chatId)
+        .or(`username.ilike.%${cleanName}%,first_name.ilike.%${cleanName}%,username.ilike.%${latinName}%,first_name.ilike.%${latinName}%`).limit(1).maybeSingle();
     if (!data || error) return null;
-
     const newWarns = (data.warns || 0) + 1;
     await updateUser(data.id, { warns: newWarns });
-
-    return {
-        name: data.username ? `@${data.username}` : data.first_name,
-        userId: data.user_id,
-        newWarns: newWarns,
-        shouldMute: newWarns >= 3
-    };
+    return { name: data.username ? `@${data.username}` : data.first_name, userId: data.user_id, newWarns: newWarns, shouldMute: newWarns >= 3 };
 }
 
 async function getUpcomingBirthdays(chatId) {
-    const { data, error } = await supabase
-        .from('users')
-        .select('first_name, username, birthday')
-        .eq('chat_id', chatId)
-        .not('birthday', 'is', null)
-        .neq('birthday', '');
-
+    const { data, error } = await supabase.from('users').select('first_name, username, birthday').eq('chat_id', chatId).not('birthday', 'is', null).neq('birthday', '');
     if (error || !data) return [];
-
     const today = new Date();
     const upcoming = [];
-
     for (const u of data) {
         if (!u.birthday) continue;
         const parts = u.birthday.split('.');
         if (parts.length < 2) continue;
-
         const day = parseInt(parts[0]);
         const month = parseInt(parts[1]) - 1;
-
         const bdayThisYear = new Date(today.getFullYear(), month, day);
         if (bdayThisYear < today) bdayThisYear.setFullYear(today.getFullYear() + 1);
-
         const diffDays = Math.ceil((bdayThisYear - today) / (1000 * 60 * 60 * 24));
-
         if (diffDays <= 7) {
-            upcoming.push({
-                name: u.username ? `@${u.username}` : u.first_name,
-                birthday: u.birthday,
-                daysUntil: diffDays === 0 ? 'Сегодня!' : `через ${diffDays} дн.`
-            });
+            upcoming.push({ name: u.username ? `@${u.username}` : u.first_name, birthday: u.birthday, daysUntil: diffDays === 0 ? 'Сегодня!' : `через ${diffDays} дн.` });
         }
     }
-
     return upcoming.sort((a, b) => {
         const dA = a.daysUntil === 'Сегодня!' ? 0 : parseInt(a.daysUntil);
         const dB = b.daysUntil === 'Сегодня!' ? 0 : parseInt(b.daysUntil);
@@ -422,19 +276,9 @@ async function findSingleUser(chatId, query) {
     const cleanQuery = query.replace('@', '').toLowerCase().trim();
     const stem = (cleanQuery.length > 3) ? getStem(cleanQuery) : cleanQuery;
     const latinStem = transliterate(stem);
-
-    const { data: user, error } = await supabase
-        .from('users')
-        .select('*')
-        .eq('chat_id', chatId)
-        .or(`username.ilike.%${cleanQuery}%,first_name.ilike.%${cleanQuery}%,username.ilike.%${latinStem}%,first_name.ilike.%${latinStem}%`)
-        .limit(1)
-        .maybeSingle();
-
-    if (error) {
-        console.error('[DB ERROR] findSingleUser:', error.message || error);
-        return null;
-    }
+    const { data: user, error } = await supabase.from('users').select('*').eq('chat_id', chatId)
+        .or(`username.ilike.%${cleanQuery}%,first_name.ilike.%${cleanQuery}%,username.ilike.%${latinStem}%,first_name.ilike.%${latinStem}%`).limit(1).maybeSingle();
+    if (error) return null;
     return user;
 }
 
@@ -443,13 +287,7 @@ async function getBirthdaysToday(chatId) {
     const day = String(today.getDate()).padStart(2, '0');
     const month = String(today.getMonth() + 1).padStart(2, '0');
     const dateStr = `${day}.${month}`;
-
-    const { data, error } = await supabase
-        .from('users')
-        .select('*')
-        .eq('chat_id', chatId)
-        .ilike('birthday', `${dateStr}%`);
-
+    const { data, error } = await supabase.from('users').select('*').eq('chat_id', chatId).ilike('birthday', `${dateStr}%`);
     if (error) return [];
     return data;
 }
@@ -457,148 +295,90 @@ async function getBirthdaysToday(chatId) {
 const { ANONYMOUS_ADMIN_ID } = require('./config');
 
 async function getChatMemory(chatId) {
-    const { data } = await supabase
-        .from('chats')
-        .select('ai_memory')
-        .eq('chat_id', chatId)
-        .single();
+    const { data } = await supabase.from('chats').select('ai_memory').eq('chat_id', chatId).single();
     return data?.ai_memory || '';
 }
 
 async function updateChatMemory(chatId, memory) {
-    await supabase
-        .from('chats')
-        .update({ ai_memory: memory })
-        .eq('chat_id', chatId);
+    await supabase.from('chats').update({ ai_memory: memory }).eq('chat_id', chatId);
 }
 
 async function insertKnowledge(chatId, factText, embedding) {
-    const { error } = await supabase
-        .from('bot_knowledge')
-        .insert([{ chat_id: chatId, fact: factText, embedding: embedding }]);
+    const { error } = await supabase.from('bot_knowledge').insert([{ chat_id: chatId, fact: factText, embedding: embedding }]);
     if (error) console.error('[DB ERROR] insertKnowledge:', error.message);
 }
 
 async function searchKnowledge(chatId, queryEmbedding, limit = 3, threshold = 0.3) {
-    const { data, error } = await supabase.rpc('match_knowledge', {
-        query_embedding: queryEmbedding,
-        match_threshold: threshold,
-        match_count: limit,
-        p_chat_id: chatId
-    });
-    if (error) {
-        console.error('[DB ERROR] searchKnowledge:', error.message);
-        return [];
-    }
+    const { data, error } = await supabase.rpc('match_knowledge', { query_embedding: queryEmbedding, match_threshold: threshold, match_count: limit, p_chat_id: chatId });
+    if (error) return [];
     return data || [];
 }
 
 async function searchKnowledgeByText(chatId, query, limit = 5) {
-    const { data, error } = await supabase
-        .from('bot_knowledge')
-        .select('*')
-        .eq('chat_id', chatId)
-        .ilike('fact', `%${query}%`)
-        .order('id', { ascending: false })
-        .limit(limit);
-
-    if (error) {
-        console.error('[DB ERROR] searchKnowledgeByText:', error.message);
-        return [];
-    }
+    const { data, error } = await supabase.from('bot_knowledge').select('*').eq('chat_id', chatId).ilike('fact', `%${query}%`).order('id', { ascending: false }).limit(limit);
+    if (error) return [];
     return data || [];
 }
 
 async function getRecentKnowledge(chatId, userName = "", limit = 10) {
-    let query = supabase
-        .from('bot_knowledge')
-        .select('*')
-        .eq('chat_id', chatId);
-
-    if (userName) {
-        query = query.ilike('fact', `${userName}:%`);
-    }
-
-    const { data, error } = await query
-        .order('id', { ascending: false })
-        .limit(limit);
-
-    if (error) {
-        console.error('[DB ERROR] getRecentKnowledge:', error.message);
-        return [];
-    }
+    let query = supabase.from('bot_knowledge').select('*').eq('chat_id', chatId);
+    if (userName) query = query.ilike('fact', `${userName}:%`);
+    const { data, error } = await query.order('id', { ascending: false }).limit(limit);
+    if (error) return [];
     return data || [];
 }
 
 async function checkFactExists(chatId, factText) {
-    const { data, error } = await supabase
-        .from('bot_knowledge')
-        .select('id')
-        .eq('chat_id', chatId)
-        .eq('fact', factText)
-        .limit(1)
-        .maybeSingle();
+    const { data, error } = await supabase.from('bot_knowledge').select('id').eq('chat_id', chatId).eq('fact', factText).limit(1).maybeSingle();
     if (error) return false;
     return !!data;
 }
 
 async function deleteKnowledge(chatId, knowledgeId) {
-    const { error } = await supabase
-        .from('bot_knowledge')
-        .delete()
-        .eq('chat_id', chatId)
-        .eq('id', knowledgeId);
-
-    if (error) {
-        console.error('[DB ERROR] deleteKnowledge:', error.message);
-        return false;
-    }
+    const { error } = await supabase.from('bot_knowledge').delete().eq('chat_id', chatId).eq('id', knowledgeId);
+    if (error) return false;
     return true;
 }
 
-// Строго 5 аргументов (чтобы БД не выдавала ошибку!)
 async function insertReminder(chatId, userId, userName, text, triggerTime) {
     const { data, error } = await supabase.from('reminders').insert([{
-        chat_id: chatId,
-        user_id: userId,
-        user_name: userName,
-        text: text,
-        trigger_time: triggerTime,
-        is_sent: false
+        chat_id: chatId, user_id: userId, user_name: userName, text: text, trigger_time: triggerTime, is_sent: false
     }]).select().single();
-
-    if (error) {
-        console.error('[DB ERROR] insertReminder:', error.message);
-        return null;
-    }
+    if (error) return null;
     return data;
 }
 
 async function getDueReminders() {
     const now = new Date().toISOString();
-    const { data, error } = await supabase
-        .from('reminders')
-        .select('*')
-        .eq('is_sent', false)
-        .lte('trigger_time', now);
-
-    if (error) {
-        console.error('[DB ERROR] getDueReminders:', error.message);
-        return [];
-    }
+    const { data, error } = await supabase.from('reminders').select('*').eq('is_sent', false).lte('trigger_time', now);
+    if (error) return [];
     return data;
 }
 
 async function markReminderAsSent(id) {
-    const { error } = await supabase
-        .from('reminders')
-        .update({ is_sent: true })
-        .eq('id', id);
+    const { error } = await supabase.from('reminders').update({ is_sent: true }).eq('id', id);
     if (error) console.error('[DB ERROR] markReminderAsSent:', error.message);
 }
 
-module.exports = {
+// НОВАЯ ФУНКЦИЯ: Достает ВСЕ факты о человеке напрямую из базы (без семантики)
+async function getAllUserFacts(chatId, userName) {
+    if (!userName) return [];
+    const { data, error } = await supabase
+        .from('bot_knowledge')
+        .select('fact')
+        .eq('chat_id', chatId)
+        .ilike('fact', `%${userName}%`)
+        .order('id', { ascending: false })
+        .limit(15);
 
+    if (error) {
+        console.error('[DB ERROR] getAllUserFacts:', error.message);
+        return [];
+    }
+    return data.map(d => d.fact);
+}
+
+module.exports = {
     getUser, updateUser, getBadWords, getNextLevelXp, claimDailyBonus,
     getChatSettings, updateChatSettings,
     setBirthday, setBio, getBirthdaysToday, setBioByUsernameOrName, setNotesByUsernameOrName, setFirstNameByUsernameOrName,
@@ -606,7 +386,7 @@ module.exports = {
     checkFactExists, deleteKnowledge, transliterate,
     insertReminder, getDueReminders, markReminderAsSent,
     getChatStats, searchUserByName, warnUserById, getUpcomingBirthdays,
-    findSingleUser,
+    findSingleUser, getAllUserFacts, // <-- Добавили новую функцию в экспорт
     messageAuthors, reactionCooldowns, commandCooldowns, userCache,
     supabase, ANONYMOUS_ADMIN_ID, pendingVerifications
 };

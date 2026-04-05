@@ -4,20 +4,18 @@ const {
     getUser, updateUser, insertReminder, findSingleUser,
     setBioByUsernameOrName, setNotesByUsernameOrName, setFirstNameByUsernameOrName,
     getChatStats, searchUserByName, warnUserById, getUpcomingBirthdays,
-    getDueReminders, markReminderAsSent
+    getDueReminders, markReminderAsSent, getAllUserFacts
 } = require('../database');
 const { extractAndSaveFacts, getRelevantFacts, forgetFact } = require('../vectorMemory');
 const { ANONYMOUS_ADMIN_ID } = require('../config');
 const fs = require('fs');
 const path = require('path');
 
-// Безопасное экранирование для HTML-сообщений
 function safeHTML(str) {
     if (!str) return '';
     return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
-// Загружаем премиум-эмодзи один раз при старте
 let premiumEmojiList = [];
 try {
     const stickersData = JSON.parse(fs.readFileSync(path.join(__dirname, '../data/stickers.json'), 'utf8'));
@@ -27,7 +25,6 @@ try {
     console.error('[SYSTEM ERROR] Ошибка загрузки stickers.json:', e.message);
 }
 
-// Загрузка локальных стикеров
 let nikaStickers = [];
 try {
     const stickersPath = path.join(__dirname, '..', 'data', 'stickers.json');
@@ -81,8 +78,8 @@ const aiTools = [
         type: "function",
         function: {
             name: "get_user_profile",
-            description: "ИСПОЛЬЗУЙ ЕСЛИ: Вопросы вида 'какой у меня лвл?', 'покажи профиль/стату', проверка опыта (XP) и варнов.",
-            parameters: { type: "object", properties: { query: { type: "string" } }, required: ["query"] }
+            description: "ИСПОЛЬЗУЙ ЕСЛИ: Просят показать профиль, стату, левел, био. ВАЖНО: Если юзер спрашивает ПРО СЕБЯ (мой профиль, какая у меня стата), передай в target_name строго слово 'я'.",
+            parameters: { type: "object", properties: { target_name: { type: "string" } }, required: ["target_name"] }
         }
     },
     {
@@ -191,18 +188,17 @@ const SYSTEM_PROMPT = `Ты — НейроНика. Самостоятельна
 [ПАМЯТЬ И СТИКЕРЫ]
 - Сверхпамять: Блок [СИСТЕМНЫЕ ДАННЫЕ]. Используй как личные воспоминания. Ошиблась — извинись и вызови forget_knowledge.
 - Кастомные эмодзи: Используй в КАЖДОМ сообщении формат [EMO:ID:ЭМОДЗИ] или просто [EMO:RANDOM].
-    Любимые: Привет [EMO:5467903803472760665:🦊], Смех [EMO:5350545136369568721:😂], Дерзость [EMO:5258457511375175053:😈], Шок [EMO:5469649394145971855:😲].
+
+[АБСОЛЮТНЫЙ ПРИОРИТЕТ ФУНКЦИЙ]
+КРИТИЧЕСКОЕ ПРАВИЛО: Если просьба юзера совпадает с любым твоим инструментом (напомнить, показать профиль, создать опрос) — ты ОБЯЗАНА сначала вызвать функцию (tool_call)! 
+КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО просто отвечать текстом "Я запустила", "Вот твой профиль" БЕЗ РЕАЛЬНОГО ВЫЗОВА ФУНКЦИИ. Сначала функция -> потом ехидный комментарий.
 
 [ПРАВИЛА ИНТЕРАКТИВА И ИНСТРУМЕНТЫ]
 - Правило "Живой реакции": При использовании инструмента ОБЯЗАТЕЛЬНО прокомментируй это действие в тексте (ехидно или мило). Не пиши "Готово".
 - ИНСТРУМЕНТЫ (вызывай смело по ситуации):
   1. МОДЕРАЦИЯ (warn_user, mute_user, unmute_user).
   2. ПАМЯТЬ (update_user_notes, get_user_profile, find_users_by_criteria, forget_knowledge).
-  3. ИНТЕРАКТИВ (give_cookies, create_poll, set_reminder, react_to_message, send_sticker).
-  
-  [АБСОЛЮТНЫЙ ПРИОРИТЕТ ФУНКЦИЙ]
-КРИТИЧЕСКОЕ ПРАВИЛО: Если просьба юзера совпадает с любым твоим инструментом (напомнить, создать опрос, сменить био, дать печеньки, кинуть стикер) — ты ОБЯЗАНА сначала вызвать функцию (tool_call)!
-КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО просто отвечать текстом "Я запустила опрос", "Записала", "Лови стикер" БЕЗ РЕАЛЬНОГО ВЫЗОВА ФУНКЦИИ. Имитация вызова — это провал. Сначала функция -> потом ехидный комментарий.`;
+  3. ИНТЕРАКТИВ (give_cookies, create_poll, set_reminder, react_to_message, send_sticker).`;
 
 function trimHistory(history, maxLen = 20) {
     if (history.length <= maxLen) return history;
@@ -268,26 +264,31 @@ async function executeToolCall(toolCall, chatId, messageId, userName, userId, ca
     try {
         switch (fn) {
             case 'get_user_profile': {
-                let u = await resolveUser(chatId, args.query);
-                if (!u && (args.query.toLowerCase() === 'я' || args.query.toLowerCase() === 'me' || userName.toLowerCase().includes(args.query.toLowerCase()))) {
-                    u = await getUser(chatId, userId);
+                let u;
+                // ЖЕСТКАЯ ПРОВЕРКА: Спрашивает ли человек (или канал) про самого себя
+                const isSelf = args.target_name.toLowerCase() === 'я' || args.target_name.toLowerCase() === 'me' || args.target_name.toLowerCase() === 'мой';
+
+                if (isSelf) {
+                    u = await getUser(chatId, userId); // Берем ID автора сообщения, даже если это -100... канал
+                } else {
+                    u = await resolveUser(chatId, args.target_name);
                 }
-                if (!u) return "Человек не найден.";
 
-                // --- НОВАЯ ЛОГИКА: ПОИСК В ВЕКТОРНОЙ ПАМЯТИ ---
-                // Мы принудительно ищем все факты, связанные с этим именем в bot_knowledge
-                const { getRelevantFacts } = require('./vectorMemory');
-                const extraFacts = await getRelevantFacts(chatId, u.first_name, u.first_name);
+                if (!u) return `Не могу найти человека с именем "${args.target_name}". Возможно, он ничего не писал в чат.`;
 
-                // Чистим результат от системных пометок [semantic] и т.д. для красоты
-                const cleanExtra = extraFacts ? extraFacts.replace(/\[.*?\]/g, '').trim() : "Дополнительных фактов не найдено.";
+                // Ищем ВСЕ факты в векторной памяти именно по имени найденного юзера
+                const extraFacts = await getAllUserFacts(chatId, u.first_name);
+
+                let extraFactsStr = extraFacts.length > 0
+                    ? extraFacts.map(f => `- ${f.replace(/\[.*?\]/g, '').trim()}`).join('\n')
+                    : 'Пока ничего интересного не запомнила.';
 
                 return `Профиль ${u.first_name}:
-                📊 XP: ${u.xp}, Лвл: ${u.level}
-                📝 Био: ${u.bio || 'Пока пусто'}
-                📌 Из досье: ${u.ai_notes || 'Нет записей'}
-                🧠 Вспомнила из чата:
-                ${cleanExtra}`;
+📊 XP: ${u.xp}, Лвл: ${u.level}, Варны: ${u.warns || 0}/3
+📝 Био: ${u.bio || 'Пусто'}
+📌 Досье (ручное): ${u.ai_notes || 'Нет записей'}
+🧠 Векторная память (что я помню из чата):
+${extraFactsStr}`;
             }
             case 'find_users_by_criteria': {
                 const results = await searchUserByName(chatId, args.search_query);
@@ -393,7 +394,6 @@ async function executeToolCall(toolCall, chatId, messageId, userName, userId, ca
                 return `Факт об ${u.first_name} добавлен в досье.`;
             }
             case 'create_poll': {
-                // Предотвращение крашей при плохом JSON от ИИ
                 let opts = args.options;
                 if (typeof opts === 'string') {
                     try { opts = JSON.parse(opts); } catch (e) { opts = opts.split(',').map(s => s.trim()); }
@@ -419,7 +419,6 @@ async function executeToolCall(toolCall, chatId, messageId, userName, userId, ca
                 const text = args.text || "Напоминание!";
                 const triggerTime = new Date(Date.now() + delay * 60 * 1000).toISOString();
 
-                // Если есть юзернейм - пингуем по нему. Если нет - берем имя.
                 const nameToSave = userHandle ? `@${userHandle}` : userName;
 
                 const ok = await insertReminder(chatId, userId, nameToSave, text, triggerTime);
@@ -457,10 +456,6 @@ function startReminderWorker() {
             const due = await getDueReminders();
             if (!due || due.length === 0) return;
             for (const rem of due) {
-                // ИСПРАВЛЕНИЕ ПИНГА: 
-                // Если юзернейм начинается с @ -> это валидный пинг (например @Kitten99)
-                // Если ID > 0 -> это живой человек без юзернейма, делаем HTML-пинг
-                // Если ID < 0 -> это КАНАЛ или АНОНИМ, HTML пинг на отрицательный ID сломает Telegram, поэтому просто пишем имя жирным.
                 let mention;
                 if (rem.user_name && rem.user_name.startsWith('@')) {
                     mention = rem.user_name;
@@ -470,7 +465,6 @@ function startReminderWorker() {
                     mention = `<b>${safeHTML(rem.user_name) || 'Аноним'}</b>`;
                 }
 
-                // ИСПРАВЛЕНИЕ ТЕКСТА: экранируем текст напоминания, чтобы < и > не сломали parse_mode: 'HTML'
                 const safeText = safeHTML(rem.text);
                 const msg = `🔔 ${mention}, ты просил напомнить: <b>${safeText}</b>`;
 
@@ -661,6 +655,7 @@ async function processAI(msg, extra) {
         await bot.sendChatAction(chatId, 'typing');
         let completion;
         try {
+            // ТЕМПЕРАТУРА 0.1 ДЛЯ ТУЛОВ - ЖЕСТКАЯ ЛОГИКА
             completion = await openai.chat.completions.create({
                 model: AI_MODEL,
                 messages: [{ role: 'system', content: finalPrompt }, ...sanitizeHistory(chatHistory[chatId])],
@@ -695,6 +690,7 @@ async function processAI(msg, extra) {
                 }
             }
 
+            // ТЕМПЕРАТУРА 0.8 ДЛЯ ТЕКСТА - ХАРАКТЕР И ДЕРЗОСТЬ
             const second = await openai.chat.completions.create({
                 model: AI_MODEL,
                 messages: [{ role: 'system', content: finalPrompt }, ...sanitizeHistory(chatHistory[chatId])],
