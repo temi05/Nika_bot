@@ -11,6 +11,12 @@ const { ANONYMOUS_ADMIN_ID } = require('../config');
 const fs = require('fs');
 const path = require('path');
 
+// Безопасное экранирование для HTML-сообщений
+function safeHTML(str) {
+    if (!str) return '';
+    return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
 // Загружаем премиум-эмодзи один раз при старте
 let premiumEmojiList = [];
 try {
@@ -369,18 +375,13 @@ async function executeToolCall(toolCall, chatId, messageId, userName, userId, ca
                 return `Факт об ${u.first_name} добавлен в досье.`;
             }
             case 'create_poll': {
-                // ПРЕДОХРАНИТЕЛЬ 1: Иногда ИИ отдает строку вместо массива
+                // Предотвращение крашей при плохом JSON от ИИ
                 let opts = args.options;
                 if (typeof opts === 'string') {
                     try { opts = JSON.parse(opts); } catch (e) { opts = opts.split(',').map(s => s.trim()); }
                 }
+                if (!Array.isArray(opts) || opts.length < 2) return "Мало данных: нужно минимум 2 варианта ответа.";
 
-                // ПРЕДОХРАНИТЕЛЬ 2: Проверка минимума
-                if (!Array.isArray(opts) || opts.length < 2) {
-                    return "Ошибка: нужно минимум 2 варианта ответа (массив).";
-                }
-
-                // ПРЕДОХРАНИТЕЛЬ 3: Лимиты Telegram API
                 const safeQuestion = String(args.question).substring(0, 295);
                 const safeOptions = opts.slice(0, 10).map(opt => String(opt).substring(0, 95));
 
@@ -400,10 +401,9 @@ async function executeToolCall(toolCall, chatId, messageId, userName, userId, ca
                 const text = args.text || "Напоминание!";
                 const triggerTime = new Date(Date.now() + delay * 60 * 1000).toISOString();
 
-                // ХИТРЫЙ ТРЮК: Записываем @username прямо в имя, чтобы не ломать структуру БД
+                // Если есть юзернейм - пингуем по нему. Если нет - берем имя.
                 const nameToSave = userHandle ? `@${userHandle}` : userName;
 
-                // Передаем ровно 5 аргументов, как и ждет database.js
                 const ok = await insertReminder(chatId, userId, nameToSave, text, triggerTime);
                 return ok ? `Записала! Напомню через ${delay} мин.` : "Ошибка базы данных.";
             }
@@ -439,12 +439,23 @@ function startReminderWorker() {
             const due = await getDueReminders();
             if (!due || due.length === 0) return;
             for (const rem of due) {
-                // Если мы сохранили с @, это юзернейм, иначе делаем кликабельную HTML ссылку
-                const mention = (rem.user_name && rem.user_name.startsWith('@'))
-                    ? rem.user_name
-                    : `<a href="tg://user?id=${rem.user_id}">${rem.user_name || 'Слушай'}</a>`;
+                // ИСПРАВЛЕНИЕ ПИНГА: 
+                // Если юзернейм начинается с @ -> это валидный пинг (например @Kitten99)
+                // Если ID > 0 -> это живой человек без юзернейма, делаем HTML-пинг
+                // Если ID < 0 -> это КАНАЛ или АНОНИМ, HTML пинг на отрицательный ID сломает Telegram, поэтому просто пишем имя жирным.
+                let mention;
+                if (rem.user_name && rem.user_name.startsWith('@')) {
+                    mention = rem.user_name;
+                } else if (rem.user_id > 0) {
+                    mention = `<a href="tg://user?id=${rem.user_id}">${safeHTML(rem.user_name) || 'Слушай'}</a>`;
+                } else {
+                    mention = `<b>${safeHTML(rem.user_name) || 'Аноним'}</b>`;
+                }
 
-                const msg = `🔔 ${mention}, ты просил напомнить: <b>${rem.text}</b>`;
+                // ИСПРАВЛЕНИЕ ТЕКСТА: экранируем текст напоминания, чтобы < и > не сломали parse_mode: 'HTML'
+                const safeText = safeHTML(rem.text);
+                const msg = `🔔 ${mention}, ты просил напомнить: <b>${safeText}</b>`;
+
                 try {
                     await bot.sendMessage(rem.chat_id, msg, { parse_mode: 'HTML' });
                     await markReminderAsSent(rem.id);
@@ -657,7 +668,6 @@ async function processAI(msg, extra) {
             for (const tc of calls) {
                 const res = await executeToolCall(tc, chatId, msg.message_id, userName, userId, callerIsAdmin, userHandle);
 
-                // Правильное сохранение в историю (role: tool)
                 if (resp.tool_calls) {
                     chatHistory[chatId].push({ role: 'tool', tool_call_id: tc.id, content: String(res) });
                 } else {

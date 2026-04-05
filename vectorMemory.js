@@ -85,19 +85,21 @@ ${historyText};`
 
         let result;
         try {
-            // v4.1: Более надежное извлечение JSON (поддержка как {} так и [])
-            const jsonMatch = rawContent.match(/(\{[\s\S]*\}|\[[\s\S]*\])/);
+            // ИСПРАВЛЕНИЕ JSON (Очистка от маркдауна и спецсимволов перед парсингом)
+            let cleanContent = rawContent.replace(/```json/gi, '').replace(/```/g, '').trim();
+            const jsonMatch = cleanContent.match(/(\{[\s\S]*\}|\[[\s\S]*\])/);
+
             if (jsonMatch) {
                 result = JSON.parse(jsonMatch[0]);
             } else {
-                result = JSON.parse(rawContent);
+                result = JSON.parse(cleanContent);
             }
         } catch (parseError) {
             console.log("[MEMORY EXTRACTOR] Ошибка парсинга JSON: " + parseError.message);
             return;
         }
 
-        // v4.1: Адаптивный поиск фактов в результате
+        // Адаптивный поиск фактов в результате
         let facts = [];
         if (Array.isArray(result)) {
             facts = result.map(f => typeof f === 'object' ? f.fact : f);
