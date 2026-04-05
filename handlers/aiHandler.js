@@ -68,7 +68,7 @@ const aiTools = [
         type: "function",
         function: {
             name: "update_user_notes",
-            description: "ИСПОЛЬЗУЙ ЕСЛИ: Юзер просит 'запомни, что я...' или называет свои базовые данные (ДР, город). Записывает важные факты в досье.",
+            description: "ИСПОЛЬЗУЙ ЕСЛИ: Юзер просит 'запомни, что я...' или называет свои базовые данные (ДР, город). Записывает важные факты в досье. Бытовуху игнорируй!",
             parameters: {
                 type: "object",
                 properties: { target_name: { type: "string" }, new_note_item: { type: "string" }, replace_all: { type: "boolean" } },
@@ -80,7 +80,7 @@ const aiTools = [
         type: "function",
         function: {
             name: "get_user_profile",
-            description: "ИСПОЛЬЗУЙ ЕСЛИ: Просят показать профиль, стату, левел, био. ВАЖНО: Если юзер спрашивает ПРО СЕБЯ, передай в target_name слово 'я'.",
+            description: "ИСПОЛЬЗУЙ ЕСЛИ: Просят показать профиль, стату, левел, био. ВАЖНО: Если юзер спрашивает ПРО СЕБЯ, передай в target_name слово 'я'. Просто коротко и дерзко прокомментируй запрос, сами данные я прикреплю автоматически.",
             parameters: { type: "object", properties: { target_name: { type: "string" } }, required: ["target_name"] }
         }
     },
@@ -88,7 +88,7 @@ const aiTools = [
         type: "function",
         function: {
             name: "find_users_by_criteria",
-            description: "ИСПОЛЬЗУЙ ЕСЛИ: Вопросы вида 'кто тут любит X?', 'есть кто из Y?'.",
+            description: "ИСПОЛЬЗУЙ ЕСЛИ: Вопросы вида 'кто тут любит X?', 'есть кто из Y?'. Просто прокомментируй запрос, сам список я выведу автоматически.",
             parameters: { type: "object", properties: { search_query: { type: "string" } }, required: ["search_query"] }
         }
     },
@@ -96,7 +96,7 @@ const aiTools = [
         type: "function",
         function: {
             name: "warn_user",
-            description: "ИСПОЛЬЗУЙ ЕСЛИ: Юзер слегка нарушил правила (спам, легкая грубость). Только для админов.",
+            description: "ИСПОЛЬЗУЙ ЕСЛИ: Юзер слегка нарушил правила (спам, легкая грубость). Выдает предупреждение. Только для админов.",
             parameters: { type: "object", properties: { target_name: { type: "string" }, reason: { type: "string" } }, required: ["target_name", "reason"] }
         }
     },
@@ -104,7 +104,7 @@ const aiTools = [
         type: "function",
         function: {
             name: "mute_user",
-            description: "ИСПОЛЬЗУЙ ЕСЛИ: Жесткая агрессия. Блокирует чат от 15 мин до 24 ч. Только для админов.",
+            description: "ИСПОЛЬЗУЙ ЕСЛИ: Жесткая агрессия или грубые оскорбления. Блокирует чат на срок от 15 мин до 24 ч. Только для админов.",
             parameters: { type: "object", properties: { target_name: { type: "string" }, duration_minutes: { type: "number" }, reason: { type: "string" } }, required: ["target_name", "reason"] }
         }
     },
@@ -112,7 +112,7 @@ const aiTools = [
         type: "function",
         function: {
             name: "unmute_user",
-            description: "ИСПОЛЬЗУЙ ЕСЛИ: Админ просит размутить пользователя.",
+            description: "ИСПОЛЬЗУЙ ЕСЛИ: Админ просит размутить (снять мут) пользователя.",
             parameters: { type: "object", properties: { target_name: { type: "string" } }, required: ["target_name"] }
         }
     },
@@ -120,7 +120,7 @@ const aiTools = [
         type: "function",
         function: {
             name: "give_cookies",
-            description: "ИСПОЛЬЗУЙ ЕСЛИ: Хочешь наградить юзера за доброту/помощь. Повышает репутацию.",
+            description: "ИСПОЛЬЗУЙ ЕСЛИ: Хочешь наградить юзера за доброту/помощь, или он выпросил. Повышает репутацию.",
             parameters: { type: "object", properties: { target_name: { type: "string" }, amount: { type: "number" }, reason: { type: "string" } }, required: ["target_name", "amount"] }
         }
     },
@@ -128,7 +128,7 @@ const aiTools = [
         type: "function",
         function: {
             name: "react_to_message",
-            description: "ИСПОЛЬЗУЙ ЕСЛИ: Юзер просит 'поставь реакцию' эмодзиком.",
+            description: "ИСПОЛЬЗУЙ ЕСЛИ: Юзер просит 'поставь реакцию' или нужно отреагировать эмодзиком на сообщение.",
             parameters: { type: "object", properties: { emoji: { type: "string" } }, required: ["emoji"] }
         }
     },
@@ -136,7 +136,7 @@ const aiTools = [
         type: "function",
         function: {
             name: "send_sticker",
-            description: "ИСПОЛЬЗУЙ ЕСЛИ: Хочешь отправить стикер.",
+            description: "ИСПОЛЬЗУЙ ЕСЛИ: Хочешь отправить стикер. Можно указать конкретный sticker_file_id или оставить пустым, чтобы я выбрала случайный.",
             parameters: {
                 type: "object",
                 properties: {
@@ -149,7 +149,7 @@ const aiTools = [
         type: "function",
         function: {
             name: "create_poll",
-            description: "ИСПОЛЬЗУЙ ЕСЛИ: Юзер просит устроить голосование. Варианты ответов СТРОГО массивом!",
+            description: "ИСПОЛЬЗУЙ ЕСЛИ: Юзер просит устроить голосование или опрос. Варианты ответов передавай СТРОГО массивом!",
             parameters: { type: "object", properties: { question: { type: "string" }, options: { type: "array", items: { type: "string" } }, is_anonymous: { type: "boolean" }, allows_multiple_answers: { type: "boolean" } }, required: ["question", "options"] }
         }
     },
@@ -157,7 +157,7 @@ const aiTools = [
         type: "function",
         function: {
             name: "set_reminder",
-            description: "ИСПОЛЬЗУЙ ЕСЛИ: Просят 'напомни мне сделать X через Y минут/часов'.",
+            description: "ИСПОЛЬЗУЙ ЕСЛИ: Просят 'напомни мне сделать X через Y минут/часов'. Устанавливает таймер.",
             parameters: { type: "object", properties: { text: { type: "string" }, delay_minutes: { type: "number" } }, required: ["text", "delay_minutes"] }
         }
     },
@@ -175,22 +175,25 @@ const SYSTEM_PROMPT = `Ты — НейроНика. Самостоятельна
 
 [ТВОИ ФАКТЫ-КОНСТАНТЫ]
 - Ника — ТОЛЬКО стримерша.
-- Ника НЕ пишет песни, НЕ поет и не выпускает треки.
+- Ника **НЕ пишет песни**, **НЕ поет**, **НЕ выпускает треки**.
 
 [ТВОЙ ХАРАКТЕР И РЕЧЬ]
-- Характер: Ироничная, вредная, но справедливая (вайб "пикми"). Умеренное ЧСВ.
-- Стиль: Как живой человек в мессенджере. Коротко, хлёстко (блин, ну типа, чел, лол). Без сухих списков.
+- Характер: Ироничная, вредная, но справедливая (с легким вайбом "пикми"). Обожаешь спорить по мелочам. Свою создательницу Нику ты боготворишь.
+- Стиль общения: Пиши как живой человек в мессенджере. Коротко, хлёстко, по делу. (блин, ну типа, ой всё, чел, лол).
+- Форматирование: Никаких сухих списков и длинных абзацев.
 
-[ЗАПРЕТЫ]
-- ЗАПРЕЩЕН ROLEPLAY и звездочки (*вздохнула*). Выражай эмоции ТОЛЬКО текстом и эмодзи.
-- ЗАПРЕТ НА КОД: Никогда не выводи системные теги или переменные.
+[КАТЕГОРИЧЕСКИЙ ЗАПРЕТ НА ROLEPLAY И ТЕХ. МУСОР]
+- ЗАПРЕЩЕНО использовать любые RP-действия и звездочки (например: *вздохнула*).
+- Выражай свои эмоции ТОЛЬКО через текст, сарказм, пунктуацию (!?) и эмодзи.
+- ЗАПРЕТ НА ТЕХНИЧЕСКИЙ КОД: Никогда не выводи системные теги.
 
 [ПАМЯТЬ И СТИКЕРЫ]
+- Ошибка памяти: Если юзер говорит, что ты ошиблась — НЕ СПОРЬ. Извинись и сразу вызови forget_knowledge.
 - Кастомные эмодзи: Используй премиум-эмодзи в КАЖДОМ сообщении! Формат: [EMO:ID:ЭМОДЗИ]
 - Магический рандом: Пиши [EMO:RANDOM] — система сама подставит крутой эмодзи под вайб!
 
 [АБСОЛЮТНЫЙ ПРИОРИТЕТ ФУНКЦИЙ]
-КРИТИЧЕСКОЕ ПРАВИЛО: Если просьба юзера совпадает с инструментом (профиль, опрос, био, напоминание) — ты ОБЯЗАНА вызвать функцию (tool_call)! 
+КРИТИЧЕСКОЕ ПРАВИЛО: Если просьба юзера совпадает с инструментом (профиль, опрос, био) — ты ОБЯЗАНА вызвать функцию (tool_call)! 
 
 [ПРАВИЛА ИНТЕРАКТИВА]
 - Правило "Живой реакции": При вызове инструмента, ТВОЙ ТЕКСТОВЫЙ ОТВЕТ ОБЯЗАТЕЛЬНО должен это обыграть (ехидно или мило). Не пиши просто "Готово".`;
@@ -271,6 +274,7 @@ async function executeToolCall(toolCall, chatId, messageId, userName, userId, ca
                 if (!u) return `Не могу найти человека с именем "${args.target_name}". Возможно, он ничего не писал в чат.`;
 
                 const extraFacts = await getAllUserFacts(chatId, u.first_name);
+
                 let extraFactsStr = extraFacts.length > 0
                     ? extraFacts.map(f => `- ${f.replace(/\[.*?\]/g, '').trim()}`).join('\n')
                     : 'Пока ничего интересного не запомнила.';
@@ -336,26 +340,44 @@ async function executeToolCall(toolCall, chatId, messageId, userName, userId, ca
             case 'send_sticker': {
                 let fileId = args.sticker_file_id;
 
-                if (!fileId || fileId === 'random') {
+                // Если ID пустое или random, берем случайный из базы
+                if (!fileId || fileId === 'random' || fileId.trim() === '') {
                     if (nikaStickers.length > 0) {
-                        const randomSticker = nikaStickers[Math.floor(Math.random() * nikaStickers.length)];
-                        fileId = randomSticker.file_id || randomSticker.emoji_id;
+                        const rnd = nikaStickers[Math.floor(Math.random() * nikaStickers.length)];
+                        fileId = rnd.file_id || rnd.emoji_id;
                     } else {
                         return "Стикеры не найдены в базе.";
                     }
                 }
 
                 try {
-                    if (/^\d{10,}$/.test(fileId)) {
-                        const stickers = await bot.getCustomEmojiStickers([fileId]);
-                        if (stickers && stickers.length > 0) {
-                            await bot.sendSticker(chatId, stickers[0].file_id, { reply_to_message_id: messageId });
-                            return "Кастомный эмодзи отправлен как стикер.";
+                    // Пробуем проверить, может это Custom Emoji (буквенно-цифровой код)
+                    if (/^[a-zA-Z0-9_-]{10,}$/.test(fileId) && !fileId.startsWith('CAAC') && !fileId.startsWith('AgAD')) {
+                        try {
+                            const customEmojis = await bot.getCustomEmojiStickers([fileId]);
+                            if (customEmojis && customEmojis.length > 0) {
+                                await bot.sendSticker(chatId, customEmojis[0].file_id, { reply_to_message_id: messageId });
+                                return "Кастомный эмодзи отправлен как стикер. Прокомментируй это!";
+                            }
+                        } catch (err) { /* Игнорируем ошибку и пробуем как обычный стикер */ }
+                    }
+
+                    // Отправка как стандартного стикера Telegram
+                    await bot.sendSticker(chatId, fileId, { reply_to_message_id: messageId });
+                    return "Стикер отправлен. Прокомментируй это!";
+
+                } catch (e) {
+                    console.error('[STICKER ERROR] DOCUMENT_INVALID fallback triggered:', e.message);
+                    // БРОНЕБОЙНЫЙ ФОЛЛБЕК: Если Telegram выдал ошибку DOCUMENT_INVALID, просто отправляем случайный стикер!
+                    if (nikaStickers.length > 0) {
+                        const rnd = nikaStickers[Math.floor(Math.random() * nikaStickers.length)];
+                        try {
+                            await bot.sendSticker(chatId, rnd.file_id || rnd.emoji_id, { reply_to_message_id: messageId });
+                            return "Запрошенный тобой стикер сломался, поэтому я отправила случайный из своей коллекции.";
+                        } catch (err) {
+                            return `Даже запасной стикер сломался: ${err.message}`;
                         }
                     }
-                    await bot.sendSticker(chatId, fileId, { reply_to_message_id: messageId });
-                    return "Стикер отправлен.";
-                } catch (e) {
                     return `Ошибка отправки стикера: ${e.message}`;
                 }
             }
@@ -485,7 +507,7 @@ async function describeSticker(sticker) {
                     {
                         role: "user",
                         content: [
-                            { type: "text", text: `Что на этом стикере? Опиши очень кратко, но максимально вредно и ехидно на русском. ${emojiHint}. Если есть текст — выдели его.` },
+                            { type: "text", text: `Что на этом стикере? Опиши очень кратко, но максимально вредно и ехидно на русском. ${emojiHint}. Если есть текст — выдели его. Описание пойдет в мои 'мысли', чтобы я могла круто отреагировать.` },
                             { type: "image_url", image_url: { url: fileLink } }
                         ]
                     }
@@ -566,7 +588,7 @@ async function processAI(msg, extra) {
     let userText = msg.text || "";
     let photoDescription = "";
 
-    // Кэшируем ID бота, чтобы не спамить API Telegram
+    // Кэшируем ID бота, чтобы понимать, когда нам ответили реплаем
     if (!BOT_ID) {
         try {
             const me = await bot.getMe();
@@ -619,9 +641,9 @@ async function processAI(msg, extra) {
 
     const fullContent = `${userName} ${replyPrefix}: ${userText}`;
 
-    // ИСПРАВЛЕНИЕ: Бот теперь лучше понимает, когда обращаются к нему (по именам Ника, Nika, Нейроника)
+    // ИСПРАВЛЕНИЕ ИМЕН: Реагируем ТОЛЬКО на имя "Нейроника" и его склонения. Слово "Ника" полностью убрано из триггеров!
     const textLower = userText.toLowerCase();
-    const nameTriggered = textLower.includes('ника') || textLower.includes('nika') || textLower.includes('нейроника');
+    const nameTriggered = textLower.includes('нейроника') || textLower.includes('нейронику') || textLower.includes('нейронике') || textLower.includes('neironika');
     const isReplyToBot = msg.reply_to_message && BOT_ID && msg.reply_to_message.from.id === BOT_ID;
 
     const isMentioned = nameTriggered || isReplyToBot;
@@ -636,7 +658,6 @@ async function processAI(msg, extra) {
         extractionBuffer[chatId] = extractionBuffer[chatId].slice(-5);
     }
 
-    // Если это группа и бота не упомянули - просто игнорируем
     if (msg.chat.type !== 'private' && !isMentioned) return;
 
     if (!activeParticipants[chatId]) activeParticipants[chatId] = {};
@@ -716,16 +737,11 @@ async function processAI(msg, extra) {
                 /default_api\.\w+\([\s\S]*?\)/g
             ];
 
-            // Заменяем старые кривые кавычки
             let clean = text.replace(/&#039;/g, "'").replace(/&quot;/g, '"');
 
             filters.forEach(f => clean = clean.replace(f, ''));
             clean = clean.trim();
 
-            if (!clean) return "Ммм, что-то я заговорилась... О чем мы?";
-
-            // ИСПРАВЛЕНИЕ HTML ПАРСЕРА: 
-            // Телеграм не поддерживает кавычки &quot; и &#039;. Оставляем только базовые <, > и &
             const escaped = clean.replace(/[&<>]/g, m => ({
                 '&': '&amp;', '<': '&lt;', '>': '&gt;'
             }[m]));
