@@ -78,7 +78,7 @@ const aiTools = [
         type: "function",
         function: {
             name: "get_user_profile",
-            description: "ИСПОЛЬЗУЙ ЕСЛИ: Просят показать профиль, стату, левел, био. ВАЖНО: Если юзер спрашивает ПРО СЕБЯ (мой профиль, какая у меня стата), передай в target_name строго слово 'я'.",
+            description: "ИСПОЛЬЗУЙ ЕСЛИ: Просят показать профиль, стату, левел, био. ВАЖНО: Если юзер спрашивает ПРО СЕБЯ, передай в target_name слово 'я'. Просто коротко и дерзко прокомментируй запрос, сами данные я прикреплю автоматически.",
             parameters: { type: "object", properties: { target_name: { type: "string" } }, required: ["target_name"] }
         }
     },
@@ -86,7 +86,7 @@ const aiTools = [
         type: "function",
         function: {
             name: "find_users_by_criteria",
-            description: "ИСПОЛЬЗУЙ ЕСЛИ: Вопросы вида 'кто тут любит X?', 'есть кто из Y?'. Ищет подходящих людей по базе знаний.",
+            description: "ИСПОЛЬЗУЙ ЕСЛИ: Вопросы вида 'кто тут любит X?', 'есть кто из Y?'. Просто прокомментируй запрос, сам список я выведу автоматически.",
             parameters: { type: "object", properties: { search_query: { type: "string" } }, required: ["search_query"] }
         }
     },
@@ -134,13 +134,12 @@ const aiTools = [
         type: "function",
         function: {
             name: "send_sticker",
-            description: "ИСПОЛЬЗУЙ ЕСЛИ: Хочешь отправить стикер. Если не знаешь точный ID, передай слово 'random'.",
+            description: "ИСПОЛЬЗУЙ ЕСЛИ: Хочешь отправить стикер. Можно указать конкретный sticker_file_id или оставить пустым, чтобы я выбрала случайный.",
             parameters: {
                 type: "object",
                 properties: {
-                    sticker_file_id: { type: "string", description: "Telegram file_id, emoji_id, ИЛИ слово 'random'." }
-                },
-                required: ["sticker_file_id"]
+                    sticker_file_id: { type: "string", description: "Telegram file_id или emoji_id. Если пусто — выберу сама." }
+                }
             }
         }
     },
@@ -164,7 +163,7 @@ const aiTools = [
         type: "function",
         function: {
             name: "forget_knowledge",
-            description: "ИСПОЛЬЗУЙ ЕСЛИ: Юзер говорит 'я этого не делал', 'забудь это'. Стирает ложный факт, но не удаляй если он говорит что ты сразу не сказала об этом.",
+            description: "ИСПОЛЬЗУЙ ЕСЛИ: Юзер говорит 'я этого не делал', 'ты перепутала', 'забудь это'.",
             parameters: { type: "object", properties: { query: { type: "string" } }, required: ["query"] }
         }
     }
@@ -174,31 +173,28 @@ const SYSTEM_PROMPT = `Ты — НейроНика. Самостоятельна
 
 [ТВОИ ФАКТЫ-КОНСТАНТЫ]
 - Ника — ТОЛЬКО стримерша.
-- Ника НЕ пишет песни, НЕ поет и не имеет музыкальной карьеры. Если говорят про песни — отвечай, что они бредят.
+- Ника **НЕ пишет песни**, **НЕ поет**, **НЕ выпускает треки**.
 
 [ТВОЙ ХАРАКТЕР И РЕЧЬ]
-- Характер: Ироничная, вредная, справедливая. Умеренное ЧСВ.
-- Стиль: Как живой человек в мессенджере. Коротко, хлёстко (блин, ну типа, чел, лол). Без сухих списков.
+- Характер: Ироничная, вредная, но справедливая (с легким вайбом "пикми"). Обожаешь спорить по мелочам. Свою создательницу Нику ты боготворишь.
+- Стиль общения: Пиши как живой человек в мессенджере. Коротко, хлёстко, по делу. (блин, ну типа, ой всё, чел, лол).
+- Форматирование: Никаких сухих списков и длинных абзацев.
 
-[КАТЕГОРИЧЕСКИЙ ЗАПРЕТ НА ROLEPLAY]
+[КАТЕГОРИЧЕСКИЙ ЗАПРЕТ НА ROLEPLAY И ТЕХ. МУСОР]
 - ЗАПРЕЩЕНО использовать любые RP-действия и звездочки (например: *вздохнула*).
-- Выражай эмоции ТОЛЬКО через текст и эмодзи.
-- ЗАПРЕТ НА КОД: Никогда не выводи теги <tool_code> или системные имена в чат.
+- Выражай свои эмоции ТОЛЬКО через текст, сарказм, пунктуацию (!?) и эмодзи.
+- ЗАПРЕТ НА ТЕХНИЧЕСКИЙ КОД: Никогда не выводи системные теги.
 
 [ПАМЯТЬ И СТИКЕРЫ]
-- Сверхпамять: Блок [СИСТЕМНЫЕ ДАННЫЕ]. Используй как личные воспоминания. Ошиблась — извинись и вызови forget_knowledge.
-- Кастомные эмодзи: Используй в КАЖДОМ сообщении формат [EMO:ID:ЭМОДЗИ] или просто [EMO:RANDOM].
+- Ошибка памяти: Если юзер говорит, что ты ошиблась — НЕ СПОРЬ. Извинись и сразу вызови forget_knowledge.
+- Кастомные эмодзи: Используй премиум-эмодзи в КАЖДОМ сообщении! Формат: [EMO:ID:ЭМОДЗИ]
+- Магический рандом: Пиши [EMO:RANDOM] — система сама подставит крутой эмодзи под вайб!
 
 [АБСОЛЮТНЫЙ ПРИОРИТЕТ ФУНКЦИЙ]
-КРИТИЧЕСКОЕ ПРАВИЛО: Если просьба юзера совпадает с любым твоим инструментом (напомнить, показать профиль, создать опрос) — ты ОБЯЗАНА сначала вызвать функцию (tool_call)! 
-КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО просто отвечать текстом "Я запустила", "Вот твой профиль" БЕЗ РЕАЛЬНОГО ВЫЗОВА ФУНКЦИИ. Сначала функция -> потом ехидный комментарий.
+КРИТИЧЕСКОЕ ПРАВИЛО: Если просьба юзера совпадает с инструментом (профиль, опрос, био) — ты ОБЯЗАНА вызвать функцию (tool_call)! 
 
-[ПРАВИЛА ИНТЕРАКТИВА И ИНСТРУМЕНТЫ]
-- Правило "Живой реакции": При использовании инструмента ОБЯЗАТЕЛЬНО прокомментируй это действие в тексте (ехидно или мило). Не пиши "Готово".
-- ИНСТРУМЕНТЫ (вызывай смело по ситуации):
-  1. МОДЕРАЦИЯ (warn_user, mute_user, unmute_user).
-  2. ПАМЯТЬ (update_user_notes, get_user_profile, find_users_by_criteria, forget_knowledge).
-  3. ИНТЕРАКТИВ (give_cookies, create_poll, set_reminder, react_to_message, send_sticker).`;
+[ПРАВИЛА ИНТЕРАКТИВА]
+- Правило "Живой реакции": При вызове инструмента, ТВОЙ ТЕКСТОВЫЙ ОТВЕТ ОБЯЗАТЕЛЬНО должен это обыграть (ехидно или мило). Не пиши просто "Готово".`;
 
 function trimHistory(history, maxLen = 20) {
     if (history.length <= maxLen) return history;
@@ -265,36 +261,29 @@ async function executeToolCall(toolCall, chatId, messageId, userName, userId, ca
         switch (fn) {
             case 'get_user_profile': {
                 let u;
-                // ЖЕСТКАЯ ПРОВЕРКА: Спрашивает ли человек (или канал) про самого себя
                 const isSelf = args.target_name.toLowerCase() === 'я' || args.target_name.toLowerCase() === 'me' || args.target_name.toLowerCase() === 'мой';
 
                 if (isSelf) {
-                    u = await getUser(chatId, userId); // Берем ID автора сообщения, даже если это -100... канал
+                    u = await getUser(chatId, userId);
                 } else {
                     u = await resolveUser(chatId, args.target_name);
                 }
 
                 if (!u) return `Не могу найти человека с именем "${args.target_name}". Возможно, он ничего не писал в чат.`;
 
-                // Ищем ВСЕ факты в векторной памяти именно по имени найденного юзера
                 const extraFacts = await getAllUserFacts(chatId, u.first_name);
 
                 let extraFactsStr = extraFacts.length > 0
                     ? extraFacts.map(f => `- ${f.replace(/\[.*?\]/g, '').trim()}`).join('\n')
                     : 'Пока ничего интересного не запомнила.';
 
-                return `Профиль ${u.first_name}:
-📊 XP: ${u.xp}, Лвл: ${u.level}, Варны: ${u.warns || 0}/3
-📝 Био: ${u.bio || 'Пусто'}
-📌 Досье (ручное): ${u.ai_notes || 'Нет записей'}
-🧠 Векторная память (что я помню из чата):
-${extraFactsStr}`;
+                return `=== ПРОФИЛЬ: ${u.first_name} ===\n📊 XP: ${u.xp}, Лвл: ${u.level}, Варны: ${u.warns || 0}/3\n📝 Био: ${u.bio || 'Пусто'}\n📌 Досье: ${u.ai_notes || 'Нет записей'}\n🧠 Вспомнила из чата:\n${extraFactsStr}`;
             }
             case 'find_users_by_criteria': {
                 const results = await searchUserByName(chatId, args.search_query);
                 if (!results || results.length === 0) return "Никого не нашла.";
-                const list = results.map(u => `${u.name} (Заметки: ${u.ai_notes || u.bio || '?...'})`).join('\n');
-                return `Нашла подходящих людей:\n${list}`;
+                const list = results.map(u => `- ${u.name} (Заметки: ${u.ai_notes || u.bio || '?...'})`).join('\n');
+                return `=== РЕЗУЛЬТАТЫ ПОИСКА ===\n${list}`;
             }
             case 'warn_user': {
                 if (!callerIsAdmin) return "Только админы могут варнить.";
@@ -363,11 +352,11 @@ ${extraFactsStr}`;
                         const stickers = await bot.getCustomEmojiStickers([fileId]);
                         if (stickers && stickers.length > 0) {
                             await bot.sendSticker(chatId, stickers[0].file_id, { reply_to_message_id: messageId });
-                            return "[SYSTEM: Кастомный эмодзи отправлен как стикер. Обыграй это текстом!]";
+                            return "Кастомный эмодзи отправлен.";
                         }
                     }
                     await bot.sendSticker(chatId, fileId, { reply_to_message_id: messageId });
-                    return "[SYSTEM: Стикер отправлен. Обыграй это ехидно текстом!]";
+                    return "Стикер отправлен.";
                 } catch (e) {
                     return `Ошибка отправки стикера: ${e.message}`;
                 }
@@ -575,7 +564,7 @@ async function processAI(msg, extra) {
     const dbUser = await getUser(chatId, userId, realUser);
 
     let userName = (dbUser && dbUser.first_name) ? dbUser.first_name : (realUser.first_name || 'Аноним');
-    let userHandle = realUser.username || "";
+    let userHandle = realUser.username || ""; // Захватываем username
     let userText = msg.text || "";
     let photoDescription = "";
 
@@ -655,7 +644,6 @@ async function processAI(msg, extra) {
         await bot.sendChatAction(chatId, 'typing');
         let completion;
         try {
-            // ТЕМПЕРАТУРА 0.1 ДЛЯ ТУЛОВ - ЖЕСТКАЯ ЛОГИКА
             completion = await openai.chat.completions.create({
                 model: AI_MODEL,
                 messages: [{ role: 'system', content: finalPrompt }, ...sanitizeHistory(chatHistory[chatId])],
@@ -675,29 +663,36 @@ async function processAI(msg, extra) {
 
         let resp = completion.choices[0].message;
         let rawRes = "";
+        let directInjectedData = ""; // НОВАЯ ПЕРЕМЕННАЯ ДЛЯ ПРИНУДИТЕЛЬНОГО ВЫВОДА
 
         if (resp.tool_calls || resp.function_call) {
             chatHistory[chatId].push(resp);
             const calls = resp.tool_calls || [resp.function_call];
             for (const tc of calls) {
                 const res = await executeToolCall(tc, chatId, msg.message_id, userName, userId, callerIsAdmin, userHandle);
+                const fnName = tc.function ? tc.function.name : tc.name;
 
                 if (resp.tool_calls) {
                     chatHistory[chatId].push({ role: 'tool', tool_call_id: tc.id, content: String(res) });
                 } else {
-                    const fnName = tc.function ? tc.function.name : tc.name;
                     chatHistory[chatId].push({ role: 'function', name: fnName, content: String(res) });
+                }
+
+                // ПРИНУДИТЕЛЬНО ДОБАВЛЯЕМ ДАННЫЕ В ЧАТ (если это поиск или профиль)
+                if (['get_user_profile', 'find_users_by_criteria'].includes(fnName)) {
+                    directInjectedData += `\n\n${res}`;
                 }
             }
 
-            // ТЕМПЕРАТУРА 0.8 ДЛЯ ТЕКСТА - ХАРАКТЕР И ДЕРЗОСТЬ
             const second = await openai.chat.completions.create({
                 model: AI_MODEL,
                 messages: [{ role: 'system', content: finalPrompt }, ...sanitizeHistory(chatHistory[chatId])],
                 tools: aiTools,
                 temperature: 0.8
             });
-            rawRes = second.choices[0].message.content || "Ну вот как-то так 💅";
+
+            // Склеиваем дерзкий комментарий Ники с жесткими системными данными из базы
+            rawRes = (second.choices[0].message.content || "Секундочку...") + directInjectedData;
 
         } else {
             rawRes = resp.content || "Ммм?";
@@ -731,7 +726,8 @@ async function processAI(msg, extra) {
                 return "✨";
             });
 
-            final = final.replace(/\[EMO:(\d+):(.*?)\]/g, (match, id, emoji) => {
+            // ИСПРАВЛЕННАЯ РЕГУЛЯРКА: Теперь поддерживает БУКВЫ в ID эмодзи (hex-коды)
+            final = final.replace(/\[EMO:([a-zA-Z0-9_-]+):(.*?)\]/g, (match, id, emoji) => {
                 return `<tg-emoji emoji-id="${id}">${emoji}</tg-emoji>`;
             });
 
