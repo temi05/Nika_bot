@@ -11,6 +11,11 @@ const { ANONYMOUS_ADMIN_ID } = require('../config');
 const fs = require('fs');
 const path = require('path');
 
+function safeHTML(str) {
+    if (!str) return '';
+    return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
 let BOT_ID = null; // Кэш ID бота для ускорения работы
 
 let premiumEmojiList = [];
@@ -49,6 +54,7 @@ const activeParticipants = {};
 const aiMood = {};
 const processingQueue = new Map();
 const extractionBuffer = {};
+const rollingHistory = {}; // НОВОЕ: Хранит последние 100 чистых сообщений юзеров для ручного анализа
 
 const aiTools = [
     {
@@ -131,7 +137,7 @@ const aiTools = [
         type: "function",
         function: {
             name: "send_sticker",
-            description: "ИСПОЛЬЗУЙ ЕСЛИ: Хочешь отправить стикер. Можно указать конкре sticker_file_id или оставить пустым, чтобы я выбрала случайный.",
+            description: "ИСПОЛЬЗУЙ ЕСЛИ: Хочешь отправить стикер. Можно указать конкретный sticker_file_id или оставить пустым, чтобы я выбрала случайный.",
             parameters: {
                 type: "object",
                 properties: {
@@ -163,6 +169,20 @@ const aiTools = [
             description: "ИСПОЛЬЗУЙ ЕСЛИ: Юзер говорит 'я этого не делал', 'ты перепутала', 'забудь это'.",
             parameters: { type: "object", properties: { query: { type: "string" } }, required: ["query"] }
         }
+    },
+    {
+        type: "function",
+        function: {
+            name: "force_memory_extraction",
+            description: "ИСПОЛЬЗУЙ ЕСЛИ: Админ просит 'проанализируй последние N сообщений', 'запомни этот разговор' или 'сохрани факты'. Берет недавнюю историю чата и ищет в них новые долгосрочные факты.",
+            parameters: {
+                type: "object",
+                properties: {
+                    message_count: { type: "number", description: "Количество сообщений для анализа (от 5 до 100)" }
+                },
+                required: ["message_count"]
+            }
+        }
     }
 ];
 
@@ -188,10 +208,14 @@ const SYSTEM_PROMPT = `Ты — НейроНика. Самостоятельна
 - Магический рандом: Пиши [EMO:RANDOM] — система сама подставит крутой эмодзи под вайб!
 
 [АБСОЛЮТНЫЙ ПРИОРИТЕТ ФУНКЦИЙ]
-КРИТИЧЕСКОЕ ПРАВИЛО: Если просьба юзера совпадает с инструментом (профиль, опрос, био) — ты ОБЯЗАНА вызвать функцию (tool_call)! 
+КРИТИЧЕСКОЕ ПРАВИЛО: Если просьба юзера совпадает с инструментом (профиль, опрос, био, анализ логов) — ты ОБЯЗАНА вызвать функцию (tool_call)! 
 
 [ПРАВИЛА ИНТЕРАКТИВА]
-- Правило "Живой реакции": При вызове инструмента, ТВОЙ ТЕКСТОВЫЙ ОТВЕТ ОБЯЗАТЕЛЬНО должен это обыграть (ехидно или мило). Не пиши просто "Готово".`;
+- Правило "Живой реакции": При вызове инструмента, ТВОЙ ТЕКСТОВЫЙ ОТВЕТ ОБЯЗАТЕЛЬНО должен это обыграть (ехидно или мило). Не пиши просто "Готово".
+- ИНСТРУМЕНТЫ: 
+  1. МОДЕРАЦИЯ (warn_user, mute_user, unmute_user).
+  2. ПАМЯТЬ (update_user_notes, get_user_profile, find_users_by_criteria, forget_knowledge, force_memory_extraction).
+  3. ИНТЕРАКТИВ (give_cookies, create_poll, set_reminder, react_to_message, send_sticker).`;
 
 function trimHistory(history, maxLen = 20) {
     if (history.length <= maxLen) return history;
@@ -263,6 +287,25 @@ async function executeToolCall(toolCall, chatId, messageId, userName, userId, ca
 
     try {
         switch (fn) {
+            case 'force_memory_extraction': {
+                if (!callerIsAdmin) return "Ой, извини, но только админ может заставить меня копаться в логах памяти.";
+
+                const count = Math.min(Math.max(5, args.message_count || 15), 100);
+                if (!rollingHistory[chatId] || rollingHistory[chatId].length === 0) {
+                    return "История сообщений пока пуста, мне нечего анализировать.";
+                }
+
+                const msgsToAnalyze = rollingHistory[chatId].slice(-count);
+
+                // Запускаем анализ фоном, не дожидаясь ответа, чтобы не тормозить чат
+                extractAndSaveFacts(chatId, msgsToAnalyze.join('\n'), Object.values(activeParticipants[chatId] || {}).map(p => p.firstName));
+
+                // Сбрасываем текущий буфер, раз мы уже всё проанализировали
+                extractionBuffer[chatId] = [];
+                messageCount[chatId] = 0;
+
+                return `[SYSTEM: Анализ ${msgsToAnalyze.length} сообщений успешно запущен. Ответь юзеру ехидно, что ты отправила этот лог на анализ в свою векторную базу и скоро всё запомнишь.]`;
+            }
             case 'get_user_profile': {
                 // Защита от undefined
                 let target = args.target_name || "я";
@@ -368,7 +411,6 @@ async function executeToolCall(toolCall, chatId, messageId, userName, userId, ca
                     return "Стикер отправлен. Прокомментируй это!";
 
                 } catch (e) {
-                    // ИСПРАВЛЕНИЕ: Делаем лог "тихим", чтобы не пугать красным текстом в консоли Render
                     console.log('[STICKER INFO] Ошибка отправки стикера, пробуем запасной вариант...');
                     if (nikaStickers.length > 0) {
                         const rnd = nikaStickers[Math.floor(Math.random() * nikaStickers.length)];
@@ -452,7 +494,6 @@ async function safeSendMessage(chatId, text, replyId) {
     try {
         await bot.sendMessage(chatId, safeText, { reply_to_message_id: replyId, parse_mode: 'HTML' });
     } catch (error) {
-        // ИСПРАВЛЕНИЕ: Тихо перехватываем DOCUMENT_INVALID без спама в консоль
         if (error.message.includes('parse entities') || error.message.includes('HTML') || error.message.includes('DOCUMENT_INVALID')) {
             const plainText = safeText.replace(/<tg-emoji[^>]*>(.*?)<\/tg-emoji>/g, '$1').replace(/<[^>]*>/g, '');
             try {
@@ -461,7 +502,6 @@ async function safeSendMessage(chatId, text, replyId) {
                 console.error('[FALLBACK SEND ERROR]:', e2.message);
             }
         } else {
-            // Логируем только реальные, непредвиденные ошибки отправки
             console.error('[SEND ERROR]:', error.message);
         }
     }
@@ -609,8 +649,14 @@ async function processAI(msg, extra) {
 
     const isMentioned = nameTriggered || isReplyToBot;
 
+    // --- БУФЕРЫ ПАМЯТИ ---
     if (!extractionBuffer[chatId]) extractionBuffer[chatId] = [];
     extractionBuffer[chatId].push(`${userName}: ${userText}`);
+
+    // Новый буфер: Храним до 100 чистых сообщений юзеров для ручного анализа
+    if (!rollingHistory[chatId]) rollingHistory[chatId] = [];
+    rollingHistory[chatId].push(`${userName}: ${userText}`);
+    if (rollingHistory[chatId].length > 100) rollingHistory[chatId].shift();
 
     if (!messageCount[chatId]) messageCount[chatId] = 0;
     if (++messageCount[chatId] >= 15) {
@@ -740,5 +786,42 @@ async function processAI(msg, extra) {
         }
     }
 }
+
+// ============================================================================
+// ЭКСТРЕННОЕ СОХРАНЕНИЕ ПАМЯТИ ПРИ ПЕРЕЗАГРУЗКЕ СЕРВЕРА (RENDER)
+// ============================================================================
+async function emergencyMemorySave() {
+    console.log("🚨 [SYSTEM] Получен сигнал выключения! Экстренно спасаю буферы памяти...");
+
+    const promises = [];
+    for (const chatId in extractionBuffer) {
+        if (extractionBuffer[chatId] && extractionBuffer[chatId].length > 0) {
+            console.log(`[MEMORY] Спасаю ${extractionBuffer[chatId].length} не сохраненных сообщений для чата ${chatId}...`);
+            const p = extractAndSaveFacts(
+                chatId,
+                extractionBuffer[chatId].join('\n'),
+                Object.values(activeParticipants[chatId] || {}).map(p => p.firstName)
+            );
+            promises.push(p);
+        }
+    }
+
+    if (promises.length > 0) {
+        // Ждем максимум 5 секунд, чтобы Render не убил нас принудительно
+        await Promise.race([
+            Promise.all(promises),
+            new Promise(resolve => setTimeout(resolve, 5000))
+        ]);
+        console.log("✅ [SYSTEM] Экстренное сохранение завершено.");
+    } else {
+        console.log("ℹ️ [SYSTEM] Буферы пусты, сохранять нечего.");
+    }
+
+    process.exit(0);
+}
+
+// Перехватываем сигналы завершения процесса (например, от Render или Ctrl+C)
+process.on('SIGTERM', emergencyMemorySave);
+process.on('SIGINT', emergencyMemorySave);
 
 module.exports = { handleAIChat, aiMood, AI_NAME };
