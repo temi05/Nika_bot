@@ -98,13 +98,21 @@ ${historyText}`;
         }
 
         let facts = [];
-        if (Array.isArray(result)) {
-            facts = result.map(f => typeof f === 'object' ? f.fact : f);
-        } else if (result && result.facts) {
-            facts = result.facts.map(f => typeof f === 'object' ? f.fact : f);
+        const items = Array.isArray(result) ? result : (result?.facts || []);
+
+        for (const f of items) {
+            // ИСПРАВЛЕНИЕ: Склеиваем имя и факт в единую строку!
+            if (typeof f === 'object' && f.name && f.fact) {
+                facts.push(`${f.name}: ${f.fact}`);
+            } else if (typeof f === 'object' && f.fact) {
+                // Если ИИ почему-то не вернул имя, сохраняем хотя бы факт
+                facts.push(f.fact);
+            } else if (typeof f === 'string') {
+                facts.push(f);
+            }
         }
 
-        facts = facts.filter(f => f && typeof f === 'string');
+        facts = facts.filter(f => f && typeof f === 'string' && f.trim() !== '');
 
         for (const fact of facts) {
             const exists = await checkFactExists(chatId, fact);
