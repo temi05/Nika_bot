@@ -385,7 +385,7 @@ async function executeToolCall(toolCall, chatId, messageId, userName, userId, ca
                 const delay = Math.max(1, args.delay_minutes || 1);
                 const text = args.text || "Напоминание!";
                 const triggerTime = new Date(Date.now() + delay * 60 * 1000).toISOString();
-                const ok = await insertReminder(chatId, userId, userName, userHandle, text, triggerTime);
+                const ok = await insertReminder(chatId, userId, userName, text, triggerTime, userHandle);
                 return ok ? `Записала! Напомню через ${delay} мин.` : "Ошибка базы.";
             }
             case 'forget_knowledge': {
