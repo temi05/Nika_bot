@@ -131,7 +131,7 @@ const aiTools = [
         type: "function",
         function: {
             name: "send_sticker",
-            description: "ИСПОЛЬЗУЙ ЕСЛИ: Хочешь отправить стикер. Можно указать конкретный sticker_file_id или оставить пустым, чтобы я выбрала случайный.",
+            description: "ИСПОЛЬЗУЙ ЕСЛИ: Хочешь отправить стикер. Можно указать конкре sticker_file_id или оставить пустым, чтобы я выбрала случайный.",
             parameters: {
                 type: "object",
                 properties: {
@@ -452,8 +452,9 @@ async function safeSendMessage(chatId, text, replyId) {
         await bot.sendMessage(chatId, safeText, { reply_to_message_id: replyId, parse_mode: 'HTML' });
     } catch (error) {
         console.error('[SEND HTML ERROR]:', error.message);
-        if (error.message.includes('parse entities') || error.message.includes('HTML')) {
-            // Если Телеграм ругается на HTML (например, битый эмодзи) - мы вырезаем все теги <tg-emoji> и оставляем сырой смайл
+        // ИСПРАВЛЕНИЕ: Добавили обработку ошибки DOCUMENT_INVALID
+        if (error.message.includes('parse entities') || error.message.includes('HTML') || error.message.includes('DOCUMENT_INVALID')) {
+            // Если Телеграм ругается на HTML или битый эмодзи - мы вырезаем все теги <tg-emoji> и оставляем сырой текст
             const plainText = safeText.replace(/<tg-emoji[^>]*>(.*?)<\/tg-emoji>/g, '$1').replace(/<[^>]*>/g, '');
             try {
                 await bot.sendMessage(chatId, plainText, { reply_to_message_id: replyId });
@@ -600,7 +601,6 @@ async function processAI(msg, extra) {
 
     const fullContent = `${userName} ${replyPrefix}: ${userText}`;
 
-    // ИСПРАВЛЕНИЕ: Реагируем только на имя "Нейроника", "Нейронику", "Neironika". Имя "Ника" полностью исключено!
     const textLower = userText.toLowerCase();
     const nameTriggered = textLower.includes('нейроника') || textLower.includes('нейронику') || textLower.includes('нейронике') || textLower.includes('neironika');
     const isReplyToBot = msg.reply_to_message && BOT_ID && msg.reply_to_message.from.id === BOT_ID;
@@ -643,7 +643,7 @@ async function processAI(msg, extra) {
                 temperature: 0.1
             });
         } catch (error) {
-            if (error.message === 'TIMEOUT') throw error; // Проброс таймаута дальше
+            if (error.message === 'TIMEOUT') throw error;
             completion = await fetchAIWithTimeout({
                 model: FALLBACK_MODEL,
                 messages: [{ role: 'system', content: finalPrompt }, ...sanitizeHistory(chatHistory[chatId])],
@@ -670,7 +670,6 @@ async function processAI(msg, extra) {
                     chatHistory[chatId].push({ role: 'function', name: fnName, content: String(res) });
                 }
 
-                // Предотвращаем дублирование профиля в ответе
                 if (['get_user_profile', 'find_users_by_criteria'].includes(fnName)) {
                     if (!directInjectedData.includes(res)) {
                         directInjectedData += `\n\n${res}`;
@@ -699,13 +698,11 @@ async function processAI(msg, extra) {
                 /default_api\.\w+\([\s\S]*?\)/g
             ];
 
-            // Фикс кавычек из базы
             let clean = text.replace(/&#039;/g, "'").replace(/&quot;/g, '"');
 
             filters.forEach(f => clean = clean.replace(f, ''));
             clean = clean.trim();
 
-            // Экранируем только критичные символы
             const escaped = clean.replace(/[&<>]/g, m => ({
                 '&': '&amp;', '<': '&lt;', '>': '&gt;'
             }[m]));
