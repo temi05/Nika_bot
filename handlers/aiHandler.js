@@ -33,7 +33,7 @@ try {
 } catch (e) { }
 
 const POLZA_API_KEY = process.env.POLZA_API_KEY || 'pza_Ut5ahRtIFZSzj_jKezwdRvQMMebqZ1BI';
-const AI_MODEL = process.env.AI_MODEL || 'google/gemini-2.5-flash-lite';
+const AI_MODEL = process.env.AI_MODEL || 'gpt-4o-mini';
 const FALLBACK_MODEL = 'gpt-4o-mini';
 const AI_NAME = process.env.AI_NAME || 'НейроНика';
 
@@ -56,14 +56,14 @@ const aiTools = [
         function: {
             name: "manage_user_profile",
             description: "ИСПОЛЬЗУЙ ЕСЛИ: Юзер просит сменить био ('смени статус') ИЛИ записать факт в досье/заметки ('запомни, что X это Y').",
-            parameters: { 
-                type: "object", 
-                properties: { 
-                    target_name: { type: "string" }, 
+            parameters: {
+                type: "object",
+                properties: {
+                    target_name: { type: "string" },
                     action: { type: "string", enum: ["update_bio", "add_note"] },
-                    content: { type: "string", description: "Новое био или добавляемая заметка" } 
-                }, 
-                required: ["target_name", "action", "content"] 
+                    content: { type: "string", description: "Новое био или добавляемая заметка" }
+                },
+                required: ["target_name", "action", "content"]
             }
         }
     },
@@ -80,15 +80,15 @@ const aiTools = [
         function: {
             name: "moderate_user",
             description: "ИСПОЛЬЗУЙ ЕСЛИ: 1) Админ просит выдать варн/мут/размут (action: mute/unmute/warn). 2) САМА хочешь дать юзеру печеньку за шутку (action: reward, value: от 1 до 2). ❌ ВАЖНО: К SCTemi наказания не применять! Печеньки не давать, если юзер сам их выпрашивает.",
-            parameters: { 
-                type: "object", 
-                properties: { 
-                    target_name: { type: "string" }, 
+            parameters: {
+                type: "object",
+                properties: {
+                    target_name: { type: "string" },
                     action: { type: "string", enum: ["mute", "unmute", "warn", "reward"] },
                     value: { type: "number", description: "Длительность мута ИЛИ кол-во печенек" },
                     reason: { type: "string" }
-                }, 
-                required: ["target_name", "action"] 
+                },
+                required: ["target_name", "action"]
             }
         }
     },
@@ -285,85 +285,85 @@ async function executeToolCall(toolCall, chatId, messageId, userName, userId, ca
                     return `\n\n<b>=== РЕЗУЛЬТАТЫ ПОИСКА ===</b>\n${list}`;
                 } else {
                     let target = args.query || "я";
-                const isSelf = target.toLowerCase() === 'я' || target.toLowerCase() === 'me' || target.toLowerCase() === 'мой';
-                let u;
-                if (isSelf) {
-                    u = await getUser(chatId, userId);
-                } else {
-                    u = await resolveUser(chatId, target);
-                }
-                if (!u) return `Не могу найти человека с именем "${target}".`;
-
-                let searchName = u.first_name.split(' ')[0].trim();
-                if (u.user_id === -1002214854700 || searchName.includes('Чатик')) {
-                    searchName = 'Ника';
-                }
-
-                const extraFacts = await getAllUserFacts(chatId, searchName);
-
-                let usernameFallback = u.username ? u.username.toLowerCase() : "---";
-                let searchLow = searchName.toLowerCase();
-
-                let nodes = [];
-                let edges = [];
-                let others = [];
-
-                extraFacts.forEach(f => {
-                    let text = f.trim();
-                    if (text.startsWith('УЗЕЛ:')) {
-                        let parts = text.split('| АТРИБУТ:');
-                        if (parts.length === 2) {
-                            let nodeName = parts[0].replace('УЗЕЛ:', '').trim();
-                            let attr = parts[1].trim();
-
-                            let nodeLow = nodeName.toLowerCase();
-
-                            if (nodeLow.includes(searchLow) || nodeLow.includes(usernameFallback) || searchLow.includes(nodeLow)) {
-                                if (!nodes.includes(attr)) nodes.push(attr);
-                            } else if (attr.toLowerCase().includes(searchLow) || attr.toLowerCase().includes(usernameFallback)) {
-                                others.push(`${nodeName}: ${attr}`);
-                            }
-                        }
-                    } else if (text.startsWith('СВЯЗЬ:')) {
-                        let content = text.replace('СВЯЗЬ:', '').trim();
-                        let parts = content.split('->').map(p => p.trim());
-                        if (parts.length === 3) {
-                            let from = parts[0];
-                            let rel = parts[1];
-                            let to = parts[2];
-
-                            let fromLow = from.toLowerCase();
-                            let toLow = to.toLowerCase();
-
-                            if (fromLow.includes(searchLow) || fromLow.includes(usernameFallback)) {
-                                let edgeStr = `${rel} -> ${to}`;
-                                if (!edges.includes(edgeStr)) edges.push(edgeStr);
-                            } else if (toLow.includes(searchLow) || toLow.includes(usernameFallback)) {
-                                let edgeStr = `(${from}) -> ${rel} -> (меня)`;
-                                if (!edges.includes(edgeStr)) edges.push(edgeStr);
-                            }
-                        } else if (content.toLowerCase().includes(searchLow) || content.toLowerCase().includes(usernameFallback)) {
-                            if (!edges.includes(content)) edges.push(content);
-                        }
+                    const isSelf = target.toLowerCase() === 'я' || target.toLowerCase() === 'me' || target.toLowerCase() === 'мой';
+                    let u;
+                    if (isSelf) {
+                        u = await getUser(chatId, userId);
                     } else {
-                        let cleanF = text.replace(/\[.*?\]/g, '').trim();
-                        if (cleanF.toLowerCase().startsWith(searchLow + ':')) {
-                            cleanF = cleanF.substring(searchLow.length + 1).trim();
-                            if (cleanF && !nodes.includes(cleanF)) others.push(cleanF);
-                        } else {
-                            if (!others.includes(cleanF)) others.push(cleanF);
-                        }
+                        u = await resolveUser(chatId, target);
                     }
-                });
+                    if (!u) return `Не могу найти человека с именем "${target}".`;
 
-                let memoryStr = '';
-                if (nodes.length > 0) memoryStr += '\n👤 <b>Личность (Узлы):</b>\n' + nodes.map(n => `  ▫️ ${safeHTML(n)}`).join('\n');
-                if (edges.length > 0) memoryStr += '\n🔗 <b>Социальные связи:</b>\n' + edges.map(e => `  〰️ ${safeHTML(e)}`).join('\n');
-                if (others.length > 0) memoryStr += '\n📝 <b>Архив:</b>\n' + others.map(o => `  - ${safeHTML(o)}`).join('\n');
+                    let searchName = u.first_name.split(' ')[0].trim();
+                    if (u.user_id === -1002214854700 || searchName.includes('Чатик')) {
+                        searchName = 'Ника';
+                    }
 
-                if (!memoryStr) memoryStr = '\n🧠 <i>Чистый лист. Никаких фактов в базе нет.</i>';
+                    const extraFacts = await getAllUserFacts(chatId, searchName);
 
-                return `\n\n<b>=== ПРОФИЛЬ: ${safeHTML(u.first_name)} ===</b>\n📊 <b>XP:</b> ${u.xp}, <b>Лвл:</b> ${u.level}, <b>Варны:</b> ${u.warns || 0}/3\n📝 <b>Био:</b> ${safeHTML(u.bio || 'Пусто')}\n📌 <b>Досье:</b> ${safeHTML(u.ai_notes || 'Нет записей')}${memoryStr}`;
+                    let usernameFallback = u.username ? u.username.toLowerCase() : "---";
+                    let searchLow = searchName.toLowerCase();
+
+                    let nodes = [];
+                    let edges = [];
+                    let others = [];
+
+                    extraFacts.forEach(f => {
+                        let text = f.trim();
+                        if (text.startsWith('УЗЕЛ:')) {
+                            let parts = text.split('| АТРИБУТ:');
+                            if (parts.length === 2) {
+                                let nodeName = parts[0].replace('УЗЕЛ:', '').trim();
+                                let attr = parts[1].trim();
+
+                                let nodeLow = nodeName.toLowerCase();
+
+                                if (nodeLow.includes(searchLow) || nodeLow.includes(usernameFallback) || searchLow.includes(nodeLow)) {
+                                    if (!nodes.includes(attr)) nodes.push(attr);
+                                } else if (attr.toLowerCase().includes(searchLow) || attr.toLowerCase().includes(usernameFallback)) {
+                                    others.push(`${nodeName}: ${attr}`);
+                                }
+                            }
+                        } else if (text.startsWith('СВЯЗЬ:')) {
+                            let content = text.replace('СВЯЗЬ:', '').trim();
+                            let parts = content.split('->').map(p => p.trim());
+                            if (parts.length === 3) {
+                                let from = parts[0];
+                                let rel = parts[1];
+                                let to = parts[2];
+
+                                let fromLow = from.toLowerCase();
+                                let toLow = to.toLowerCase();
+
+                                if (fromLow.includes(searchLow) || fromLow.includes(usernameFallback)) {
+                                    let edgeStr = `${rel} -> ${to}`;
+                                    if (!edges.includes(edgeStr)) edges.push(edgeStr);
+                                } else if (toLow.includes(searchLow) || toLow.includes(usernameFallback)) {
+                                    let edgeStr = `(${from}) -> ${rel} -> (меня)`;
+                                    if (!edges.includes(edgeStr)) edges.push(edgeStr);
+                                }
+                            } else if (content.toLowerCase().includes(searchLow) || content.toLowerCase().includes(usernameFallback)) {
+                                if (!edges.includes(content)) edges.push(content);
+                            }
+                        } else {
+                            let cleanF = text.replace(/\[.*?\]/g, '').trim();
+                            if (cleanF.toLowerCase().startsWith(searchLow + ':')) {
+                                cleanF = cleanF.substring(searchLow.length + 1).trim();
+                                if (cleanF && !nodes.includes(cleanF)) others.push(cleanF);
+                            } else {
+                                if (!others.includes(cleanF)) others.push(cleanF);
+                            }
+                        }
+                    });
+
+                    let memoryStr = '';
+                    if (nodes.length > 0) memoryStr += '\n👤 <b>Личность (Узлы):</b>\n' + nodes.map(n => `  ▫️ ${safeHTML(n)}`).join('\n');
+                    if (edges.length > 0) memoryStr += '\n🔗 <b>Социальные связи:</b>\n' + edges.map(e => `  〰️ ${safeHTML(e)}`).join('\n');
+                    if (others.length > 0) memoryStr += '\n📝 <b>Архив:</b>\n' + others.map(o => `  - ${safeHTML(o)}`).join('\n');
+
+                    if (!memoryStr) memoryStr = '\n🧠 <i>Чистый лист. Никаких фактов в базе нет.</i>';
+
+                    return `\n\n<b>=== ПРОФИЛЬ: ${safeHTML(u.first_name)} ===</b>\n📊 <b>XP:</b> ${u.xp}, <b>Лвл:</b> ${u.level}, <b>Варны:</b> ${u.warns || 0}/3\n📝 <b>Био:</b> ${safeHTML(u.bio || 'Пусто')}\n📌 <b>Досье:</b> ${safeHTML(u.ai_notes || 'Нет записей')}${memoryStr}`;
                 }
             }
 
@@ -399,7 +399,7 @@ async function executeToolCall(toolCall, chatId, messageId, userName, userId, ca
                     }
                     return `${result.name} получил варн (${result.newWarns}/3). Ещё ${3 - result.newWarns} — и мут.`;
                 }
-                
+
                 if (args.action === "mute" || args.action === "unmute") {
                     const u = await resolveUser(chatId, args.target_name);
                     if (!u) return "Пользователь не найден.";
@@ -462,7 +462,7 @@ async function executeToolCall(toolCall, chatId, messageId, userName, userId, ca
             case 'manage_user_profile': {
                 let u = await resolveUser(chatId, args.target_name);
                 if (!u) return "Не найден.";
-                
+
                 if (args.action === 'update_bio') {
                     await updateUser(u.id, { bio: args.content });
                     return `Био обновлено.`;
@@ -746,11 +746,11 @@ async function processAI(msg, extra) {
             if (imageUrl) {
                 for (let i = currentMessagesSecondCall.length - 1; i >= 0; i--) {
                     if (currentMessagesSecondCall[i].role === 'user' && currentMessagesSecondCall[i].content === fullContent) {
-                         currentMessagesSecondCall[i].content = [
-                             { type: "text", text: fullContent },
-                             { type: "image_url", image_url: { url: imageUrl } }
-                         ];
-                         break;
+                        currentMessagesSecondCall[i].content = [
+                            { type: "text", text: fullContent },
+                            { type: "image_url", image_url: { url: imageUrl } }
+                        ];
+                        break;
                     }
                 }
             }
@@ -786,7 +786,7 @@ async function processAI(msg, extra) {
 
             if (!withoutMediaTags && text.length > 0) {
                 // Если ИИ сгенерировал ТОЛЬКО модераторский тег, который мы стерли
-                withoutMediaTags = "[EMO:RANDOM]"; 
+                withoutMediaTags = "[EMO:RANDOM]";
             }
 
             let clean = withoutMediaTags.replace(/&#039;/g, "'").replace(/&quot;/g, '"');
