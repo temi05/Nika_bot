@@ -713,9 +713,9 @@ async function processAI(msg, extra) {
 
         let completion;
         try {
-            // Если есть картинка, сразу отправляем в qwen/qwen3.5-flash-02-23, так как Gemini (в текущем API)
+            // Если есть картинка, сразу отправляем в openai/gpt-5-nano, так как Gemini (в текущем API)
             // молча игнорирует Base64-код и опирается только на текст, не выдавая ошибку.
-            const targetModel = imageUrl ? 'qwen/qwen3.5-flash-02-23' : AI_MODEL;
+            const targetModel = imageUrl ? 'openai/gpt-5-nano' : AI_MODEL;
 
             completion = await fetchAIWithTimeout({
                 model: targetModel,
@@ -727,15 +727,15 @@ async function processAI(msg, extra) {
         } catch (e) {
             console.error("❌ Основная модель не справилась с картинкой/запросом:", e.message);
             if (imageUrl) {
-                console.log("♻️ Пробую отправить картинку через 'qwen/qwen3.5-flash-02-23' (Vision)");
+                console.log("♻️ Пробую отправить картинку через 'openai/gpt-5-nano' (Vision)");
                 try {
                     completion = await fetchAIWithTimeout({
-                        model: 'qwen/qwen3.5-flash-02-23',
+                        model: 'openai/gpt-5-nano',
                         messages: [{ role: 'system', content: finalPrompt }, ...currentMessagesFirstCall],
                         tools: aiTools, max_tokens: 2500, temperature: 0.7
                     });
                 } catch (e2) {
-                    console.error("❌ qwen/qwen3.5-flash-02-23 тоже отказался читать картинку. Убираем её...");
+                    console.error("❌ openai/gpt-5-nano тоже отказался читать картинку. Убираем её...");
                     currentMessagesFirstCall[currentMessagesFirstCall.length - 1].content = fullContent;
                     completion = await fetchAIWithTimeout({
                         model: AI_MODEL,
@@ -816,7 +816,7 @@ async function processAI(msg, extra) {
             } catch (e2) {
                 // Страховка на случай падения второго вызова
                 second = await fetchAIWithTimeout({
-                    model: 'qwen/qwen3.5-flash-02-23',
+                    model: 'openai/gpt-5-nano',
                     messages: [{ role: 'system', content: finalPrompt }, ...currentMessagesSecondCall],
                     temperature: 0.7,
                     max_tokens: 2500
