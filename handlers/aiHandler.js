@@ -81,7 +81,7 @@ const aiTools = [
         type: "function",
         function: {
             name: "get_user_profile",
-            description: "ИСПОЛЬЗУЙ ЕСЛИ: Просят показать профиль, стату, левел, био. ВАЖНО: Если юзер спрашивает ПРО СЕБЯ (мой профиль), передай в target_name слово 'я'.",
+            description: "ИСПОЛЬЗУЙ ЕСЛИ: Просят показать профиль, стату, левел. ВАЖНО: Система сама приклеит карточку вниз! В своем тексте просто кинь пару дерзких фраз, НЕ переписывай статы!",
             parameters: { type: "object", properties: { target_name: { type: "string" } }, required: ["target_name"] }
         }
     },
@@ -310,17 +310,39 @@ async function executeToolCall(toolCall, chatId, messageId, userName, userId, ca
                     u = await resolveUser(chatId, target);
                 }
                 if (!u) return `Не могу найти человека с именем "${target}".`;
+
                 const extraFacts = await getAllUserFacts(chatId, u.first_name);
-                let extraFactsStr = extraFacts.length > 0
-                    ? extraFacts.map(f => `- ${f.replace(/\[.*?\]/g, '').trim()}`).join('\n')
-                    : 'Пока ничего интересного не запомнила.';
-                return `=== ПРОФИЛЬ: ${u.first_name} ===\n📊 XP: ${u.xp}, Лвл: ${u.level}, Варны: ${u.warns || 0}/3\n📝 Био: ${u.bio || 'Пусто'}\n📌 Досье: ${u.ai_notes || 'Нет записей'}\n🧠 Вспомнила из чата:\n${extraFactsStr}`;
+
+                let nodes = [];
+                let edges = [];
+                let others = [];
+
+                extraFacts.forEach(f => {
+                    if (f.includes('УЗЕЛ:') || f.includes('АТРИБУТ:')) {
+                        nodes.push(f.replace(/УЗЕЛ:.*?\| АТРИБУТ:/i, '').trim());
+                    } else if (f.includes('СВЯЗЬ:')) {
+                        edges.push(f.replace(/СВЯЗЬ:/i, '').trim());
+                    } else {
+                        let cleanF = f.replace(/\[.*?\]/g, '').trim();
+                        if (cleanF.startsWith(u.first_name + ':')) cleanF = cleanF.substring(u.first_name.length + 1).trim();
+                        if (cleanF) others.push(cleanF);
+                    }
+                });
+
+                let memoryStr = '';
+                if (nodes.length > 0) memoryStr += '\n👤 <b>Личность (Узлы):</b>\n' + nodes.map(n => `  ▫️ ${n}`).join('\n');
+                if (edges.length > 0) memoryStr += '\n🔗 <b>Социальные связи:</b>\n' + edges.map(e => `  〰️ ${e}`).join('\n');
+                if (others.length > 0) memoryStr += '\n📝 <b>Архив (Обычные факты):</b>\n' + others.map(o => `  - ${o}`).join('\n');
+
+                if (!memoryStr) memoryStr = '\n🧠 <i>Чистый лист. Никаких связей и фактов в базе нет.</i>';
+
+                return `\n\n=== ПРОФИЛЬ: ${u.first_name} ===\n📊 XP: ${u.xp}, Лвл: ${u.level}, Варны: ${u.warns || 0}/3\n📝 Био: ${u.bio || 'Пусто'}\n📌 Досье: ${u.ai_notes || 'Нет записей'}${memoryStr}`;
             }
             case 'find_users_by_criteria': {
                 const results = await searchUserByName(chatId, args.search_query);
                 if (!results || results.length === 0) return "Никого не нашла.";
                 const list = results.map(u => `- ${u.name} (Заметки: ${u.ai_notes || u.bio || '?...'})`).join('\n');
-                return `=== РЕЗУЛЬТАТЫ ПОИСКА ===\n${list}`;
+                return `\n\n=== РЕЗУЛЬТАТЫ ПОИСКА ===\n${list}`;
             }
             case 'warn_user': {
                 if (!callerIsAdmin) return "Только админы могут варнить.";
@@ -361,7 +383,6 @@ async function executeToolCall(toolCall, chatId, messageId, userName, userId, ca
             case 'give_cookies': {
                 const u = await resolveUser(chatId, args.target_name);
                 if (!u) return "Кому?";
-                // ЗАЩИТА: Насильно ограничиваем количество печенек в коде
                 let amountToGive = parseInt(args.amount) || 1;
                 if (amountToGive > 3) {
                     console.log(`[SYSTEM] ИИ попытался выдать ${amountToGive} печенек. Ограничиваю до 3.`);
@@ -756,7 +777,25 @@ async function processAI(msg, extra) {
                 temperature: 0.8
             });
 
-            rawRes = (second.choices[0].message.content || "Секундочку...") + directInjectedData;
+            let aiText = second.choices[0].message.content || "Секундочку...";
+
+            // ---> ЖЕЛЕЗНАЯ ЗАЩИТА ОТ ДВОЙНОГО ПРОФИЛЯ <---
+            if (directInjectedData) {
+                // Если ИИ всё-таки написал "=== ПРОФИЛЬ", мы отсекаем эту часть и всё, что после неё.
+                // Оставляем только ту часть ответа, где ИИ дерзит/шутит, а правильную карточку приклеим сами.
+                const profileIndex = aiText.indexOf('=== ПРОФИЛЬ');
+                if (profileIndex !== -1) {
+                    aiText = aiText.substring(0, profileIndex).trim();
+                }
+                const searchIndex = aiText.indexOf('=== РЕЗУЛЬТАТЫ');
+                if (searchIndex !== -1) {
+                    aiText = aiText.substring(0, searchIndex).trim();
+                }
+
+                rawRes = aiText + directInjectedData;
+            } else {
+                rawRes = aiText;
+            }
 
         } else {
             rawRes = resp.content || "Ммм?";
