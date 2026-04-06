@@ -1,5 +1,14 @@
 ﻿const OpenAI = require('openai');
-const { insertKnowledge, searchKnowledge, checkFactExists } = require('./database');
+const {
+    insertKnowledge,
+    searchKnowledge,
+    checkFactExists,
+    searchKnowledgeByText,
+    getRecentKnowledge,
+    transliterate
+} = require('./database');
+
+console.log('✅ [SYSTEM] Модуль векторной памяти (vectorMemory.js) успешно подключен!');
 
 const POLZA_API_KEY = process.env.POLZA_API_KEY || 'pza_Ut5ahRtIFZSzj_jKezwdRvQMMebqZ1BI';
 const AI_MODEL = process.env.AI_MODEL || 'gpt-4o-mini';
@@ -140,103 +149,110 @@ ${historyText}`;
 }
 
 async function getRelevantFacts(chatId, userMessage, userName = "", activeParticipants = []) {
-    if (!userMessage || userMessage.trim() === '') return "";
+    try {
+        if (!userMessage || userMessage.trim() === '') return "";
 
-    const { searchKnowledgeByText, getRecentKnowledge, transliterate } = require('./database');
-    const allFoundFacts = new Set();
-    const finalFacts = [];
+        const allFoundFacts = new Set();
+        const finalFacts = [];
 
-    const stopWords = new Set(['меня', 'тебя', 'чтобы', 'какой', 'такой', 'зачем', 'почему', 'когда', 'будет', 'очень', 'просто', 'может', 'нужно', 'хочу', 'люблю']);
+        const stopWords = new Set(['меня', 'тебя', 'чтобы', 'какой', 'такой', 'зачем', 'почему', 'когда', 'будет', 'очень', 'просто', 'может', 'нужно', 'хочу', 'люблю']);
 
-    const getStemLocal = (word) => {
-        if (!word || word.length < 3) return word;
-        return word.toLowerCase()
-            .replace(/[уаеяюиыо]$/i, '')
-            .replace(/(ов|ев|ий|ый|ые|ие|ах|ях|ом|ем|ам|ам|у|е|а|я)$/i, '')
-            .replace(/(s|es|ed|ing)$/i, '');
-    };
+        const getStemLocal = (word) => {
+            if (!word || word.length < 3) return word;
+            return word.toLowerCase()
+                .replace(/[уаеяюиыо]$/i, '')
+                .replace(/(ов|ев|ий|ый|ые|ие|ах|ях|ом|ем|ам|ам|у|е|а|я)$/i, '')
+                .replace(/(s|es|ed|ing)$/i, '');
+        };
 
-    const embeddingRaw = await createEmbedding(userMessage);
-    const vectorResults = await searchKnowledge(chatId, embeddingRaw, 10, 0.45);
-    vectorResults.forEach(r => {
-        if (!allFoundFacts.has(r.fact)) {
-            allFoundFacts.add(r.fact);
-            finalFacts.push({ source: 'semantic', text: r.fact, relevance: r.similarity || 0.5 });
-        }
-    });
-
-    const words = userMessage.split(/\s+/)
-        .map(w => w.replace(/[.,!?;:()]/g, '').toLowerCase())
-        .filter(w => w.length > 3 && !stopWords.has(w));
-
-    if (words.length > 0) {
-        for (const word of words.slice(0, 7)) {
-            const stem = getStemLocal(word);
-            const textResults = await searchKnowledgeByText(chatId, stem, 3);
-            textResults.forEach(r => {
+        const embeddingRaw = await createEmbedding(userMessage);
+        if (embeddingRaw) {
+            const vectorResults = await searchKnowledge(chatId, embeddingRaw, 10, 0.45);
+            vectorResults.forEach(r => {
                 if (!allFoundFacts.has(r.fact)) {
                     allFoundFacts.add(r.fact);
-                    finalFacts.push({ source: 'keyword', text: r.fact });
+                    finalFacts.push({ source: 'semantic', text: r.fact, relevance: r.similarity || 0.5 });
                 }
             });
         }
-    }
 
-    if (userName) {
-        const recentResults = await getRecentKnowledge(chatId, userName, 10);
-        recentResults.forEach(r => {
-            if (!allFoundFacts.has(r.fact)) {
-                allFoundFacts.add(r.fact);
-                finalFacts.push({ source: 'recent', text: r.fact });
+        const words = userMessage.split(/\s+/)
+            .map(w => w.replace(/[.,!?;:()]/g, '').toLowerCase())
+            .filter(w => w.length > 3 && !stopWords.has(w));
+
+        if (words.length > 0) {
+            for (const word of words.slice(0, 7)) {
+                const stem = getStemLocal(word);
+                const textResults = await searchKnowledgeByText(chatId, stem, 3);
+                textResults.forEach(r => {
+                    if (!allFoundFacts.has(r.fact)) {
+                        allFoundFacts.add(r.fact);
+                        finalFacts.push({ source: 'keyword', text: r.fact });
+                    }
+                });
             }
+        }
+
+        if (userName) {
+            const recentResults = await getRecentKnowledge(chatId, userName, 10);
+            recentResults.forEach(r => {
+                if (!allFoundFacts.has(r.fact)) {
+                    allFoundFacts.add(r.fact);
+                    finalFacts.push({ source: 'recent', text: r.fact });
+                }
+            });
+        }
+
+        const searchStems = new Set();
+        const addTargetWithStem = (name) => {
+            if (!name || name.length < 3) return;
+            const stem = getStemLocal(name);
+            searchStems.add(stem);
+            searchStems.add(name.toLowerCase());
+            const trans = transliterate(name);
+            if (trans !== name.toLowerCase()) searchStems.add(getStemLocal(trans));
+        };
+
+        addTargetWithStem(userName);
+        if (activeParticipants) {
+            activeParticipants.forEach(p => {
+                if (p.firstName) addTargetWithStem(p.firstName);
+                if (p.username) addTargetWithStem(p.username);
+            });
+        }
+
+        const potentialNames = userMessage.match(/([А-Я][а-я]+|@[a-zA-Z0-9_]+)/g) || [];
+        potentialNames.forEach(n => addTargetWithStem(n.replace('@', '')));
+
+        for (const stem of searchStems) {
+            const byStem = await searchKnowledgeByText(chatId, stem, 10);
+            byStem.forEach(r => {
+                if (!allFoundFacts.has(r.fact)) {
+                    allFoundFacts.add(r.fact);
+                    finalFacts.push({ source: 'subject', text: r.fact });
+                }
+            });
+        }
+
+        if (finalFacts.length === 0) return "";
+
+        const sortedFacts = finalFacts.sort((a, b) => {
+            const order = { 'subject': 0, 'recent': 1, 'semantic': 2, 'keyword': 3 };
+            return order[a.source] - order[b.source];
         });
+
+        const factsText = sortedFacts
+            .slice(0, 15)
+            .map((f, i) => "- " + f.text)
+            .join('\n');
+
+        console.log("[MEMORY] Сверхпамять v4.0: " + finalFacts.length + " найдено.");
+        return factsText;
+
+    } catch (e) {
+        console.error('[MEMORY FATAL ERROR] Ошибка при поиске релевантных фактов:', e.message);
+        return "";
     }
-
-    const searchStems = new Set();
-    const addTargetWithStem = (name) => {
-        if (!name || name.length < 3) return;
-        const stem = getStemLocal(name);
-        searchStems.add(stem);
-        searchStems.add(name.toLowerCase());
-        const trans = transliterate(name);
-        if (trans !== name.toLowerCase()) searchStems.add(getStemLocal(trans));
-    };
-
-    addTargetWithStem(userName);
-    if (activeParticipants) {
-        activeParticipants.forEach(p => {
-            if (p.firstName) addTargetWithStem(p.firstName);
-            if (p.username) addTargetWithStem(p.username);
-        });
-    }
-
-    const potentialNames = userMessage.match(/([А-Я][а-я]+|@[a-zA-Z0-9_]+)/g) || [];
-    potentialNames.forEach(n => addTargetWithStem(n.replace('@', '')));
-
-    for (const stem of searchStems) {
-        const byStem = await searchKnowledgeByText(chatId, stem, 10);
-        byStem.forEach(r => {
-            if (!allFoundFacts.has(r.fact)) {
-                allFoundFacts.add(r.fact);
-                finalFacts.push({ source: 'subject', text: r.fact });
-            }
-        });
-    }
-
-    if (finalFacts.length === 0) return "";
-
-    const sortedFacts = finalFacts.sort((a, b) => {
-        const order = { 'subject': 0, 'recent': 1, 'semantic': 2, 'keyword': 3 };
-        return order[a.source] - order[b.source];
-    });
-
-    const factsText = sortedFacts
-        .slice(0, 15)
-        .map((f, i) => "- " + f.text)
-        .join('\n');
-
-    console.log("[MEMORY] Сверхпамять v4.0: " + finalFacts.length + " найдено.");
-    return factsText;
 }
 
 async function forgetFact(chatId, query) {
