@@ -629,7 +629,6 @@ async function processAI(msg, extra) {
 
     const fullContent = `${userName} ${replyPrefix}: ${userText}`;
 
-    // ИСПРАВЛЕНИЕ ДЛЯ ПАМЯТИ: Теперь буфер видит, кому был ответ!
     let memoryLine = `${userName}: ${userText}`;
     if (msg.reply_to_message) {
         memoryLine = `${userName} (в ответ ${rpAuthor}): ${userText}`;
@@ -641,15 +640,23 @@ async function processAI(msg, extra) {
 
     const isMentioned = nameTriggered || isReplyToBot;
 
+    // ---> ДОБАВЛЯЕМ ЛОГ ВХОДЯЩЕГО СООБЩЕНИЯ <---
+    if (msg.chat.type === 'private' || isMentioned) {
+        console.log(`\n💬 [CHAT IN] ${userName}: ${userText.substring(0, 60)}${userText.length > 60 ? '...' : ''}`);
+    }
+
     if (!extractionBuffer[chatId]) extractionBuffer[chatId] = [];
-    extractionBuffer[chatId].push(memoryLine); // Передаем линию с контекстом!
+    extractionBuffer[chatId].push(memoryLine);
 
     if (!rollingHistory[chatId]) rollingHistory[chatId] = [];
-    rollingHistory[chatId].push(memoryLine); // Передаем линию с контекстом!
+    rollingHistory[chatId].push(memoryLine);
     if (rollingHistory[chatId].length > 100) rollingHistory[chatId].shift();
 
     if (!messageCount[chatId]) messageCount[chatId] = 0;
+
+    // ---> ДОБАВЛЯЕМ ЛОГ СЧЕТЧИКА ПАМЯТИ <---
     if (++messageCount[chatId] >= 15) {
+        console.log(`\n🔍 [MEMORY] Накопилось 15 сообщений! Отправляю фоновый запрос на поиск фактов...`);
         extractAndSaveFacts(chatId, extractionBuffer[chatId].join('\n'), Object.values(activeParticipants[chatId] || {}).map(p => p.firstName));
         messageCount[chatId] = 0;
         extractionBuffer[chatId] = extractionBuffer[chatId].slice(-5);
@@ -668,6 +675,9 @@ async function processAI(msg, extra) {
     chatHistory[chatId] = trimHistory(chatHistory[chatId], 20);
 
     const callerIsAdmin = await isAdmin(chatId, userId);
+
+    // ---> ДОБАВЛЯЕМ ЛОГ СТАТУСА ГЕНЕРАЦИИ <---
+    console.log(`🧠 [AI] Ника думает над ответом...`);
 
     try {
         await bot.sendChatAction(chatId, 'typing');
@@ -763,6 +773,10 @@ async function processAI(msg, extra) {
         }
 
         const finalOutput = formatAIOutput(rawRes);
+
+        // ---> ДОБАВЛЯЕМ ЛОГ ОТВЕТА НИКИ <---
+        console.log(`✨ [CHAT OUT] Ника: ${finalOutput.replace(/<[^>]*>/g, '').substring(0, 60)}...`);
+
         await safeSendMessage(chatId, finalOutput, msg.message_id);
 
         chatHistory[chatId].push({ role: 'assistant', content: finalOutput.replace(/<[^>]*>/g, '') });
