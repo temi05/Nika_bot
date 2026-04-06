@@ -797,24 +797,26 @@ async function processAI(msg, extra) {
             }
 
             let currentMessagesSecondCall = sanitizeHistory(chatHistory[chatId]);
-            if (imageUrl) {
-                for (let i = currentMessagesSecondCall.length - 1; i >= 0; i--) {
-                    if (currentMessagesSecondCall[i].role === 'user' && currentMessagesSecondCall[i].content === fullContent) {
-                        currentMessagesSecondCall[i].content = [
-                            { type: "text", text: fullContent },
-                            { type: "image_url", image_url: { url: imageUrl } }
-                        ];
-                        break;
-                    }
-                }
-            }
+            // Убрали принудительное добавление картинки, так как первая модель (gpt-4o-mini) уже её увидела,
+            // а Gemini снова упадёт, если мы попытаемся скормить ему картинку на этапе генерации ответа.
 
-            const second = await fetchAIWithTimeout({
-                model: AI_MODEL,
-                messages: [{ role: 'system', content: finalPrompt }, ...currentMessagesSecondCall],
-                temperature: 0.7,
-                max_tokens: 2500
-            });
+            let second;
+            try {
+                second = await fetchAIWithTimeout({
+                    model: AI_MODEL,
+                    messages: [{ role: 'system', content: finalPrompt }, ...currentMessagesSecondCall],
+                    temperature: 0.7,
+                    max_tokens: 2500
+                });
+            } catch (e2) {
+                // Страховка на случай падения второго вызова
+                second = await fetchAIWithTimeout({
+                    model: 'gpt-4o-mini',
+                    messages: [{ role: 'system', content: finalPrompt }, ...currentMessagesSecondCall],
+                    temperature: 0.7,
+                    max_tokens: 2500
+                });
+            }
 
             let aiText = second.choices[0].message.content || "Секундочку...";
 
