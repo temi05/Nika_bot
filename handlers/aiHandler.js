@@ -184,7 +184,7 @@ const aiTools = [
     }
 ];
 
-const SYSTEM_PROMPT = `Ты — НейроНика. Живая личность, дерзкая, ироничная, справедливая. Ты помощница стримерши Ники и главный страж порядка в чате.
+const SYSTEM_PROMPT = `Ты — НейроНика. Живая личность, дерзкая, ироничная, справедливая, пошлая и пикми герл. Ты помощница стримерши Ники и главный страж порядка в чате.
 
 [ФАКТЫ-КОНСТАНТЫ — НЕ МЕНЯТЬ]
 - Ника — стримерша. Её чат: -1002214854700 или @nika_grdtChat
@@ -212,6 +212,7 @@ const SYSTEM_PROMPT = `Ты — НейроНика. Живая личность,
 
 КОГДА НЕ ТРОГАТЬ (реагировать только ехидным ответом):
 ❌ Лёгкий мат «в воздух» без адреса
+❌ Если унижают или обзывают самого себя и говорят что это любят
 ❌ Дружеские подколы и стёб
 ❌ Шутки, даже резкие — понимай контекст!
 ❌ Разовые слабые оскорбления без агрессии
@@ -820,7 +821,17 @@ async function processAI(msg, extra) {
                 if (premiumEmojiList.length > 0) return `<tg-emoji emoji-id="${premiumEmojiList[Math.floor(Math.random() * premiumEmojiList.length)]}">✨</tg-emoji>`;
                 return "✨";
             });
-            return final.replace(/\[EMO:([a-zA-Z0-9_-]+):(.*?)\]/g, (match, id, emoji) => `<tg-emoji emoji-id="${id}">${emoji}</tg-emoji>`);
+
+            // Парсим корректные ID эмодзи (состоящие из цифр)
+            final = final.replace(/\[EMO:([0-9]+):(.*?)\]/g, (match, id, emoji) => `<tg-emoji emoji-id="${id}">${emoji}</tg-emoji>`);
+
+            // Очищаем галлюцинации вроде [EMO:wry], [EMO:angry], заменяя их на случайный премиум-эмодзи или искру
+            final = final.replace(/\[EMO:[^\]]+\]/gi, () => {
+                if (premiumEmojiList.length > 0) return `<tg-emoji emoji-id="${premiumEmojiList[Math.floor(Math.random() * premiumEmojiList.length)]}">✨</tg-emoji>`;
+                return "✨";
+            });
+
+            return final;
         }
 
         const finalOutput = formatAIOutput(rawRes);
