@@ -14,8 +14,8 @@ const { getDueReminders, markReminderAsSent } = require('./database');
 const startTime = Date.now();
 
 global.log = {
-    info:  (...args) => process.stdout.write(`[${new Date().toISOString()}] [INFO]  ${args.join(' ')}\n`),
-    warn:  (...args) => process.stdout.write(`[${new Date().toISOString()}] [WARN]  ${args.join(' ')}\n`),
+    info: (...args) => process.stdout.write(`[${new Date().toISOString()}] [INFO]  ${args.join(' ')}\n`),
+    warn: (...args) => process.stdout.write(`[${new Date().toISOString()}] [WARN]  ${args.join(' ')}\n`),
     error: (...args) => process.stderr.write(`[${new Date().toISOString()}] [ERROR] ${args.join(' ')}\n`),
     debug: (...args) => process.stdout.write(`[${new Date().toISOString()}] [DEBUG] ${args.join(' ')}\n`),
 };
@@ -24,8 +24,8 @@ global.log = {
 const _origLog = console.log.bind(console);
 const _origWarn = console.warn.bind(console);
 const _origErr = console.error.bind(console);
-console.log   = (...a) => _origLog(`[${new Date().toISOString()}]`, ...a);
-console.warn  = (...a) => _origWarn(`[${new Date().toISOString()}] ⚠️`, ...a);
+console.log = (...a) => _origLog(`[${new Date().toISOString()}]`, ...a);
+console.warn = (...a) => _origWarn(`[${new Date().toISOString()}] ⚠️`, ...a);
 console.error = (...a) => _origErr(`[${new Date().toISOString()}] ❌`, ...a);
 
 // ─────────────────────────────────────────────────────────────
@@ -103,7 +103,7 @@ app.listen(PORT, async () => {
     console.log(`🚀  НЕЙРОНИКА ЗАПУСКАЕТСЯ`);
     console.log(`🚀  Порт: ${PORT} | Env: ${process.env.NODE_ENV || 'production'}`);
     console.log(`🚀 ══════════════════════════════════════`);
-    
+
     try {
         const me = await bot.getMe();
         console.log(`✅ Бот авторизован: @${me.username} (ID: ${me.id})`);
@@ -150,7 +150,7 @@ setInterval(async () => {
         const dueReminders = await getDueReminders();
         if (dueReminders && dueReminders.length > 0) {
             for (const r of dueReminders) {
-                const mention = r.user_name && r.user_name !== 'Инкогнито' ? `@${r.user_name}` : `(ID: ${r.user_id})`;
+                const mention = r.user_name && r.user_name !== 'Инкогнито' ? `${r.user_name}` : `(ID: ${r.user_id})`;
                 await bot.sendMessage(r.chat_id, `⏰ Дзынь-дзынь! Напоминалочка для ${mention}:\n\n${r.text}`);
                 await markReminderAsSent(r.id);
             }

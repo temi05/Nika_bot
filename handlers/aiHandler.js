@@ -630,7 +630,7 @@ async function processAI(msg, extra) {
         }
     }
     const relevantFacts = await getRelevantFacts(chatId, userText, userName, Object.values(activeParticipants[chatId]));
-    const memoryBlock = `\n[МЫСЛИ О ${userName}]\n${relevantFacts}\nВремя: ${new Date().toLocaleString('ru-RU')}\n`;
+    const memoryBlock = `\n[МЫСЛИ О ${userName}]\n${relevantFacts}\nВремя (МСК): ${new Date().toLocaleString('ru-RU', { timeZone: 'Europe/Moscow' })}\n`;
 
     const finalPrompt = SYSTEM_PROMPT + memoryBlock;
     chatHistory[chatId].push({ role: 'user', content: fullContent });
@@ -671,17 +671,28 @@ async function processAI(msg, extra) {
         }
         // ===============================================
 
-        let completion = await fetchAIWithTimeout({
-            model: AI_MODEL,
-            messages: [{ role: 'system', content: finalPrompt }, ...currentMessagesFirstCall],
-            tools: aiTools,
-            max_tokens: 2500,
-            temperature: 0.7
-        }).catch(e => fetchAIWithTimeout({
-            model: FALLBACK_MODEL,
-            messages: [{ role: 'system', content: finalPrompt }, ...currentMessagesFirstCall],
-            tools: aiTools, max_tokens: 2500, temperature: 0.7
-        }));
+        let completion;
+        try {
+            completion = await fetchAIWithTimeout({
+                model: AI_MODEL,
+                messages: [{ role: 'system', content: finalPrompt }, ...currentMessagesFirstCall],
+                tools: aiTools,
+                max_tokens: 2500,
+                temperature: 0.7
+            });
+        } catch (e) {
+            console.error("❌ OpenAI отклонил первый запрос (Vision):", e.message);
+            if (imageUrl) {
+                console.log("♻️ Откатываюсь на текстовый режим (OpenAI не поддержал формат картинки/стикера Telegram)");
+                // Возвращаем контент в обычный текстовый вид
+                currentMessagesFirstCall[currentMessagesFirstCall.length - 1].content = fullContent;
+            }
+            completion = await fetchAIWithTimeout({
+                model: FALLBACK_MODEL,
+                messages: [{ role: 'system', content: finalPrompt }, ...currentMessagesFirstCall],
+                tools: aiTools, max_tokens: 2500, temperature: 0.7
+            });
+        }
 
         let resp = completion.choices[0].message;
         let rawRes = "";
