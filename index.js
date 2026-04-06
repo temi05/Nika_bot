@@ -6,6 +6,7 @@ const { registerAdminCommands } = require('./handlers/adminCommands');
 const { registerMessageHandlers, handleReaction } = require('./handlers/messageHandler');
 const { registerVerificationHandlers } = require('./handlers/verificationHandler');
 const apiRouter = require('./handlers/apiHandler');
+const { getDueReminders, markReminderAsSent } = require('./database');
 
 // ─────────────────────────────────────────────────────────────
 // СТРУКТУРИРОВАННЫЙ LOGGER ДЛЯ RENDER
@@ -140,5 +141,23 @@ registerVerificationHandlers(); // Капча первой
 registerMessageHandlers();      // Логика сообщений
 registerCommands();             // Командные обработчики
 registerAdminCommands();        // Команды администраторов
+
+// ─────────────────────────────────────────────────────────────
+// ФОНОВЫЕ ЗАДАЧИ
+// ─────────────────────────────────────────────────────────────
+setInterval(async () => {
+    try {
+        const dueReminders = await getDueReminders();
+        if (dueReminders && dueReminders.length > 0) {
+            for (const r of dueReminders) {
+                const mention = r.user_name && r.user_name !== 'Инкогнито' ? `@${r.user_name}` : `(ID: ${r.user_id})`;
+                await bot.sendMessage(r.chat_id, `⏰ Дзынь-дзынь! Напоминалочка для ${mention}:\n\n${r.text}`);
+                await markReminderAsSent(r.id);
+            }
+        }
+    } catch (e) {
+        console.error('[REMINDER SYSTEM ERROR]', e.message);
+    }
+}, 60000); // Каждую минуту проверяем таймеры
 
 console.log('✅ Все обработчики зарегистрированы.');
