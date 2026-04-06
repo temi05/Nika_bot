@@ -8,7 +8,7 @@ const {
     transliterate
 } = require('./database');
 
-console.log('✅ [SYSTEM] Модуль векторной памяти (vectorMemory.js) успешно подключен!');
+console.log('✅ [SYSTEM] Модуль строгой графовой памяти успешно подключен!');
 
 const POLZA_API_KEY = process.env.POLZA_API_KEY || 'pza_Ut5ahRtIFZSzj_jKezwdRvQMMebqZ1BI';
 const AI_MODEL = process.env.AI_MODEL || 'gpt-4o-mini';
@@ -33,55 +33,38 @@ async function createEmbedding(text) {
 
 async function extractAndSaveFacts(chatId, historyText, participants = []) {
     try {
-        const participantInfo = participants.length > 0 ?
-            "Участники чата: " + participants.join(', ') + ". Используй ТОЛЬКО эти имена." :
-            "Определи имена участников из диалога.";
+        const prompt = `Ты — ядро извлечения знаний (LightRAG Graph Extractor). Твоя задача — строить граф связей из чата.
 
-        const prompt = `Ты — безжалостный фильтр долговременной памяти НейроНики. Твоя задача — извлекать из логов ТОЛЬКО вечные, фундаментальные факты и пикантные секреты пользователей.
+[КРИТИЧЕСКИЕ ПРАВИЛА — ИГНОРИРОВАНИЕ МУСОРА]
+ИГНОРИРУЙ ЦЕЛИКОМ И ПОЛНОСТЬЮ любой диалог, если он содержит:
+1. Управление памятью: "удали этот факт", "запомни это", "покажи профиль".
+2. Оценку бота: "ты тупая", "ИИ полезное записал", "как она работает".
+3. Бытовуху и еду: печеньки, сон, поход в магазин.
+Если чат состоит из этого — ВЕРНИ ПУСТОЙ МАССИВ.
 
-[ГЛАВНОЕ ПРАВИЛО: АНТИ-ВОДА И ОБОБЩЕНИЕ]
-95% диалогов — это пустая болтовня. Твоя ИДЕАЛЬНАЯ реакция на треп — вернуть ПУСТОЙ МАССИВ: {"facts": []}. 
-Не сохраняй факты про печеньки, прокси, тесты бота, или временные диалоги!
+[ПРАВИЛА ПОСТРОЕНИЯ ГРАФА]
+Ты сохраняешь ТОЛЬКО УЗЛЫ и СВЯЗИ.
+- УЗЕЛ: [Имя] | АТРИБУТ: [ФАКТ] (профессия, возраст, кинки, постоянные хобби).
+- СВЯЗЬ: [Имя1] -> [отношение] -> [Имя2] (ненавидит, любит, фанатеет).
 
-[КРИТИЧЕСКИ ВАЖНО: КТО, КОМУ И О КОМ]
-Нейросети часто путают, кто о ком говорит. Внимательно следи за пометкой "(в ответ ...)":
-- ЕСЛИ ГОВОРЯТ О СЕБЕ: Юзер пишет "Я люблю БДСМ" -> Факт на Юзера: "любит БДСМ".
-- ЕСЛИ ОБРАЩАЮТСЯ К НИКЕ (боту/стримерше): Если Юзер пишет Нике "ты сучка, встань на колени" -> Факт пишется НА ЮЗЕРА: "относится к Нике доминантно, хочет поставить её на колени". ЗАПРЕЩЕНО писать, что юзер просит это для себя!
-- ЕСЛИ ГОВОРЯТ О ДРУГОМ: Юзер А (в ответ Юзеру Б) пишет "ты клоун" -> Факт на Юзера А: "считает Юзера Б клоуном".
+Имя "Чатик 🫐 Nika_grdt 👾" сокращай просто до "Ника". Все остальные имена очищай от тегов.
 
-[ПРАВИЛО ИМЕН (ОЧИСТКА ОТ МУСОРА)]
-Извлекай только ЧИСТОЕ имя пользователя, без тегов, скобок и эмодзи! 
-Например: вместо "Любимый (@Lubimbi_director)" пиши просто "Любимый". Вместо "Чатик 🫐" пиши "Чатик".
+[СТРОГИЙ ФОРМАТ JSON]
+ТЕБЕ КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО использовать ключи "name" и "fact"!
+Ты должен вернуть объект с ключом "facts", где внутри лежит массив ОБЫЧНЫХ СТРОК.
 
-[БЕЛЫЙ СПИСОК (Сохранять ТОЛЬКО это)]:
-1. Секреты и Пошлости: Тайные фетиши, кинки (сохраняй ПРЯМО и БЕЗ ЦЕНЗУРЫ с учетом правила "КТО И О КОМ").
-2. Биография и Статус: Имя, возраст, город, профессия, ориентация.
-3. Глобальные Хобби: "фанат аниме", "программист".
-4. Здоровье и Техника: Аллергии, фобии, ПК, авто.
-
-[ЧЕРНЫЙ СПИСОК (АБСОЛЮТНЫЙ МУСОР - ИГНОРИРОВАТЬ СРАЗУ)]:
-❌ ЕДА И ПРЕДМЕТЫ: "хочет печеньку", "пьет сок", "купил шаурму". (ВСЯ ЕДА = МУСОР).
-❌ ТЕХНИКА БОТА: "скинул прокси", "тестирует бота", "просит добавить функцию".
-❌ ВРЕМЕННЫЕ ДЕЙСТВИЯ И РОЛПЛЕЙ: "предложил обнять", "идет спать", "хочет массаж".
-❌ ВРЕМЕННЫЕ ПЛАНЫ: "на работе", "через 2 дня позовут в игру".
-❌ Запросы к боту: "Ника, запомни это", "Ника, скажи".
-
-[ФОРМАТ ОТВЕТА (СТРОГО JSON)]
-Возвращай ТОЛЬКО валидный JSON-объект. Без маркдауна.
-
-Пример ПУСТОГО ответа (Для разговоров о печеньках и прокси):
-{"facts": []}
-
-Пример ответа с фактами:
+ПРАВИЛЬНЫЙ ОТВЕТ:
 {
   "facts": [
-    { "name": "Sanechk", "fact": "хочет доминировать над Никой и ставить её на колени" },
-    { "name": "Лексон", "fact": "ненавидит Валорант и предпочитает Майнкрафт" }
+    "УЗЕЛ: Алекс | АТРИБУТ: работает программистом",
+    "СВЯЗЬ: Чика -> ненавидит -> Любимый"
   ]
 }
 
-Участники чата (для сверки имен):
-${participantInfo}
+ПУСТОЙ ОТВЕТ (используй в 90% случаев):
+{
+  "facts": []
+}
 
 Диалог для анализа:
 ${historyText}`;
@@ -89,10 +72,10 @@ ${historyText}`;
         const completion = await openai.chat.completions.create({
             model: AI_MODEL,
             messages: [
-                { role: 'system', content: prompt + "\n\nОТВЕТЬ ТОЛЬКО В ФОРМАТЕ JSON." }
+                { role: 'system', content: prompt }
             ],
             temperature: 0.0,
-            max_tokens: 1500, // Защита от ошибки "Unexpected end of JSON input"
+            max_tokens: 1500,
             response_format: { type: 'json_object' }
         });
 
@@ -101,50 +84,31 @@ ${historyText}`;
 
         let result;
         try {
-            const jsonMatch = rawContent.match(/(\{[\s\S]*\}|\[[\s\S]*\])/);
-            if (jsonMatch) {
-                result = JSON.parse(jsonMatch[0]);
-            } else {
-                result = JSON.parse(rawContent);
-            }
+            result = JSON.parse(rawContent);
         } catch (parseError) {
             console.log("[MEMORY EXTRACTOR] Ошибка парсинга JSON: " + parseError.message);
             return;
         }
 
-        let facts = [];
-        const items = Array.isArray(result) ? result : (result?.facts || []);
-
-        for (const f of items) {
-            if (typeof f === 'object' && f.name && f.fact) {
-                facts.push(`${f.name}: ${f.fact}`);
-            } else if (typeof f === 'object' && f.fact) {
-                facts.push(f.fact);
-            } else if (typeof f === 'string') {
-                facts.push(f);
-            }
-        }
-
-        facts = facts.filter(f => f && typeof f === 'string' && f.trim() !== '');
+        let facts = result.facts || [];
 
         for (const fact of facts) {
+            if (typeof fact !== 'string' || fact.trim() === '') continue;
+
             const exists = await checkFactExists(chatId, fact);
             if (exists) continue;
 
             const embedding = await createEmbedding(fact);
             if (embedding) {
                 const duplicates = await searchKnowledge(chatId, embedding, 1, 0.85);
-                if (duplicates && duplicates.length > 0) {
-                    console.log("[MEMORY] Семантический дубликат (похожий смысл) пропущен: " + fact);
-                    continue;
-                }
+                if (duplicates && duplicates.length > 0) continue;
 
                 await insertKnowledge(chatId, fact, embedding);
-                console.log("[MEMORY] Успешно запомнен факт: " + fact);
+                console.log("[MEMORY] Успешно добавлен узел/связь: " + fact);
             }
         }
     } catch (e) {
-        console.error('[MEMORY ERROR] Ошибка экстракции фактов:', e.message);
+        console.error('[MEMORY ERROR] Ошибка экстракции:', e.message);
     }
 }
 
@@ -246,7 +210,6 @@ async function getRelevantFacts(chatId, userMessage, userName = "", activePartic
             .map((f, i) => "- " + f.text)
             .join('\n');
 
-        console.log("[MEMORY] Сверхпамять v4.0: " + finalFacts.length + " найдено.");
         return factsText;
 
     } catch (e) {
