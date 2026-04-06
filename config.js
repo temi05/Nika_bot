@@ -26,5 +26,8 @@ module.exports = {
     token,
     aternos_session,
     aternos_server_id,
-    ANONYMOUS_ADMIN_ID: 1087968824
+    ANONYMOUS_ADMIN_ID: 1087968824,
+    // Суперадмин (владелец бота) — никогда не мутится, всегда считается админом
+    SUPER_ADMIN_ID: 861713427,
+    SUPER_ADMIN_USERNAME: 'SCTemi',
 };

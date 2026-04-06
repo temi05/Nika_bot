@@ -1,7 +1,17 @@
-const { bot, token, ANONYMOUS_ADMIN_ID } = require('./config');
+const { bot, token, ANONYMOUS_ADMIN_ID, SUPER_ADMIN_ID, SUPER_ADMIN_USERNAME } = require('./config');
 
 const adminCache = {}; // { chatId_userId: { isAdmin: bool, expires: timestamp } }
 const ADMIN_CACHE_TTL = 120000; // 2 минуты
+
+/**
+ * Проверяет, является ли userId суперадмином (владельцем бота).
+ * Суперадмин никогда не мутится и всегда считается админом.
+ */
+function isSuperAdmin(userId, username) {
+    if (userId === SUPER_ADMIN_ID) return true;
+    if (username && username.toLowerCase().replace('@', '') === SUPER_ADMIN_USERNAME.toLowerCase()) return true;
+    return false;
+}
 
 function getUserName(user) {
     if (!user) return 'Инкогнито';
@@ -77,7 +87,10 @@ function deleteMsg(chatId, msgId, delay = 60000) {
     }, delay);
 }
 
-async function isAdmin(chatId, userId) {
+async function isAdmin(chatId, userId, username) {
+    // ★ СУПЕРАДМИН — всегда true, без API запроса
+    if (isSuperAdmin(userId, username)) return true;
+
     // Анонимные админы и каналы в группах считаются админами
     if (userId === ANONYMOUS_ADMIN_ID || userId < 0) return true;
 
@@ -91,7 +104,6 @@ async function isAdmin(chatId, userId) {
         const member = await bot.getChatMember(chatId, userId);
         const isAdminStatus = ['creator', 'administrator'].includes(member.status);
         
-        // Сохраняем в кэш
         adminCache[cacheKey] = {
             isAdmin: isAdminStatus,
             expires: Date.now() + ADMIN_CACHE_TTL
@@ -111,6 +123,7 @@ module.exports = {
     sendTimedMessage,
     deleteMsg,
     isAdmin,
+    isSuperAdmin,
     adminCache,
     token,
     ANONYMOUS_ADMIN_ID,

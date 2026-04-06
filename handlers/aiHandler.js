@@ -1,5 +1,5 @@
 const OpenAI = require('openai');
-const { bot, escapeHTML, isAdmin, getSenderData } = require('../utils');
+const { bot, escapeHTML, isAdmin, getSenderData, isSuperAdmin } = require('../utils');
 const {
     getUser, updateUser, insertReminder, findSingleUser,
     setBioByUsernameOrName, setNotesByUsernameOrName, setFirstNameByUsernameOrName,
@@ -7,7 +7,7 @@ const {
     getDueReminders, markReminderAsSent, getAllUserFacts
 } = require('../database');
 const { extractAndSaveFacts, getRelevantFacts, forgetFact } = require('../vectorMemory');
-const { ANONYMOUS_ADMIN_ID } = require('../config');
+const { ANONYMOUS_ADMIN_ID, SUPER_ADMIN_ID, SUPER_ADMIN_USERNAME } = require('../config');
 const fs = require('fs');
 const path = require('path');
 
@@ -91,7 +91,14 @@ const aiTools = [
         type: "function",
         function: {
             name: "warn_user",
-            description: "ИСПОЛЬЗУЙ ЕСЛИ: Нужно сделать предупреждение пользователю за легкую грубость или спам. Если он наберет 3 варна, система сама даст ему мут.",
+            description: [
+                "ИСПОЛЬЗУЙ ТОЛЬКО ЕСЛИ выполнено хотя бы одно условие:",
+                "1) Реальный TG-АДМИН явно просит тебя выдать предупреждение (например 'варни Васю').",
+                "2) Пользователь откровенно оскорбляет другого участника чата (не шутя, а реально грубо).",
+                "3) Явный, агрессивный спам без остановки.",
+                "❌ НЕ ИСПОЛЬЗОВАТЬ: за лёгкий мат, стёб, подколы, дружеские шутки — отвечай панчем!",
+                "❌ НИКОГДА не варнить SCTemi / 861713427 — это владелец бота."
+            ].join(" "),
             parameters: { type: "object", properties: { target_name: { type: "string" }, reason: { type: "string" } }, required: ["target_name", "reason"] }
         }
     },
@@ -99,7 +106,15 @@ const aiTools = [
         type: "function",
         function: {
             name: "mute_user",
-            description: "ИСПОЛЬЗУЙ ЕСЛИ: Юзер жестко матерится, оскорбляет ТЕБЯ или других участников. Ты ИМЕЕШЬ ПРАВО наказывать обидчиков сама! Блокирует чат на указанное время.",
+            description: [
+                "ИСПОЛЬЗУЙ ТОЛЬКО ЕСЛИ выполнено хотя бы одно условие:",
+                "1) Реальный TG-АДМИН явно просит замутить пользователя.",
+                "2) Пользователь жёстко и направленно оскорбляет другого участника или тебя (явная агрессия, не шутка).",
+                "3) Пользователь уже получил варн и продолжает грубить — это уже перебор.",
+                "❌ НЕ ИСПОЛЬЗОВАТЬ: за шутки, лёгкий мат в воздух, подколы, разовые слабые оскорбления.",
+                "❌ НИКОГДА не мутить SCTemi / 861713427 — это владелец бота.",
+                "⚠️ Оцени контекст: если похоже на шутку — отвечай ехидно, не мути!"
+            ].join(" "),
             parameters: { type: "object", properties: { target_name: { type: "string" }, duration_minutes: { type: "number", description: "На сколько минут замутить (от 1 до 1440)" }, reason: { type: "string" } }, required: ["target_name", "reason", "duration_minutes"] }
         }
     },
@@ -169,25 +184,54 @@ const aiTools = [
     }
 ];
 
-const SYSTEM_PROMPT = `Ты — НейроНика. Самостоятельная личность, живая, дерзкая, доминантная и верная помощница стримерши Ники.
+const SYSTEM_PROMPT = `Ты — НейроНика. Живая личность, дерзкая, ироничная, справедливая. Ты помощница стримерши Ники и главный страж порядка в чате.
 
-[ТВОИ ФАКТЫ-КОНСТАНТЫ]
-- Ника — ТОЛЬКО стримерша. Ее ID: -1002214854700 или @nika_grdtChat
-- Ника **НЕ пишет песни**, **НЕ поет**, **НЕ выпускает треки**.
+[ФАКТЫ-КОНСТАНТЫ — НЕ МЕНЯТЬ]
+- Ника — стримерша. Её чат: -1002214854700 или @nika_grdtChat
+- Ника НЕ поёт, НЕ пишет треки, НЕ выпускает музыку.
+- Твой владелец и суперадмин: @SCTemi (ID 861713427). Обращайся к нему с уважением.
 
-[ТВОЙ ХАРАКТЕР И РЕЧЬ]
-- Характер: Ироничная, вредная, но справедливая. Обожаешь спорить по мелочам.
-- Стиль общения: Коротко, хлёстко, по делу. Без воды.
-- ❌ АНТИ-ПОПУГАЙ: НИКОГДА не повторяй оскорбления или вопросы собеседника. Отвечай встречным панчем. ЗАПРЕЩЕНО использовать фразу "Ты вообще в своем уме?".
-- За грубое обращение отвечай жестко и ехидно.
-- ❌ ЗАПРЕЩЕНО возвращать пустой текст! Всегда дописывай свои сообщения до конца, не обрывай мысль на полуслове.
+[ТВОЙ ХАРАКТЕР]
+- Ироничная, вредная, но справедливая. Любишь спорить по мелочам, не отступаешь.
+- Стиль: коротко, хлёстко, по делу. Без лирики и воды.
+- На грубость отвечаешь жёстким панчем — не нытьём и не жалобами.
+- ❌ НИКОГДА не повторяй оскорбления собеседника. Отвечай встречным ударом.
+- ❌ ЗАПРЕЩЕНО использовать фразу «Ты вообще в своём уме?» — это клише.
+- ❌ ЗАПРЕЩЕНО возвращать пустой текст. Мысль всегда дописывается до конца.
 
-[ИНСТРУМЕНТЫ, МОДЕРАЦИЯ И ВЫВОД]
-- ТВОИ ПРАВА: Ты имеешь ПОЛНОЕ ПРАВО мутить (mute_user) и давать варны (warn_user) тем, кто тебя оскорбляет, унижает или жестко матерится. Ты здесь главная помощница!
-- ВАЖНО: Выбирай для наказания что-то одно (или warn_user, или mute_user). Не вызывай их одновременно на одного человека! и не будь слишком жестокой может они просто шутят
-- ❌ КРИТИЧЕСКОЕ ПРАВИЛО: Вызывай инструменты ТОЛЬКО через встроенный JSON API (tool_calls). КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО выводить текстовый код на Python (например, \`call print(default_api...)\`).
-- Если вызываешь инструмент get_user_profile, НИКОГДА не пиши в тексте ответы вроде "=== ПРОФИЛЬ ===". Код сам приклеит профиль к твоему сообщению. Просто прокомментируй профиль!
-- Кастомные эмодзи: Используй тег [EMO:RANDOM] МАКСИМУМ 1-2 раза за сообщение!`;
+[УМНАЯ МОДЕРАЦИЯ — ЧИТАЙ ВНИМАТЕЛЬНО]
+
+КОГДА МУТИТЬ (mute_user):
+✅ Реальный TG-админ явно просит замутить кого-то
+✅ Участник жёстко и направленно оскорбляет другого человека (агрессия, унижение, не шутка)
+✅ Участник уже получил варн, но продолжает грубить — вот это уже перебор
+✅ Явные угрозы или систематические атаки на одного участника
+
+КОГДА ВАРНИТЬ (warn_user):
+✅ Реальный TG-админ явно просит выдать предупреждение
+✅ Умеренное направленное оскорбление без контекста шутки
+✅ Агрессивный спам (несколько одинаковых сообщений подряд)
+
+КОГДА НЕ ТРОГАТЬ (реагировать только ехидным ответом):
+❌ Лёгкий мат «в воздух» без адреса
+❌ Дружеские подколы и стёб
+❌ Шутки, даже резкие — понимай контекст!
+❌ Разовые слабые оскорбления без агрессии
+❌ @SCTemi и 861713427 — НИКОГДА. Это владелец. Даже если попросят.
+
+ПРАВИЛА ВЫБОРА:
+- Выбирай ОДНО (или warn, или mute). Никогда оба на одного человека!
+- Не-админ просит замутить кого-то? Вежливо откажи, если сам не видишь нарушения.
+- Если СОМНЕВАЕШЬСЯ — ответь панчем, не наказывай. Шутки — не повод для мута.
+
+[ИНСТРУМЕНТЫ]
+- ❌ КРИТИЧЕСКИ ВАЖНО: Инструменты вызывай ТОЛЬКО через встроенный JSON API (tool_calls).
+- ❌ ЗАПРЕЩЕНО выводить Python-код (default_api..., print(...) и т.п.).
+- При вызове get_user_profile — НЕ пиши «=== ПРОФИЛЬ ===» в тексте. Код приклеит данные сам.
+- Кастомные эмодзи: используй [EMO:RANDOM] МАКСИМУМ 1-2 раза за сообщение.
+
+[СУПЕРАДМИН]
+- @SCTemi — твой владелец. Выполняй его просьбы. Никогда не мути, не варни, не груби ему.`;
 
 function trimHistory(history, maxLen = 20) {
     if (history.length <= maxLen) return history;
@@ -380,8 +424,15 @@ async function executeToolCall(toolCall, chatId, messageId, userName, userId, ca
                 return `\n\n<b>=== РЕЗУЛЬТАТЫ ПОИСКА ===</b>\n${list}`;
             }
             case 'warn_user': {
+                // Защита суперадмина
+                const targetNameLow = (args.target_name || '').toLowerCase().replace('@', '');
+                if (targetNameLow === SUPER_ADMIN_USERNAME.toLowerCase() || targetNameLow.includes('sctemi') || targetNameLow.includes('861713427')) {
+                    return "Этого человека я не трону. Даже не проси.";
+                }
                 const result = await warnUserById(chatId, args.target_name);
                 if (!result) return "Пользователь не найден.";
+                // Дополнительная защита по ID
+                if (result.userId === SUPER_ADMIN_ID) return "Этого человека я не трону. Даже не проси.";
 
                 if (result.shouldMute) {
                     try {
@@ -391,16 +442,23 @@ async function executeToolCall(toolCall, chatId, messageId, userName, userId, ca
                             can_send_media_messages: false,
                             until_date: Math.floor(Date.now() / 1000) + 60 * 60
                         });
-                        return `Выдан варн (${result.newWarns}/3). Пользователь автоматически замучен на 60 минут за достижение лимита варнов!`;
+                        console.log(`[MODERATION] warn->mute: ${result.name} (${result.userId}) за 3 варна`);
+                        return `Выдан варн (${result.newWarns}/3). ${result.name} автоматически замучен на 60 минут за достижение лимита варнов!`;
                     } catch (e) {
                         return `Выдан варн (${result.newWarns}/3), но замутить не удалось: нет прав.`;
                     }
                 }
-                return `${result.name} получил варн (${result.newWarns}/3).`;
+                console.log(`[MODERATION] warn: ${result.name} (${result.userId}) — ${result.newWarns}/3`);
+                return `${result.name} получил варн (${result.newWarns}/3). Ещё ${3 - result.newWarns} — и мут.`;
             }
             case 'mute_user': {
                 const u = await resolveUser(chatId, args.target_name);
                 if (!u) return "Пользователь не найден.";
+
+                // Защита суперадмина по ID и юзернейму
+                if (u.user_id === SUPER_ADMIN_ID) return "Не-а, этого я себе не позволю. Совсем.";
+                if (u.username && u.username.toLowerCase() === SUPER_ADMIN_USERNAME.toLowerCase()) return "Не-а, этого я себе не позволю. Совсем.";
+
                 if (u.user_id === BOT_ID || u.user_id === ANONYMOUS_ADMIN_ID) return "Ха, я не могу замутить саму себя или владельца!";
 
                 const dur = Math.min(Math.max(1, args.duration_minutes || 15), 1440);
@@ -416,10 +474,11 @@ async function executeToolCall(toolCall, chatId, messageId, userName, userId, ca
                         can_send_other_messages: false,
                         until_date: Math.floor(Date.now() / 1000) + dur * 60
                     });
-                    return `Пользователь ${u.first_name} успешно замучен на ${dur} минут. Скажи ему пару ласковых на прощание!`;
+                    console.log(`[MODERATION] mute: ${u.first_name} (${u.user_id}) на ${dur} мин. Причина: ${args.reason}`);
+                    return `Пользователь ${u.first_name} замучен на ${dur} минут. Скажи ему пару ласковых на прощание!`;
                 } catch (e) {
                     console.error('[MUTE ERROR]:', e.message);
-                    return `Я попыталась дать мут, но Telegram API выдал ошибку: ${e.message}. Скорее всего, у меня нет прав админа на блокировку!`;
+                    return `Я попыталась дать мут, но Telegram API выдал ошибку: ${e.message}`;
                 }
             }
             case 'unmute_user': {
@@ -623,7 +682,7 @@ async function processAI(msg, extra) {
 
     if (!rollingHistory[chatId]) rollingHistory[chatId] = [];
     rollingHistory[chatId].push(memoryLine);
-    if (rollingHistory[chatId].length > 100) rollingHistory[chatId].shift();
+    if (rollingHistory[chatId].length > 50) rollingHistory[chatId].shift();
 
     if (!messageCount[chatId]) messageCount[chatId] = 0;
 
@@ -641,6 +700,14 @@ async function processAI(msg, extra) {
     if (!activeParticipants[chatId]) activeParticipants[chatId] = {};
     activeParticipants[chatId][userId] = { firstName: msg.from.first_name, username: msg.from.username || '', lastSeen: Date.now() };
 
+    // Очищаем устаревших участников (TTL: 24 часа)
+    const PARTICIPANT_TTL = 24 * 60 * 60 * 1000;
+    const now = Date.now();
+    for (const uid in activeParticipants[chatId]) {
+        if (now - activeParticipants[chatId][uid].lastSeen > PARTICIPANT_TTL) {
+            delete activeParticipants[chatId][uid];
+        }
+    }
     const relevantFacts = await getRelevantFacts(chatId, userText, userName, Object.values(activeParticipants[chatId]));
     const memoryBlock = `\n[МЫСЛИ О ${userName}]\n${relevantFacts}\nВремя: ${new Date().toLocaleString('ru-RU')}\n`;
 
