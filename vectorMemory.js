@@ -78,6 +78,7 @@ ${historyText}`;
                 { role: 'system', content: prompt + "\n\nОТВЕТЬ ТОЛЬКО В ФОРМАТЕ JSON." }
             ],
             temperature: 0.0,
+            max_tokens: 1500,
             response_format: { type: 'json_object' }
         });
 
