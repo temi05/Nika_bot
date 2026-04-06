@@ -712,8 +712,12 @@ async function processAI(msg, extra) {
 
         let completion;
         try {
+            // Если есть картинка, сразу отправляем в gpt-4o-mini, так как Gemini (в текущем API)
+            // молча игнорирует Base64-код и опирается только на текст, не выдавая ошибку.
+            const targetModel = imageUrl ? 'gpt-4o-mini' : AI_MODEL;
+            
             completion = await fetchAIWithTimeout({
-                model: AI_MODEL,
+                model: targetModel,
                 messages: [{ role: 'system', content: finalPrompt }, ...currentMessagesFirstCall],
                 tools: aiTools,
                 max_tokens: 2500,
