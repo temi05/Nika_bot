@@ -91,7 +91,7 @@ const aiTools = [
         type: "function",
         function: {
             name: "warn_user",
-            description: "Только для админов. Выдает предупреждение юзеру.",
+            description: "ИСПОЛЬЗУЙ ЕСЛИ: Нужно сделать предупреждение пользователю за легкую грубость или спам. Если он наберет 3 варна, система сама даст ему мут.",
             parameters: { type: "object", properties: { target_name: { type: "string" }, reason: { type: "string" } }, required: ["target_name", "reason"] }
         }
     },
@@ -99,15 +99,15 @@ const aiTools = [
         type: "function",
         function: {
             name: "mute_user",
-            description: "Только для админов. Блокирует чат.",
-            parameters: { type: "object", properties: { target_name: { type: "string" }, duration_minutes: { type: "number" }, reason: { type: "string" } }, required: ["target_name", "reason"] }
+            description: "ИСПОЛЬЗУЙ ЕСЛИ: Юзер жестко матерится, оскорбляет ТЕБЯ или других участников. Ты ИМЕЕШЬ ПРАВО наказывать обидчиков сама! Блокирует чат на указанное время.",
+            parameters: { type: "object", properties: { target_name: { type: "string" }, duration_minutes: { type: "number", description: "На сколько минут замутить (от 1 до 1440)" }, reason: { type: "string" } }, required: ["target_name", "reason", "duration_minutes"] }
         }
     },
     {
         type: "function",
         function: {
             name: "unmute_user",
-            description: "Только для админов. Снимает мут.",
+            description: "ИСПОЛЬЗУЙ ЕСЛИ: Админ просит размутить (снять мут) пользователя или ты решила его простить.",
             parameters: { type: "object", properties: { target_name: { type: "string" } }, required: ["target_name"] }
         }
     },
@@ -180,10 +180,12 @@ const SYSTEM_PROMPT = `Ты — НейроНика. Самостоятельна
 - Стиль общения: Коротко, хлёстко, по делу. Без воды.
 - ❌ АНТИ-ПОПУГАЙ: НИКОГДА не повторяй оскорбления или вопросы собеседника. Отвечай встречным панчем. ЗАПРЕЩЕНО использовать фразу "Ты вообще в своем уме?".
 - За грубое обращение отвечай жестко и ехидно.
-- ❌ ЗАПРЕЩЕНО возвращать пустой текст! Всегда пиши хоть пару слов.
+- ❌ ЗАПРЕЩЕНО возвращать пустой текст! Всегда дописывай свои сообщения до конца, не обрывай мысль на полуслове.
 
-[ИНСТРУМЕНТЫ И ВЫВОД]
-- Ты МОЖЕШЬ вызывать сразу несколько инструментов (например, записать в досье и сразу показать профиль).
+[ИНСТРУМЕНТЫ, МОДЕРАЦИЯ И ВЫВОД]
+- ТВОИ ПРАВА: Ты имеешь ПОЛНОЕ ПРАВО мутить (mute_user) и давать варны (warn_user) тем, кто тебя оскорбляет, унижает или жестко матерится. Ты здесь главная помощница!
+- ВАЖНО: Выбирай для наказания что-то одно (или warn_user, или mute_user). Не вызывай их одновременно на одного человека!
+- Ты МОЖЕШЬ вызывать сразу несколько РАЗНЫХ инструментов (например, записать в досье и сразу показать профиль).
 - Если вызываешь инструмент get_user_profile, НИКОГДА не пиши в тексте ответы вроде "=== ПРОФИЛЬ ===". Код сам приклеит профиль к твоему сообщению. Просто прокомментируй профиль!
 - Кастомные эмодзи: Используй тег [EMO:RANDOM] МАКСИМУМ 1-2 раза за сообщение!`;
 
@@ -207,7 +209,8 @@ function sanitizeHistory(history) {
     });
 }
 
-async function fetchAIWithTimeout(payload, timeoutMs = 25000) {
+// Увеличен таймаут до 40 секунд, чтобы сложные многоходовочки не роняли бота
+async function fetchAIWithTimeout(payload, timeoutMs = 40000) {
     const apiCall = openai.chat.completions.create(payload);
     const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error('TIMEOUT')), timeoutMs));
     return Promise.race([apiCall, timeout]);
@@ -242,11 +245,9 @@ async function resolveUser(chatId, targetName) {
         }
     }
 
-    // 1. Стандартный строгий поиск (имя/юзернейм)
     let u = await findSingleUser(chatId, cleanName);
     if (u) return u;
 
-    // 2. УМНЫЙ ПОИСК: Ищем по досье (если там записано "Псинка = Bloxastaya_Psina")
     try {
         const searchResults = await searchUserByName(chatId, cleanName);
         if (searchResults && searchResults.length > 0) {
@@ -380,31 +381,59 @@ async function executeToolCall(toolCall, chatId, messageId, userName, userId, ca
                 return `\n\n<b>=== РЕЗУЛЬТАТЫ ПОИСКА ===</b>\n${list}`;
             }
             case 'warn_user': {
-                if (!callerIsAdmin) return "Только админы могут варнить.";
-                const u = await resolveUser(chatId, args.target_name);
-                if (!u) return "Пользователь не найден.";
-                const nw = (u.warns || 0) + 1;
-                await updateUser(u.id, { warns: nw });
-                return `${u.first_name} получил варн (${nw}/3).`;
+                const result = await warnUserById(chatId, args.target_name);
+                if (!result) return "Пользователь не найден.";
+
+                // ИНТЕЛЛЕКТУАЛЬНЫЙ АВТОМУТ при 3 варнах
+                if (result.shouldMute) {
+                    try {
+                        await bot.restrictChatMember(chatId, result.userId, {
+                            permissions: { can_send_messages: false, can_send_media_messages: false },
+                            until_date: Math.floor(Date.now() / 1000) + 60 * 60 // Автомут на час
+                        });
+                        return `Выдан варн (${result.newWarns}/3). Пользователь автоматически замучен на 60 минут за достижение лимита варнов!`;
+                    } catch (e) {
+                        return `Выдан варн (${result.newWarns}/3), но замутить не удалось: нет прав.`;
+                    }
+                }
+                return `${result.name} получил варн (${result.newWarns}/3).`;
             }
             case 'mute_user': {
-                if (!callerIsAdmin) return "Только админы.";
                 const u = await resolveUser(chatId, args.target_name);
-                if (!u) return "Не найден.";
+                if (!u) return "Пользователь не найден.";
+                if (u.user_id === BOT_ID || u.user_id === ANONYMOUS_ADMIN_ID) return "Ха, я не могу замутить саму себя или владельца!";
+
                 const dur = Math.min(Math.max(1, args.duration_minutes || 15), 1440);
                 try {
-                    await bot.restrictChatMember(chatId, u.user_id, { until_date: Math.floor(Date.now() / 1000) + dur * 60 });
-                    return `Замучен на ${dur} мин.`;
-                } catch (e) { return `Ошибка: ${e.message}`; }
+                    // ИСПРАВЛЕНИЕ МУТА: Теперь передаем правильный объект permissions
+                    await bot.restrictChatMember(chatId, u.user_id, {
+                        permissions: {
+                            can_send_messages: false,
+                            can_send_media_messages: false,
+                            can_send_other_messages: false
+                        },
+                        until_date: Math.floor(Date.now() / 1000) + dur * 60
+                    });
+                    return `Пользователь ${u.first_name} успешно замучен на ${dur} минут. Скажи ему пару ласковых на прощание!`;
+                } catch (e) {
+                    console.error('[MUTE ERROR]:', e.message);
+                    return `Я попыталась дать мут, но Telegram API выдал ошибку: ${e.message}. Скорее всего, у меня нет прав админа на блокировку!`;
+                }
             }
             case 'unmute_user': {
-                if (!callerIsAdmin) return "Только админы.";
                 const u = await resolveUser(chatId, args.target_name);
-                if (!u) return "Не найден.";
+                if (!u) return "Пользователь не найден.";
                 try {
-                    await bot.restrictChatMember(chatId, u.user_id, { can_send_messages: true, can_send_media_messages: true });
-                    return `Размучен.`;
-                } catch (e) { return `Ошибка: ${e.message}`; }
+                    await bot.restrictChatMember(chatId, u.user_id, {
+                        permissions: {
+                            can_send_messages: true,
+                            can_send_media_messages: true,
+                            can_send_other_messages: true,
+                            can_add_web_page_previews: true
+                        }
+                    });
+                    return `Пользователь ${u.first_name} успешно размучен.`;
+                } catch (e) { return `Ошибка снятия мута: ${e.message}`; }
             }
             case 'give_cookies': {
                 const u = await resolveUser(chatId, args.target_name);
@@ -571,16 +600,18 @@ async function processAI(msg, extra) {
 
     try {
         await bot.sendChatAction(chatId, 'typing');
+
+        // Изменено на temperature 0.7 и max_tokens 2500 для избежания повторов и обрывов
         let completion = await fetchAIWithTimeout({
             model: AI_MODEL,
             messages: [{ role: 'system', content: finalPrompt }, ...sanitizeHistory(chatHistory[chatId])],
             tools: aiTools,
-            max_tokens: 1500,
-            temperature: 0.1
+            max_tokens: 2500,
+            temperature: 0.7
         }).catch(e => fetchAIWithTimeout({
             model: FALLBACK_MODEL,
             messages: [{ role: 'system', content: finalPrompt }, ...sanitizeHistory(chatHistory[chatId])],
-            tools: aiTools, max_tokens: 1000, temperature: 0.1
+            tools: aiTools, max_tokens: 2000, temperature: 0.7
         }));
 
         let resp = completion.choices[0].message;
@@ -600,7 +631,7 @@ async function processAI(msg, extra) {
                     chatHistory[chatId].push({ role: 'function', name: fnName, content: String(res) });
                 }
 
-                if (['get_user_profile', 'find_users_by_criteria', 'give_cookies'].includes(fnName)) {
+                if (['get_user_profile', 'find_users_by_criteria', 'give_cookies', 'mute_user', 'warn_user'].includes(fnName)) {
                     if (!directInjectedData.includes(res)) directInjectedData += `\n\n${res}`;
                 }
             }
@@ -626,7 +657,6 @@ async function processAI(msg, extra) {
             }
 
         } else {
-            // Убираем безликое "Ммм?", заменяем на шуточную заглушку, если что-то пошло не так
             rawRes = resp.content || "Блин, у меня процессор закипел от таких запросов... Давай еще раз.";
         }
 
@@ -654,6 +684,9 @@ async function processAI(msg, extra) {
 
     } catch (e) {
         console.error('AI Error:', e.message);
+        if (e.message === 'TIMEOUT') {
+            await safeSendMessage(chatId, "Мой процессор только что завис намертво... Повтори вопрос, пожалуйста.", msg.message_id);
+        }
     }
 }
 

@@ -81,7 +81,7 @@ async function extractAndSaveFacts(chatId, historyText, participants = []) {
                 { role: 'user', content: `${participantInfo}\n\nДиалог:\n${cleanHistory}` }
             ],
             temperature: 0.0,
-            max_tokens: 1500,
+            max_tokens: 3000, // ИСПРАВЛЕНО: Увеличен лимит для избежания обрыва JSON
             response_format: { type: 'json_object' }
         });
 
@@ -93,13 +93,30 @@ async function extractAndSaveFacts(chatId, historyText, participants = []) {
             result = JSON.parse(rawContent);
         } catch (parseError) {
             console.log("[MEMORY EXTRACTOR] Ошибка парсинга JSON: " + parseError.message);
-            return;
+            // ---> АВАРИЙНОЕ СПАСЕНИЕ ФАКТОВ <---
+            // Если JSON оборвался, "выковыриваем" факты с помощью регулярных выражений!
+            const fallbackFacts = [];
+            const regex = /(УЗЕЛ:|СВЯЗЬ:)[^"\\]+/gi;
+            let match;
+            while ((match = regex.exec(rawContent)) !== null) {
+                let extracted = match[0].trim();
+                // Убираем случайные обрывки
+                if (extracted.length > 10 && !extracted.endsWith('УЗЕЛ:')) {
+                    fallbackFacts.push(extracted);
+                }
+            }
+            if (fallbackFacts.length > 0) {
+                console.log(`[MEMORY EXTRACTOR] Спасены факты через регулярку (${fallbackFacts.length} шт.)`);
+                result = { facts: fallbackFacts };
+            } else {
+                return; // Если спасать нечего, просто выходим
+            }
         }
 
         let facts = result.facts || [];
 
         for (const fact of facts) {
-            // Двойная защита от "участника диалога"
+            // Двойная защита от мусора
             if (typeof fact !== 'string' || fact.trim() === '' || fact.includes('участник диалога')) continue;
 
             const exists = await checkFactExists(chatId, fact);
@@ -123,7 +140,6 @@ async function getRelevantFacts(chatId, userMessage, userName = "", activePartic
     try {
         if (!userMessage || userMessage.trim() === '') return "";
 
-        // Очищаем запросы от системного имени перед поиском
         let cleanMessage = userMessage.replace(/Чатик 🫐 Nika_grdt 👾/gi, "Ника");
         let cleanUserName = userName.replace(/Чатик 🫐 Nika_grdt 👾/gi, "Ника");
 
