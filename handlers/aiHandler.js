@@ -850,7 +850,10 @@ async function processAI(msg, extra) {
         }
 
         function formatAIOutput(text) {
-            let clean = text.replace(/&#039;/g, "'").replace(/&quot;/g, '"');
+            // Принудительно удаляем системные теги медиа, если ИИ всё же попытается их скопировать в ответ
+            let withoutMediaTags = text.replace(/\[Стикер:[^\]]*\]/gi, '').replace(/\[Картинка\/Фото\]/gi, '').replace(/\[Видео\]/gi, '').replace(/\[Голосовое сообщение\]/gi, '').trim();
+
+            let clean = withoutMediaTags.replace(/&#039;/g, "'").replace(/&quot;/g, '"');
             let escaped = clean.replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
             escaped = escaped.replace(/&lt;b&gt;/gi, '<b>').replace(/&lt;\/b&gt;/gi, '</b>');
