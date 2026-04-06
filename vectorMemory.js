@@ -8,7 +8,7 @@ const {
     transliterate
 } = require('./database');
 
-console.log('✅ [SYSTEM] Модуль строгой графовой памяти успешно подключен!');
+console.log('✅ [SYSTEM] Модуль СВЕРХ-УМНОЙ графовой памяти (LightRAG v2) успешно подключен!');
 
 const POLZA_API_KEY = process.env.POLZA_API_KEY || 'pza_Ut5ahRtIFZSzj_jKezwdRvQMMebqZ1BI';
 const AI_MODEL = process.env.AI_MODEL || 'gpt-4o-mini';
@@ -33,46 +33,44 @@ async function createEmbedding(text) {
 
 async function extractAndSaveFacts(chatId, historyText, participants = []) {
     try {
-        const prompt = `Ты — ядро извлечения знаний (LightRAG Graph Extractor). Твоя задача — строить граф связей из чата.
+        // ---> ЖЕСТКАЯ ОЧИСТКА ИМЕН ДО ОТПРАВКИ К ИИ <---
+        // Выжигаем системное имя канала и заменяем на "Ника", чтобы ИИ не путался
+        let cleanHistory = historyText.replace(/Чатик 🫐 Nika_grdt 👾/gi, "Ника");
 
-[КРИТИЧЕСКИЕ ПРАВИЛА — ИГНОРИРОВАНИЕ МУСОРА]
-ИГНОРИРУЙ ЦЕЛИКОМ И ПОЛНОСТЬЮ любой диалог, если он содержит:
-1. Управление памятью: "удали этот факт", "запомни это", "покажи профиль".
-2. Оценку бота: "ты тупая", "ИИ полезное записал", "как она работает".
-3. Бытовуху и еду: печеньки, сон, поход в магазин.
-Если чат состоит из этого — ВЕРНИ ПУСТОЙ МАССИВ.
+        const participantInfo = participants.length > 0 ?
+            "Участники: " + participants.map(p => p.replace(/Чатик 🫐 Nika_grdt 👾/gi, "Ника")).join(', ') :
+            "Определи имена участников из диалога.";
 
-[ПРАВИЛА ПОСТРОЕНИЯ ГРАФА]
-Ты сохраняешь ТОЛЬКО УЗЛЫ и СВЯЗИ.
-- УЗЕЛ: [Имя] | АТРИБУТ: [ФАКТ] (профессия, возраст, кинки, постоянные хобби).
-- СВЯЗЬ: [Имя1] -> [отношение] -> [Имя2] (ненавидит, любит, фанатеет).
+        const prompt = `Ты — сверх-интеллектуальное ядро графовой памяти (LightRAG) НейроНики. Твоя задача — строить граф связей из чата.
 
-Имя "Чатик 🫐 Nika_grdt 👾" сокращай просто до "Ника". Все остальные имена очищай от тегов.
+[КРИТИЧЕСКИЕ ПРАВИЛА — АБСОЛЮТНЫЙ ЗАПРЕТ МУСОРА]
+Ты ДОЛЖЕН безжалостно отбрасывать 99% сообщений.
+1. ❌ МЕТА-ИГНОР (ОЧЕНЬ ВАЖНО): Если в тексте есть "удали", "забудь", "покажи профиль", "ИИ записал", "ты тупая" — ИГНОРИРУЙ ВЕСЬ БЛОК. Пользователи обсуждают твою память, нельзя записывать это как факт! Иначе ты запишешь то, что они просят удалить.
+2. ❌ ВРЕМЕННЫЕ ДЕЙСТВИЯ: ЗАПРЕЩЕНО сохранять "работает", "сфоткала утром", "забыла скинуть", "придет", "лазил по настройкам", "играет". Это бытовуха, а не атрибуты!
+3. ❌ ГАЛЛЮЦИНАЦИИ: ЗАПРЕЩЕНО присваивать один и тот же признак всем пользователям подряд.
 
-[СТРОГИЙ ФОРМАТ JSON]
-ТЕБЕ КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО использовать ключи "name" и "fact"!
-Ты должен вернуть объект с ключом "facts", где внутри лежит массив ОБЫЧНЫХ СТРОК.
+[ЧТО ТАКОЕ УЗЕЛ И СВЯЗЬ]
+✅ УЗЕЛ: [Имя] | АТРИБУТ: [ФАКТ]. Только вечные вещи (реальная профессия, возраст, ориентация, фобии, фетиши, город).
+✅ СВЯЗЬ: [Имя1] -> [Отношение] -> [Имя2]. Только устойчивые отношения (в браке с, ненавидит, фанатеет от, презирает).
 
-ПРАВИЛЬНЫЙ ОТВЕТ:
+Имена очищай от тегов. Никаких (@username) или скобок.
+
+[ФОРМАТ ВЫВОДА (JSON)]
+Сначала ОБЯЗАТЕЛЬНО подумай в поле "reasoning", объясняя, почему ты отбрасываешь мусор или почему сохраняешь факт. Затем заполни массив "facts" (строгий формат строк).
+
+ПРИМЕР:
 {
+  "reasoning": "Юзеры просят удалить память и обсуждают настройки стрима. Это мусор, отбрасываю. Алекс упомянул, что он врач - это фундаментально, создаю Узел.",
   "facts": [
-    "УЗЕЛ: Алекс | АТРИБУТ: работает программистом",
-    "СВЯЗЬ: Чика -> ненавидит -> Любимый"
+    "УЗЕЛ: Алекс | АТРИБУТ: работает врачом"
   ]
-}
-
-ПУСТОЙ ОТВЕТ (используй в 90% случаев):
-{
-  "facts": []
-}
-
-Диалог для анализа:
-${historyText}`;
+}`;
 
         const completion = await openai.chat.completions.create({
             model: AI_MODEL,
             messages: [
-                { role: 'system', content: prompt }
+                { role: 'system', content: prompt },
+                { role: 'user', content: `Участники: ${participantInfo}\n\nДиалог:\n${cleanHistory}` }
             ],
             temperature: 0.0,
             max_tokens: 1500,
@@ -116,6 +114,10 @@ async function getRelevantFacts(chatId, userMessage, userName = "", activePartic
     try {
         if (!userMessage || userMessage.trim() === '') return "";
 
+        // Очищаем запросы от системного имени перед поиском
+        let cleanMessage = userMessage.replace(/Чатик 🫐 Nika_grdt 👾/gi, "Ника");
+        let cleanUserName = userName.replace(/Чатик 🫐 Nika_grdt 👾/gi, "Ника");
+
         const allFoundFacts = new Set();
         const finalFacts = [];
 
@@ -129,7 +131,7 @@ async function getRelevantFacts(chatId, userMessage, userName = "", activePartic
                 .replace(/(s|es|ed|ing)$/i, '');
         };
 
-        const embeddingRaw = await createEmbedding(userMessage);
+        const embeddingRaw = await createEmbedding(cleanMessage);
         if (embeddingRaw) {
             const vectorResults = await searchKnowledge(chatId, embeddingRaw, 10, 0.45);
             vectorResults.forEach(r => {
@@ -140,7 +142,7 @@ async function getRelevantFacts(chatId, userMessage, userName = "", activePartic
             });
         }
 
-        const words = userMessage.split(/\s+/)
+        const words = cleanMessage.split(/\s+/)
             .map(w => w.replace(/[.,!?;:()]/g, '').toLowerCase())
             .filter(w => w.length > 3 && !stopWords.has(w));
 
@@ -157,8 +159,8 @@ async function getRelevantFacts(chatId, userMessage, userName = "", activePartic
             }
         }
 
-        if (userName) {
-            const recentResults = await getRecentKnowledge(chatId, userName, 10);
+        if (cleanUserName) {
+            const recentResults = await getRecentKnowledge(chatId, cleanUserName, 10);
             recentResults.forEach(r => {
                 if (!allFoundFacts.has(r.fact)) {
                     allFoundFacts.add(r.fact);
@@ -177,15 +179,16 @@ async function getRelevantFacts(chatId, userMessage, userName = "", activePartic
             if (trans !== name.toLowerCase()) searchStems.add(getStemLocal(trans));
         };
 
-        addTargetWithStem(userName);
+        addTargetWithStem(cleanUserName);
         if (activeParticipants) {
             activeParticipants.forEach(p => {
-                if (p.firstName) addTargetWithStem(p.firstName);
+                let pName = (p.firstName || "").replace(/Чатик 🫐 Nika_grdt 👾/gi, "Ника");
+                if (pName) addTargetWithStem(pName);
                 if (p.username) addTargetWithStem(p.username);
             });
         }
 
-        const potentialNames = userMessage.match(/([А-Я][а-я]+|@[a-zA-Z0-9_]+)/g) || [];
+        const potentialNames = cleanMessage.match(/([А-Я][а-я]+|@[a-zA-Z0-9_]+)/g) || [];
         potentialNames.forEach(n => addTargetWithStem(n.replace('@', '')));
 
         for (const stem of searchStems) {

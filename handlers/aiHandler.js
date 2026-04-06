@@ -222,7 +222,6 @@ async function resolveUser(chatId, targetName) {
     if (!targetName) return null;
     let cleanName = targetName.replace('@', '').toLowerCase().trim();
 
-    // ---> ЖЕСТКИЙ ХАРДКОД ДЛЯ ПОИСКА НИКИ <---
     if (['ника', 'нику', 'нике', 'nika', 'чатик'].includes(cleanName) || cleanName.includes('nika')) {
         console.log(`[SYSTEM] Сработал хардкод: Ищу Нику по ID -1002214854700`);
         return await getUser(chatId, -1002214854700);
@@ -288,7 +287,16 @@ async function executeToolCall(toolCall, chatId, messageId, userName, userId, ca
                 }
                 if (!u) return `Не могу найти человека с именем "${target}".`;
 
-                const extraFacts = await getAllUserFacts(chatId, u.first_name);
+                // ---> ИСПРАВЛЕНИЕ ПОИСКА ГРАФОВ (Очистка имени перед поиском) <---
+                let searchName = u.first_name;
+                if (u.user_id === -1002214854700 || searchName.includes('Чатик 🫐')) {
+                    searchName = 'Ника'; // Хардкод для БД
+                } else {
+                    // Берем только первое слово имени, убираем эмодзи и спецсимволы
+                    searchName = searchName.split(' ')[0].replace(/[^a-zA-Zа-яА-ЯёЁ0-9]/g, '');
+                }
+
+                const extraFacts = await getAllUserFacts(chatId, searchName);
 
                 let nodes = [];
                 let edges = [];
@@ -296,34 +304,32 @@ async function executeToolCall(toolCall, chatId, messageId, userName, userId, ca
 
                 extraFacts.forEach(f => {
                     if (f.includes('УЗЕЛ:') || f.includes('АТРИБУТ:')) {
-                        nodes.push(f.replace(/УЗЕЛ:.*?\| АТРИБУТ:/i, '').trim());
+                        // Очищаем служебные слова, оставляем саму суть
+                        nodes.push(f.replace(/УЗЕЛ:.*?\|\s*АТРИБУТ:/i, '').trim());
                     } else if (f.includes('СВЯЗЬ:')) {
                         edges.push(f.replace(/СВЯЗЬ:/i, '').trim());
                     } else {
+                        // Старые факты (до графов)
                         let cleanF = f.replace(/\[.*?\]/g, '').trim();
-                        if (cleanF.startsWith(u.first_name + ':')) cleanF = cleanF.substring(u.first_name.length + 1).trim();
+                        if (cleanF.startsWith(searchName + ':')) cleanF = cleanF.substring(searchName.length + 1).trim();
                         if (cleanF) others.push(cleanF);
                     }
                 });
 
                 let memoryStr = '';
-                if (nodes.length > 0) memoryStr += '\n👤 <b>Личность:</b>\n' + nodes.map(n => `  ▫️ ${n}`).join('\n');
-                if (edges.length > 0) memoryStr += '\n🔗 <b>Связи:</b>\n' + edges.map(e => `  〰️ ${e}`).join('\n');
+                if (nodes.length > 0) memoryStr += '\n👤 <b>Личность (Узлы):</b>\n' + nodes.map(n => `  ▫️ ${n}`).join('\n');
+                if (edges.length > 0) memoryStr += '\n🔗 <b>Социальные связи:</b>\n' + edges.map(e => `  〰️ ${e}`).join('\n');
                 if (others.length > 0) memoryStr += '\n📝 <b>Архив:</b>\n' + others.map(o => `  - ${o}`).join('\n');
 
-                if (!memoryStr) memoryStr = '\n🧠 <i>Чистый лист. Никаких фактов нет.</i>';
+                if (!memoryStr) memoryStr = '\n🧠 <i>Чистый лист. Никаких фактов в базе нет.</i>';
 
                 return `\n\n=== ПРОФИЛЬ: ${u.first_name} ===\n📊 XP: ${u.xp}, Лвл: ${u.level}, Варны: ${u.warns || 0}/3\n📝 Био: ${u.bio || 'Пусто'}\n📌 Досье: ${u.ai_notes || 'Нет записей'}${memoryStr}`;
             }
             case 'forget_knowledge': {
                 const deletedFact = await forgetFact(chatId, args.query);
-
-                // ---> ИСПРАВЛЕНИЕ: ШОКОВАЯ ТЕРАПИЯ ДЛЯ ПАМЯТИ <---
-                // Очищаем буфер, чтобы она не прочитала чат заново и не запомнила этот факт снова!
                 console.log(`[SYSTEM] Вызвано удаление факта. Очищаю буфер сообщений, чтобы избежать повторного запоминания!`);
                 extractionBuffer[chatId] = [];
                 messageCount[chatId] = 0;
-
                 return deletedFact ? `Удалила факт: "${deletedFact}".` : `Не нашла такого.`;
             }
             case 'find_users_by_criteria': {
@@ -566,7 +572,6 @@ async function processAI(msg, extra) {
 
             let aiText = second.choices[0].message.content || "Секундочку...";
 
-            // ---> ЖЕЛЕЗНАЯ ЗАЩИТА ОТ ДВОЙНОГО ПРОФИЛЯ <---
             if (directInjectedData) {
                 const profileIndex = aiText.indexOf('=== ПРОФИЛЬ');
                 if (profileIndex !== -1) aiText = aiText.substring(0, profileIndex).trim();
