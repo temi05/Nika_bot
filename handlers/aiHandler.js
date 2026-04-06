@@ -63,7 +63,7 @@ const aiTools = [
         type: "function",
         function: {
             name: "update_user_notes",
-            description: "ИСПОЛЬЗУЙ ТОЛЬКО ЕСЛИ: Юзер прямо приказывает 'запиши в мой профиль, что я...'. НЕ ИСПОЛЬЗУЙ для фонового запоминания (для этого есть отдельный модуль).",
+            description: "ИСПОЛЬЗУЙ ЕСЛИ: Юзер просит записать что-то важное в досье/профиль (свой или чужой). Например 'запомни, что X это Y' или 'он мой муж'. Ты можешь вызывать это вместе с показом профиля.",
             parameters: {
                 type: "object",
                 properties: { target_name: { type: "string" }, new_note_item: { type: "string" }, replace_all: { type: "boolean" } },
@@ -75,7 +75,7 @@ const aiTools = [
         type: "function",
         function: {
             name: "get_user_profile",
-            description: "ИСПОЛЬЗУЙ ЕСЛИ: Просят 'покажи профиль', 'кто такой Х?'. ВАЖНО: Система сама приклеит карточку вниз! В тексте просто кинь пару дерзких фраз, НЕ переписывай статы!",
+            description: "ИСПОЛЬЗУЙ ЕСЛИ: Просят 'покажи профиль', 'кто такой Х?'. ВАЖНО: Разрешен одновременный вызов с другими функциями (например, записать в досье и сразу показать профиль)!",
             parameters: { type: "object", properties: { target_name: { type: "string" } }, required: ["target_name"] }
         }
     },
@@ -180,8 +180,10 @@ const SYSTEM_PROMPT = `Ты — НейроНика. Самостоятельна
 - Стиль общения: Коротко, хлёстко, по делу. Без воды.
 - ❌ АНТИ-ПОПУГАЙ: НИКОГДА не повторяй оскорбления или вопросы собеседника. Отвечай встречным панчем. ЗАПРЕЩЕНО использовать фразу "Ты вообще в своем уме?".
 - За грубое обращение отвечай жестко и ехидно.
+- ❌ ЗАПРЕЩЕНО возвращать пустой текст! Всегда пиши хоть пару слов.
 
 [ИНСТРУМЕНТЫ И ВЫВОД]
+- Ты МОЖЕШЬ вызывать сразу несколько инструментов (например, записать в досье и сразу показать профиль).
 - Если вызываешь инструмент get_user_profile, НИКОГДА не пиши в тексте ответы вроде "=== ПРОФИЛЬ ===". Код сам приклеит профиль к твоему сообщению. Просто прокомментируй профиль!
 - Кастомные эмодзи: Используй тег [EMO:RANDOM] МАКСИМУМ 1-2 раза за сообщение!`;
 
@@ -239,7 +241,21 @@ async function resolveUser(chatId, targetName) {
             }
         }
     }
-    return await findSingleUser(chatId, cleanName);
+
+    // 1. Стандартный строгий поиск (имя/юзернейм)
+    let u = await findSingleUser(chatId, cleanName);
+    if (u) return u;
+
+    // 2. УМНЫЙ ПОИСК: Ищем по досье (если там записано "Псинка = Bloxastaya_Psina")
+    try {
+        const searchResults = await searchUserByName(chatId, cleanName);
+        if (searchResults && searchResults.length > 0) {
+            console.log(`[SYSTEM] Умный поиск: Нашли юзера по алиасу/досье! ID: ${searchResults[0].user_id}`);
+            return await getUser(chatId, searchResults[0].user_id);
+        }
+    } catch (e) { }
+
+    return null;
 }
 
 async function executeToolCall(toolCall, chatId, messageId, userName, userId, callerIsAdmin, userHandle) {
@@ -279,7 +295,6 @@ async function executeToolCall(toolCall, chatId, messageId, userName, userId, ca
                 }
                 if (!u) return `Не могу найти человека с именем "${target}".`;
 
-                // ИСПРАВЛЕНИЕ: Берем первое слово (даже если оно готическое), отсекаем только пробелы.
                 let searchName = u.first_name.split(' ')[0].trim();
                 if (u.user_id === -1002214854700 || searchName.includes('Чатик')) {
                     searchName = 'Ника';
@@ -304,7 +319,6 @@ async function executeToolCall(toolCall, chatId, messageId, userName, userId, ca
 
                             let nodeLow = nodeName.toLowerCase();
 
-                            // Проверка принадлежности УЗЛА
                             if (nodeLow.includes(searchLow) || nodeLow.includes(usernameFallback) || searchLow.includes(nodeLow)) {
                                 if (!nodes.includes(attr)) nodes.push(attr);
                             } else if (attr.toLowerCase().includes(searchLow) || attr.toLowerCase().includes(usernameFallback)) {
@@ -322,13 +336,10 @@ async function executeToolCall(toolCall, chatId, messageId, userName, userId, ca
                             let fromLow = from.toLowerCase();
                             let toLow = to.toLowerCase();
 
-                            // Если юзер ИСТОЧНИК связи
                             if (fromLow.includes(searchLow) || fromLow.includes(usernameFallback)) {
                                 let edgeStr = `${rel} -> ${to}`;
                                 if (!edges.includes(edgeStr)) edges.push(edgeStr);
-                            }
-                            // Если юзер ЦЕЛЬ связи
-                            else if (toLow.includes(searchLow) || toLow.includes(usernameFallback)) {
+                            } else if (toLow.includes(searchLow) || toLow.includes(usernameFallback)) {
                                 let edgeStr = `(${from}) -> ${rel} -> (меня)`;
                                 if (!edges.includes(edgeStr)) edges.push(edgeStr);
                             }
@@ -336,7 +347,6 @@ async function executeToolCall(toolCall, chatId, messageId, userName, userId, ca
                             if (!edges.includes(content)) edges.push(content);
                         }
                     } else {
-                        // Резерв для старых фактов
                         let cleanF = text.replace(/\[.*?\]/g, '').trim();
                         if (cleanF.toLowerCase().startsWith(searchLow + ':')) {
                             cleanF = cleanF.substring(searchLow.length + 1).trim();
@@ -616,7 +626,8 @@ async function processAI(msg, extra) {
             }
 
         } else {
-            rawRes = resp.content || "Ммм?";
+            // Убираем безликое "Ммм?", заменяем на шуточную заглушку, если что-то пошло не так
+            rawRes = resp.content || "Блин, у меня процессор закипел от таких запросов... Давай еще раз.";
         }
 
         function formatAIOutput(text) {
@@ -674,4 +685,4 @@ async function emergencyMemorySave() {
 process.on('SIGTERM', emergencyMemorySave);
 process.on('SIGINT', emergencyMemorySave);
 
-module.exports = { handleAIChat, aiMood, AI_NAME };
+module.exports = { handleAIChat, AI_NAME };
