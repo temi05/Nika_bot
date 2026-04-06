@@ -713,9 +713,9 @@ async function processAI(msg, extra) {
 
         let completion;
         try {
-            // Если есть картинка, сразу отправляем в gpt-4o-mini, так как Gemini (в текущем API)
+            // Если есть картинка, сразу отправляем в qwen/qwen2.5-vl-32b-instruct, так как Gemini (в текущем API)
             // молча игнорирует Base64-код и опирается только на текст, не выдавая ошибку.
-            const targetModel = imageUrl ? 'gpt-4o-mini' : AI_MODEL;
+            const targetModel = imageUrl ? 'qwen/qwen2.5-vl-32b-instruct' : AI_MODEL;
             
             completion = await fetchAIWithTimeout({
                 model: targetModel,
@@ -727,15 +727,15 @@ async function processAI(msg, extra) {
         } catch (e) {
             console.error("❌ Основная модель не справилась с картинкой/запросом:", e.message);
             if (imageUrl) {
-                console.log("♻️ Пробую отправить картинку через 'gpt-4o-mini' (Vision)");
+                console.log("♻️ Пробую отправить картинку через 'qwen/qwen2.5-vl-32b-instruct' (Vision)");
                 try {
                     completion = await fetchAIWithTimeout({
-                        model: 'gpt-4o-mini',
+                        model: 'qwen/qwen2.5-vl-32b-instruct',
                         messages: [{ role: 'system', content: finalPrompt }, ...currentMessagesFirstCall],
                         tools: aiTools, max_tokens: 2500, temperature: 0.7
                     });
                 } catch (e2) {
-                    console.error("❌ gpt-4o-mini тоже отказался читать картинку. Убираем её...");
+                    console.error("❌ qwen/qwen2.5-vl-32b-instruct тоже отказался читать картинку. Убираем её...");
                     currentMessagesFirstCall[currentMessagesFirstCall.length - 1].content = fullContent;
                     completion = await fetchAIWithTimeout({
                         model: AI_MODEL,
@@ -816,7 +816,7 @@ async function processAI(msg, extra) {
             } catch (e2) {
                 // Страховка на случай падения второго вызова
                 second = await fetchAIWithTimeout({
-                    model: 'gpt-4o-mini',
+                    model: 'qwen/qwen2.5-vl-32b-instruct',
                     messages: [{ role: 'system', content: finalPrompt }, ...currentMessagesSecondCall],
                     temperature: 0.7,
                     max_tokens: 2500
