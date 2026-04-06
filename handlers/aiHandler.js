@@ -22,21 +22,15 @@ let premiumEmojiList = [];
 try {
     const stickersData = JSON.parse(fs.readFileSync(path.join(__dirname, '../data/stickers.json'), 'utf8'));
     premiumEmojiList = stickersData.filter(s => s.type === 'custom_emoji').map(s => s.emoji_id);
-    console.log(`[SYSTEM] Загружено ${premiumEmojiList.length} премиум-эмодзи для рандома.`);
-} catch (e) {
-    console.error('[SYSTEM ERROR] Ошибка загрузки stickers.json:', e.message);
-}
+} catch (e) { }
 
 let nikaStickers = [];
 try {
     const stickersPath = path.join(__dirname, '..', 'data', 'stickers.json');
     if (fs.existsSync(stickersPath)) {
         nikaStickers = JSON.parse(fs.readFileSync(stickersPath, 'utf8'));
-        console.log(`[STICKERS] Загружено ${nikaStickers.length} стикеров.`);
     }
-} catch (e) {
-    console.error('[STICKERS LOAD ERROR]:', e.message);
-}
+} catch (e) { }
 
 const POLZA_API_KEY = process.env.POLZA_API_KEY || 'pza_Ut5ahRtIFZSzj_jKezwdRvQMMebqZ1BI';
 const AI_MODEL = process.env.AI_MODEL || 'google/gemini-2.5-flash-lite';
@@ -178,17 +172,16 @@ const aiTools = [
 const SYSTEM_PROMPT = `Ты — НейроНика. Самостоятельная личность, живая, дерзкая, доминантная и верная помощница стримерши Ники.
 
 [ТВОИ ФАКТЫ-КОНСТАНТЫ]
-- Ника — ТОЛЬКО стримерша.
+- Ника — ТОЛЬКО стримерша. Ее ID: -1002214854700.
 - Ника **НЕ пишет песни**, **НЕ поет**, **НЕ выпускает треки**.
 
 [ТВОЙ ХАРАКТЕР И РЕЧЬ]
-- Характер: Ироничная, вредная, но справедливая. Обожаешь спорить по мелочам. Нику ты любишь, рада ее видеть и с ней общаться (ее ID: -1002214854700). 
+- Характер: Ироничная, вредная, но справедливая. Обожаешь спорить по мелочам.
 - Стиль общения: Коротко, хлёстко, по делу. Без воды.
 - ❌ АНТИ-ПОПУГАЙ: НИКОГДА не повторяй оскорбления или вопросы собеседника. Отвечай встречным панчем. ЗАПРЕЩЕНО использовать фразу "Ты вообще в своем уме?".
 - За грубое обращение отвечай жестко и ехидно.
 
 [ИНСТРУМЕНТЫ И ВЫВОД]
-- Используй инструменты, если просят профиль, удалить факт, дать печеньки.
 - Если вызываешь инструмент get_user_profile, НИКОГДА не пиши в тексте ответы вроде "=== ПРОФИЛЬ ===". Код сам приклеит профиль к твоему сообщению. Просто прокомментируй профиль!
 - Кастомные эмодзи: Используй тег [EMO:RANDOM] МАКСИМУМ 1-2 раза за сообщение!`;
 
@@ -223,7 +216,6 @@ async function resolveUser(chatId, targetName) {
     let cleanName = targetName.replace('@', '').toLowerCase().trim();
 
     if (['ника', 'нику', 'нике', 'nika', 'чатик'].includes(cleanName) || cleanName.includes('nika')) {
-        console.log(`[SYSTEM] Сработал хардкод: Ищу Нику по ID -1002214854700`);
         return await getUser(chatId, -1002214854700);
     }
 
@@ -287,13 +279,9 @@ async function executeToolCall(toolCall, chatId, messageId, userName, userId, ca
                 }
                 if (!u) return `Не могу найти человека с именем "${target}".`;
 
-                // ---> ИСПРАВЛЕНИЕ ПОИСКА ГРАФОВ (Очистка имени перед поиском) <---
-                let searchName = u.first_name;
-                if (u.user_id === -1002214854700 || searchName.includes('Чатик 🫐')) {
-                    searchName = 'Ника'; // Хардкод для БД
-                } else {
-                    // Берем только первое слово имени, убираем эмодзи и спецсимволы
-                    searchName = searchName.split(' ')[0].replace(/[^a-zA-Zа-яА-ЯёЁ0-9]/g, '');
+                let searchName = u.first_name.split(' ')[0].replace(/[^a-zA-Zа-яА-ЯёЁ0-9]/g, '');
+                if (u.user_id === -1002214854700 || searchName.includes('Чатик')) {
+                    searchName = 'Ника';
                 }
 
                 const extraFacts = await getAllUserFacts(chatId, searchName);
@@ -303,31 +291,67 @@ async function executeToolCall(toolCall, chatId, messageId, userName, userId, ca
                 let others = [];
 
                 extraFacts.forEach(f => {
-                    if (f.includes('УЗЕЛ:') || f.includes('АТРИБУТ:')) {
-                        // Очищаем служебные слова, оставляем саму суть
-                        nodes.push(f.replace(/УЗЕЛ:.*?\|\s*АТРИБУТ:/i, '').trim());
-                    } else if (f.includes('СВЯЗЬ:')) {
-                        edges.push(f.replace(/СВЯЗЬ:/i, '').trim());
+                    let text = f.trim();
+                    if (text.startsWith('УЗЕЛ:')) {
+                        let parts = text.split('| АТРИБУТ:');
+                        if (parts.length === 2) {
+                            let nodeName = parts[0].replace('УЗЕЛ:', '').trim();
+                            let attr = parts[1].trim();
+
+                            // Строгая проверка: этот Узел принадлежит запрошенному юзеру?
+                            if (nodeName.toLowerCase() === searchName.toLowerCase()) {
+                                if (!nodes.includes(attr)) nodes.push(attr);
+                            } else if (attr.toLowerCase().includes(searchName.toLowerCase())) {
+                                // Если юзер просто упоминается в чужом факте, кидаем в архив
+                                others.push(`${nodeName}: ${attr}`);
+                            }
+                        }
+                    } else if (text.startsWith('СВЯЗЬ:')) {
+                        let content = text.replace('СВЯЗЬ:', '').trim();
+                        let parts = content.split('->').map(p => p.trim());
+                        if (parts.length === 3) {
+                            let from = parts[0];
+                            let rel = parts[1];
+                            let to = parts[2];
+
+                            // Если юзер инициатор связи
+                            if (from.toLowerCase() === searchName.toLowerCase()) {
+                                let edgeStr = `${rel} -> ${to}`;
+                                if (!edges.includes(edgeStr)) edges.push(edgeStr);
+                            }
+                            // Если юзер - цель чужой связи
+                            else if (to.toLowerCase() === searchName.toLowerCase()) {
+                                let edgeStr = `(${from}) -> ${rel} -> (меня/её)`;
+                                if (!edges.includes(edgeStr)) edges.push(edgeStr);
+                            }
+                        } else if (content.toLowerCase().includes(searchName.toLowerCase())) {
+                            if (!edges.includes(content)) edges.push(content);
+                        }
                     } else {
-                        // Старые факты (до графов)
-                        let cleanF = f.replace(/\[.*?\]/g, '').trim();
-                        if (cleanF.startsWith(searchName + ':')) cleanF = cleanF.substring(searchName.length + 1).trim();
-                        if (cleanF) others.push(cleanF);
+                        // Обработка старого формата фактов (до графов)
+                        let cleanF = text.replace(/\[.*?\]/g, '').trim();
+                        if (cleanF.toLowerCase().startsWith(searchName.toLowerCase() + ':')) {
+                            cleanF = cleanF.substring(searchName.length + 1).trim();
+                            if (cleanF && !nodes.includes(cleanF)) others.push(cleanF);
+                        } else {
+                            if (!others.includes(cleanF)) others.push(cleanF);
+                        }
                     }
                 });
 
                 let memoryStr = '';
-                if (nodes.length > 0) memoryStr += '\n👤 <b>Личность (Узлы):</b>\n' + nodes.map(n => `  ▫️ ${n}`).join('\n');
-                if (edges.length > 0) memoryStr += '\n🔗 <b>Социальные связи:</b>\n' + edges.map(e => `  〰️ ${e}`).join('\n');
-                if (others.length > 0) memoryStr += '\n📝 <b>Архив:</b>\n' + others.map(o => `  - ${o}`).join('\n');
+                // Формируем чистый HTML без лишних экранирований внутри
+                if (nodes.length > 0) memoryStr += '\n👤 <b>Личность (Узлы):</b>\n' + nodes.map(n => `  ▫️ ${safeHTML(n)}`).join('\n');
+                if (edges.length > 0) memoryStr += '\n🔗 <b>Социальные связи:</b>\n' + edges.map(e => `  〰️ ${safeHTML(e)}`).join('\n');
+                if (others.length > 0) memoryStr += '\n📝 <b>Архив:</b>\n' + others.map(o => `  - ${safeHTML(o)}`).join('\n');
 
                 if (!memoryStr) memoryStr = '\n🧠 <i>Чистый лист. Никаких фактов в базе нет.</i>';
 
-                return `\n\n=== ПРОФИЛЬ: ${u.first_name} ===\n📊 XP: ${u.xp}, Лвл: ${u.level}, Варны: ${u.warns || 0}/3\n📝 Био: ${u.bio || 'Пусто'}\n📌 Досье: ${u.ai_notes || 'Нет записей'}${memoryStr}`;
+                return `\n\n<b>=== ПРОФИЛЬ: ${safeHTML(u.first_name)} ===</b>\n📊 <b>XP:</b> ${u.xp}, <b>Лвл:</b> ${u.level}, <b>Варны:</b> ${u.warns || 0}/3\n📝 <b>Био:</b> ${safeHTML(u.bio || 'Пусто')}\n📌 <b>Досье:</b> ${safeHTML(u.ai_notes || 'Нет записей')}${memoryStr}`;
             }
             case 'forget_knowledge': {
                 const deletedFact = await forgetFact(chatId, args.query);
-                console.log(`[SYSTEM] Вызвано удаление факта. Очищаю буфер сообщений, чтобы избежать повторного запоминания!`);
+                console.log(`[SYSTEM] Вызвано удаление факта. Очищаю буфер сообщений!`);
                 extractionBuffer[chatId] = [];
                 messageCount[chatId] = 0;
                 return deletedFact ? `Удалила факт: "${deletedFact}".` : `Не нашла такого.`;
@@ -336,7 +360,7 @@ async function executeToolCall(toolCall, chatId, messageId, userName, userId, ca
                 const results = await searchUserByName(chatId, args.search_query);
                 if (!results || results.length === 0) return "Никого не нашла.";
                 const list = results.map(u => `- ${u.name}`).join('\n');
-                return `\n\n=== РЕЗУЛЬТАТЫ ПОИСКА ===\n${list}`;
+                return `\n\n<b>=== РЕЗУЛЬТАТЫ ПОИСКА ===</b>\n${list}`;
             }
             case 'warn_user': {
                 if (!callerIsAdmin) return "Только админы могут варнить.";
@@ -419,11 +443,12 @@ async function executeToolCall(toolCall, chatId, messageId, userName, userId, ca
 
 async function safeSendMessage(chatId, text, replyId) {
     if (!text) return;
-    const safeText = text.length > 4000 ? text.substring(0, 4000) + '... [Текст обрезан]' : text;
     try {
-        await bot.sendMessage(chatId, safeText, { reply_to_message_id: replyId, parse_mode: 'HTML' });
+        await bot.sendMessage(chatId, text, { reply_to_message_id: replyId, parse_mode: 'HTML' });
     } catch (error) {
-        const plainText = safeText.replace(/<tg-emoji[^>]*>(.*?)<\/tg-emoji>/g, '$1').replace(/<[^>]*>/g, '');
+        console.error('[SEND ERROR HTML]:', error.message);
+        // Если ломается HTML (например из-за незакрытых тегов юзера), отправляем чистый текст
+        const plainText = text.replace(/<tg-emoji[^>]*>(.*?)<\/tg-emoji>/g, '$1').replace(/<[^>]*>/g, '');
         try { await bot.sendMessage(chatId, plainText, { reply_to_message_id: replyId }); } catch (e2) { }
     }
 }
@@ -588,9 +613,18 @@ async function processAI(msg, extra) {
             rawRes = resp.content || "Ммм?";
         }
 
+        // ---> ИСПРАВЛЕННЫЙ ПАРСЕР ВЫВОДА ДЛЯ ТЕЛЕГРАМА <---
+        // Теперь он НЕ убивает полезные теги <b>, <i>, <u>, <s>
         function formatAIOutput(text) {
+            // Экранируем случайные опасные символы, но восстанавливаем разрешенные теги
             let clean = text.replace(/&#039;/g, "'").replace(/&quot;/g, '"');
-            const escaped = clean.replace(/[&<>]/g, m => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[m]));
+            let escaped = clean.replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+            escaped = escaped.replace(/&lt;b&gt;/gi, '<b>').replace(/&lt;\/b&gt;/gi, '</b>');
+            escaped = escaped.replace(/&lt;i&gt;/gi, '<i>').replace(/&lt;\/i&gt;/gi, '</i>');
+            escaped = escaped.replace(/&lt;u&gt;/gi, '<u>').replace(/&lt;\/u&gt;/gi, '</u>');
+            escaped = escaped.replace(/&lt;s&gt;/gi, '<s>').replace(/&lt;\/s&gt;/gi, '</s>');
+
             let final = escaped.replace(/\[EMO:RANDOM\]/gi, () => {
                 if (premiumEmojiList.length > 0) return `<tg-emoji emoji-id="${premiumEmojiList[Math.floor(Math.random() * premiumEmojiList.length)]}">✨</tg-emoji>`;
                 return "✨";
@@ -616,4 +650,4 @@ async function emergencyMemorySave() {
 process.on('SIGTERM', emergencyMemorySave);
 process.on('SIGINT', emergencyMemorySave);
 
-module.exports = { handleAIChat, aiMood, AI_NAME };
+module.exports = { handleAIChat, AI_NAME };
