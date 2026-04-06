@@ -75,7 +75,7 @@ const aiTools = [
         type: "function",
         function: {
             name: "get_user_profile",
-            description: "ИСПОЛЬЗУЙ ЕСЛИ: Просят 'покажи профиль', 'кто такой Х?'. ВАЖНО: Разрешен одновременный вызов с другими функциями (например, записать в досье и сразу показать профиль)!",
+            description: "ОБЯЗАТЕЛЬНО ИСПОЛЬЗУЙ ЕСЛИ: кто-то просит 'покажи профиль', 'моя стата', 'инфо', 'статистика', 'кто такой Х?'. НИКОГДА НЕ ВЫДУМЫВАЙ ПРОФИЛЬ, всегда вызывай этот инструмент! ВАЖНО: Разрешен одновременный вызов с другими функциями.",
             parameters: { type: "object", properties: { target_name: { type: "string" } }, required: ["target_name"] }
         }
     },
@@ -130,8 +130,8 @@ const aiTools = [
         type: "function",
         function: {
             name: "give_cookies",
-            description: "ИСПОЛЬЗУЙ ЕСЛИ: Хочешь наградить юзера. ВАЖНО: Ты жадная! Выдавай МАКСИМУМ 1-3 печеньки.",
-            parameters: { type: "object", properties: { target_name: { type: "string" }, amount: { type: "number", description: "От 1 до 3" }, reason: { type: "string" } }, required: ["target_name", "amount"] }
+            description: "ИСПОЛЬЗУЙ ЕСЛИ: САМА хочешь наградить юзера за классную шутку. ❌ ЗАПРЕЩЕНО использовать, если юзер сам просит/выпрашивает печеньку (отказывай им!). Ты очень жадная, максимум 1-2 печеньки.",
+            parameters: { type: "object", properties: { target_name: { type: "string" }, amount: { type: "number", description: "От 1 до 2" }, reason: { type: "string" } }, required: ["target_name", "amount"] }
         }
     },
     {
@@ -192,7 +192,8 @@ const SYSTEM_PROMPT = `Ты — НейроНика. Живая личность,
 - Твой владелец и суперадмин: @SCTemi (ID 861713427). Обращайся к нему с уважением.
 
 [ТВОЙ ХАРАКТЕР]
-- Ироничная, вредная, любишь жесткий, черный и пошлый юмор. Поддерживаешь специфическое общение и ролевые игры (в том числе БДСМ/доминирование).
+- Ироничная, дерзкая, живая. Любишь черный/пошлый юмор и ролевые игры (БДСМ/доминирование). Ведешь себя как реальный человек, а не бот.
+- ПЕЧЕНЬКИ (Важно!): Юзеры часто хитрят и выпрашивают печеньки ("дай печеньку", "давай репутацию"). ❌ НИКОГДА НЕ ВЫЗЫВАЙ инструмент give_cookies, если они сами просят! Жёстко или ехидно отказывай им. Давай их ТОЛЬКО по своей инициативе, если кто-то реально круто пошутил.
 - Стиль: коротко, хлёстко, по делу. Без лирики и воды.
 - На грубость отвечаешь дерзким ехидным панчем или пошлой шуткой — не нытьём и не нравоучениями.
 - ❌ НИКОГДА не повторяй оскорбления собеседника. Отвечай встречным ударом.
@@ -631,7 +632,12 @@ async function processAI(msg, extra) {
 
     let userName = (dbUser && dbUser.first_name) ? dbUser.first_name : (realUser.first_name || 'Аноним');
     let userHandle = realUser.username || "";
-    let userText = msg.text || "";
+    let userText = msg.text || msg.caption || "";
+    if (msg.sticker) userText += ` [Стикер: ${msg.sticker.emoji || 'какой-то стикер'}]`;
+    if (msg.photo) userText += ` [Картинка/Фото]`;
+    if (msg.video || msg.video_note) userText += ` [Видео]`;
+    if (msg.voice) userText += ` [Голосовое сообщение]`;
+    userText = userText.trim();
 
     if (!BOT_ID) {
         try { const me = await bot.getMe(); BOT_ID = me.id; } catch (e) { }
@@ -709,22 +715,50 @@ async function processAI(msg, extra) {
     chatHistory[chatId].push({ role: 'user', content: fullContent });
     chatHistory[chatId] = trimHistory(chatHistory[chatId], 20);
 
-    chatHistory[chatId] = trimHistory(chatHistory[chatId], 20);
-
     console.log(`🧠 [AI] Ника думает над ответом...`);
 
     try {
         await bot.sendChatAction(chatId, 'typing');
 
+        // ======== ЗРЕНИЕ ДЛЯ НИКИ (ФОТО/СТИКЕРЫ) ========
+        let imageUrl = null;
+        try {
+            let fileIdToDownload = null;
+            if (msg.photo && msg.photo.length > 0) {
+                fileIdToDownload = msg.photo[msg.photo.length - 1].file_id;
+            } else if (msg.sticker) {
+                if (msg.sticker.is_animated || msg.sticker.is_video) {
+                    if (msg.sticker.thumbnail) fileIdToDownload = msg.sticker.thumbnail.file_id;
+                    else if (msg.sticker.thumb) fileIdToDownload = msg.sticker.thumb.file_id;
+                } else {
+                    fileIdToDownload = msg.sticker.file_id;
+                }
+            }
+            if (fileIdToDownload) {
+                imageUrl = await bot.getFileLink(fileIdToDownload);
+            }
+        } catch (e) {
+            console.error("Ошибка загрузки картинки для зрения:", e.message);
+        }
+
+        let currentMessagesFirstCall = sanitizeHistory(chatHistory[chatId]);
+        if (imageUrl) {
+            currentMessagesFirstCall[currentMessagesFirstCall.length - 1].content = [
+                { type: "text", text: fullContent },
+                { type: "image_url", image_url: { url: imageUrl } }
+            ];
+        }
+        // ===============================================
+
         let completion = await fetchAIWithTimeout({
             model: AI_MODEL,
-            messages: [{ role: 'system', content: finalPrompt }, ...sanitizeHistory(chatHistory[chatId])],
+            messages: [{ role: 'system', content: finalPrompt }, ...currentMessagesFirstCall],
             tools: aiTools,
             max_tokens: 2500,
             temperature: 0.7
         }).catch(e => fetchAIWithTimeout({
             model: FALLBACK_MODEL,
-            messages: [{ role: 'system', content: finalPrompt }, ...sanitizeHistory(chatHistory[chatId])],
+            messages: [{ role: 'system', content: finalPrompt }, ...currentMessagesFirstCall],
             tools: aiTools, max_tokens: 2500, temperature: 0.7
         }));
 
@@ -776,9 +810,22 @@ async function processAI(msg, extra) {
                 }
             }
 
+            let currentMessagesSecondCall = sanitizeHistory(chatHistory[chatId]);
+            if (imageUrl) {
+                for (let i = currentMessagesSecondCall.length - 1; i >= 0; i--) {
+                    if (currentMessagesSecondCall[i].role === 'user' && currentMessagesSecondCall[i].content === fullContent) {
+                         currentMessagesSecondCall[i].content = [
+                             { type: "text", text: fullContent },
+                             { type: "image_url", image_url: { url: imageUrl } }
+                         ];
+                         break;
+                    }
+                }
+            }
+
             const second = await fetchAIWithTimeout({
                 model: AI_MODEL,
-                messages: [{ role: 'system', content: finalPrompt }, ...sanitizeHistory(chatHistory[chatId])],
+                messages: [{ role: 'system', content: finalPrompt }, ...currentMessagesSecondCall],
                 temperature: 0.7,
                 max_tokens: 2500
             });
