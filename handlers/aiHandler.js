@@ -138,32 +138,32 @@ const aiTools = [
         type: "function",
         function: {
             name: "react_to_message",
-            description: "Поставить реакцию на сообщение.",
-            parameters: { type: "object", properties: { emoji: { type: "string" } }, required: ["emoji"] }
+            description: "ИСПОЛЬЗУЙ ЕСЛИ: Хочешь эмоционально откликнуться (смешно, ккк, горит), или когда нечего отвечать словами и проще поставить реакцию эмодзи. Можешь сочетать с ответом.",
+            parameters: { type: "object", properties: { emoji: { type: "string", description: "Реакция, например: 🔥 👌 🤣 ❤️ 😘" } }, required: ["emoji"] }
         }
     },
     {
         type: "function",
         function: {
             name: "send_sticker",
-            description: "Отправить стикер.",
-            parameters: { type: "object", properties: { sticker_file_id: { type: "string" } } }
+            description: "ИСПОЛЬЗУЙ ЕСЛИ: Юзер просит отправить стикер, или сложилась эмоциональная ситуация где стикер выразит больше чем слова. Если sticker_file_id не знаешь — оставь поле пустым, отправится случайный.",
+            parameters: { type: "object", properties: { sticker_file_id: { type: "string", description: "Файл-ID стикера или 'random' для случайного. Можно оставить пустым." } } }
         }
     },
     {
         type: "function",
         function: {
             name: "create_poll",
-            description: "Создать опрос.",
-            parameters: { type: "object", properties: { question: { type: "string" }, options: { type: "array", items: { type: "string" } }, is_anonymous: { type: "boolean" }, allows_multiple_answers: { type: "boolean" } }, required: ["question", "options"] }
+            description: "ИСПОЛЬЗУЙ ЕСЛИ: Кто-то просит создать опрос/голосование, или ты сама решила узнать мнение чата. ВСЕГДА вызывай этот инструмент, не пиши в тексте 'сейчас создам опрос' без его реального вызова. Минимум 2 варианта ответа.",
+            parameters: { type: "object", properties: { question: { type: "string", description: "Вопрос опроса" }, options: { type: "array", items: { type: "string" }, description: "Варианты ответа, минимум 2" }, is_anonymous: { type: "boolean", description: "Анонимный опрос? По умолчанию true" }, allows_multiple_answers: { type: "boolean", description: "Несколько вариантов? По умолчанию false" } }, required: ["question", "options"] }
         }
     },
     {
         type: "function",
         function: {
             name: "set_reminder",
-            description: "Установить таймер/напоминание.",
-            parameters: { type: "object", properties: { text: { type: "string" }, delay_minutes: { type: "number" } }, required: ["text", "delay_minutes"] }
+            description: "ИСПОЛЬЗУЙ ЕСЛИ: Кто-то просит напомнить, поставить таймер, напиши когда-нибудь. Например: 'напомни через 10 мин', 'напомни завтра', 'поставь таймер на час'. ВСЕГДА вызывай это, не пиши 'поставлю напоминание' без вызова инструмента.",
+            parameters: { type: "object", properties: { text: { type: "string", description: "Текст напоминания" }, delay_minutes: { type: "number", description: "Через сколько минут (сразу переводи разные единицы - 1 час = 60, 1 день = 1440)" } }, required: ["text", "delay_minutes"] }
         }
     },
     {
