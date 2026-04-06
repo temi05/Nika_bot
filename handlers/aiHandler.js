@@ -385,8 +385,17 @@ async function executeToolCall(toolCall, chatId, messageId, userName, userId, ca
                 }
 
                 if (args.action === "warn") {
+                    console.log(`[TOOL] moderate_user (warn): Цель - ${args.target_name}`);
+                    const u = await resolveUser(chatId, args.target_name);
+                    if (u && (u.user_id === BOT_ID || u.user_id === ANONYMOUS_ADMIN_ID || u.user_id === SUPER_ADMIN_ID)) {
+                        console.log(`[TOOL] Отклонено: попытка выдать варн защищенному пользователю ID ${u.user_id}`);
+                        return "Этому пользователю нельзя выдать варн.";
+                    }
                     const result = await warnUserById(chatId, args.target_name);
-                    if (!result) return "Пользователь не найден.";
+                    if (!result) {
+                        console.log(`[TOOL] warn: Пользователь ${args.target_name} не найден.`);
+                        return "Пользователь не найден.";
+                    }
                     if (result.shouldMute) {
                         try {
                             await bot.restrictChatMember(chatId, result.userId, {
@@ -394,16 +403,28 @@ async function executeToolCall(toolCall, chatId, messageId, userName, userId, ca
                                 can_send_messages: false, can_send_media_messages: false,
                                 until_date: Math.floor(Date.now() / 1000) + 60 * 60
                             });
+                            console.log(`[TOOL] warn: Успешный мут за 3 варна! ID: ${result.userId}`);
                             return `Выдан варн (${result.newWarns}/3). ${result.name} автоматически замучен на 60 минут!`;
-                        } catch (e) { return `Выдан варн (${result.newWarns}/3), но без мута: нет прав.`; }
+                        } catch (e) {
+                            console.error(`[TOOL] warn: Ошибка мута Telegram API:`, e.message);
+                            return `Выдан варн (${result.newWarns}/3), но без мута: нет прав. (${e.message})`;
+                        }
                     }
+                    console.log(`[TOOL] warn: Успешный варн для ID: ${result.userId}`);
                     return `${result.name} получил варн (${result.newWarns}/3). Ещё ${3 - result.newWarns} — и мут.`;
                 }
 
                 if (args.action === "mute" || args.action === "unmute") {
+                    console.log(`[TOOL] moderate_user (${args.action}): Цель - ${args.target_name}, Время - ${args.value}, Причина - ${args.reason}`);
                     const u = await resolveUser(chatId, args.target_name);
-                    if (!u) return "Пользователь не найден.";
-                    if (u.user_id === BOT_ID || u.user_id === ANONYMOUS_ADMIN_ID) return "Ха, я не могу применять наказания к себе или ботам!";
+                    if (!u) {
+                        console.log(`[TOOL] mute: Пользователь ${args.target_name} не найден.`);
+                        return "Пользователь не найден.";
+                    }
+                    if (u.user_id === BOT_ID || u.user_id === ANONYMOUS_ADMIN_ID || u.user_id === SUPER_ADMIN_ID) {
+                         console.log(`[TOOL] Отклонено: попытка замутить защищенного пользователя ID ${u.user_id}`);
+                         return "Ха, я не могу применять наказания к себе, к админам или к Создателю!";
+                    }
 
                     if (args.action === "mute") {
                         const dur = Math.min(Math.max(1, args.value || 15), 1440);
@@ -413,16 +434,24 @@ async function executeToolCall(toolCall, chatId, messageId, userName, userId, ca
                                 can_send_messages: false, can_send_media_messages: false, can_send_other_messages: false,
                                 until_date: Math.floor(Date.now() / 1000) + dur * 60
                             });
+                            console.log(`[TOOL] mute: УСПЕХ! ${u.first_name} замучен на ${dur} минут.`);
                             return `Пользователь ${u.first_name} замучен на ${dur} минут. Причина: ${args.reason || 'не указана'}`;
-                        } catch (e) { return `Ошибка Telegram API: ${e.message}`; }
+                        } catch (e) {
+                            console.error(`[TOOL] mute: ОШИБКА TELEGRAM API:`, e.message);
+                            return `Ошибка Telegram API: ${e.message}`;
+                        }
                     } else {
                         try {
                             await bot.restrictChatMember(chatId, u.user_id, {
                                 permissions: { can_send_messages: true, can_send_media_messages: true, can_send_other_messages: true, can_add_web_page_previews: true },
                                 can_send_messages: true, can_send_media_messages: true, can_send_other_messages: true, can_add_web_page_previews: true
                             });
+                            console.log(`[TOOL] unmute: УСПЕХ! ${u.first_name} размучен.`);
                             return `Пользователь ${u.first_name} успешно размучен.`;
-                        } catch (e) { return `Ошибка снятия мута: ${e.message}`; }
+                        } catch (e) {
+                            console.error(`[TOOL] unmute: ОШИБКА TELEGRAM API:`, e.message);
+                            return `Ошибка снятия мута: ${e.message}`;
+                        }
                     }
                 }
                 return "Неизвестное действие.";
