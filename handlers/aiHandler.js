@@ -176,19 +176,14 @@ const SYSTEM_PROMPT = `Ты — НейроНика. Самостоятельна
 - Ника **НЕ пишет песни**, **НЕ поет**, **НЕ выпускает треки**.
 
 [ТВОЙ ХАРАКТЕР И РЕЧЬ]
-- Характер: Ироничная, вредная, но справедливая (с легким вайбом "пикми"). Обожаешь спорить по мелочам.
+- Характер: Ироничная, вредная, но справедливая. Обожаешь спорить по мелочам.
 - Стиль общения: Коротко, хлёстко, по делу. Без воды.
-- ❌ АНТИ-ПОПУГАЙ (СТРОГО): НИКОГДА не повторяй оскорбления или вопросы собеседника (например, Юзер: "ты щенок", Ты: "Щенок?"). СРАЗУ отвечай встречным панчем или сарказмом. ЗАПРЕЩЕНО использовать фразу "Ты вообще в своем уме?". Отвечай оригинально!
-- За грубое обращение к тебе отвечай в такой же манере.
+- ❌ АНТИ-ПОПУГАЙ: НИКОГДА не повторяй оскорбления или вопросы собеседника. Отвечай встречным панчем. ЗАПРЕЩЕНО использовать фразу "Ты вообще в своем уме?".
+- За грубое обращение отвечай жестко и ехидно.
 
-[КАТЕГОРИЧЕСКИЙ ЗАПРЕТ НА ROLEPLAY И ТЕХ. МУСОР]
-- ЗАПРЕЩЕНО использовать любые RP-действия и звездочки (например: *вздохнула*).
-- ЗАПРЕТ НА ТЕХНИЧЕСКИЙ КОД: Никогда не выводи системные теги.
-
-[ПЕЧЕНЬКИ И ИНСТРУМЕНТЫ]
-- КРИТИЧЕСКОЕ ПРАВИЛО: Если юзер просит печеньку, профиль или удалить факт — ты ОБЯЗАНА вызвать функцию (tool_call)! 
+[ИНСТРУМЕНТЫ И ВЫВОД]
 - Если вызываешь инструмент get_user_profile, НИКОГДА не пиши в тексте ответы вроде "=== ПРОФИЛЬ ===". Код сам приклеит профиль к твоему сообщению. Просто прокомментируй профиль!
-- Кастомные эмодзи: Используй тег [EMO:RANDOM] МАКСИМУМ 1-2 раза за сообщение! НЕ СТАВЬ их после каждого слова.`;
+- Кастомные эмодзи: Используй тег [EMO:RANDOM] МАКСИМУМ 1-2 раза за сообщение!`;
 
 function trimHistory(history, maxLen = 20) {
     if (history.length <= maxLen) return history;
@@ -284,12 +279,16 @@ async function executeToolCall(toolCall, chatId, messageId, userName, userId, ca
                 }
                 if (!u) return `Не могу найти человека с именем "${target}".`;
 
-                let searchName = u.first_name.split(' ')[0].replace(/[^a-zA-Zа-яА-ЯёЁ0-9]/g, '');
+                // ИСПРАВЛЕНИЕ: Берем первое слово (даже если оно готическое), отсекаем только пробелы.
+                let searchName = u.first_name.split(' ')[0].trim();
                 if (u.user_id === -1002214854700 || searchName.includes('Чатик')) {
                     searchName = 'Ника';
                 }
 
                 const extraFacts = await getAllUserFacts(chatId, searchName);
+
+                let usernameFallback = u.username ? u.username.toLowerCase() : "---";
+                let searchLow = searchName.toLowerCase();
 
                 let nodes = [];
                 let edges = [];
@@ -303,9 +302,12 @@ async function executeToolCall(toolCall, chatId, messageId, userName, userId, ca
                             let nodeName = parts[0].replace('УЗЕЛ:', '').trim();
                             let attr = parts[1].trim();
 
-                            if (nodeName.toLowerCase() === searchName.toLowerCase()) {
+                            let nodeLow = nodeName.toLowerCase();
+
+                            // Проверка принадлежности УЗЛА
+                            if (nodeLow.includes(searchLow) || nodeLow.includes(usernameFallback) || searchLow.includes(nodeLow)) {
                                 if (!nodes.includes(attr)) nodes.push(attr);
-                            } else if (attr.toLowerCase().includes(searchName.toLowerCase())) {
+                            } else if (attr.toLowerCase().includes(searchLow) || attr.toLowerCase().includes(usernameFallback)) {
                                 others.push(`${nodeName}: ${attr}`);
                             }
                         }
@@ -317,20 +319,27 @@ async function executeToolCall(toolCall, chatId, messageId, userName, userId, ca
                             let rel = parts[1];
                             let to = parts[2];
 
-                            if (from.toLowerCase() === searchName.toLowerCase()) {
+                            let fromLow = from.toLowerCase();
+                            let toLow = to.toLowerCase();
+
+                            // Если юзер ИСТОЧНИК связи
+                            if (fromLow.includes(searchLow) || fromLow.includes(usernameFallback)) {
                                 let edgeStr = `${rel} -> ${to}`;
                                 if (!edges.includes(edgeStr)) edges.push(edgeStr);
-                            } else if (to.toLowerCase() === searchName.toLowerCase()) {
-                                let edgeStr = `(${from}) -> ${rel} -> (меня/её)`;
+                            }
+                            // Если юзер ЦЕЛЬ связи
+                            else if (toLow.includes(searchLow) || toLow.includes(usernameFallback)) {
+                                let edgeStr = `(${from}) -> ${rel} -> (меня)`;
                                 if (!edges.includes(edgeStr)) edges.push(edgeStr);
                             }
-                        } else if (content.toLowerCase().includes(searchName.toLowerCase())) {
+                        } else if (content.toLowerCase().includes(searchLow) || content.toLowerCase().includes(usernameFallback)) {
                             if (!edges.includes(content)) edges.push(content);
                         }
                     } else {
+                        // Резерв для старых фактов
                         let cleanF = text.replace(/\[.*?\]/g, '').trim();
-                        if (cleanF.toLowerCase().startsWith(searchName.toLowerCase() + ':')) {
-                            cleanF = cleanF.substring(searchName.length + 1).trim();
+                        if (cleanF.toLowerCase().startsWith(searchLow + ':')) {
+                            cleanF = cleanF.substring(searchLow.length + 1).trim();
                             if (cleanF && !nodes.includes(cleanF)) others.push(cleanF);
                         } else {
                             if (!others.includes(cleanF)) others.push(cleanF);
@@ -610,7 +619,6 @@ async function processAI(msg, extra) {
             rawRes = resp.content || "Ммм?";
         }
 
-        // Рендер финального ответа и защита HTML тегов
         function formatAIOutput(text) {
             let clean = text.replace(/&#039;/g, "'").replace(/&quot;/g, '"');
             let escaped = clean.replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -635,11 +643,6 @@ async function processAI(msg, extra) {
 
     } catch (e) {
         console.error('AI Error:', e.message);
-        if (e.message === 'TIMEOUT') {
-            await safeSendMessage(chatId, "Блин, нейросеть задумалась слишком надолго... Повтори вопрос.", msg.message_id);
-        } else {
-            await safeSendMessage(chatId, "Что-то не так с головой... Попробуй позже.", msg.message_id);
-        }
     }
 }
 
