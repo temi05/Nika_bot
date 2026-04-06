@@ -301,7 +301,6 @@ async function executeToolCall(toolCall, chatId, messageId, userName, userId, ca
                 return `[SYSTEM: Анализ ${msgsToAnalyze.length} сообщений успешно запущен. Ответь юзеру ехидно, что ты отправила этот лог на анализ.]`;
             }
             case 'get_user_profile': {
-                // ИСПРАВЛЕНИЕ: Добавлен фоллбек на args.query, если ИИ перепутает названия параметров
                 let target = args.target_name || args.query || "я";
                 const isSelf = target.toLowerCase() === 'я' || target.toLowerCase() === 'me' || target.toLowerCase() === 'мой';
                 let u;
@@ -621,13 +620,20 @@ async function processAI(msg, extra) {
     }
 
     let replyPrefix = "";
+    let rpAuthor = "Кто-то";
     if (msg.reply_to_message) {
         const rp = msg.reply_to_message;
-        const rpAuthor = rp.from ? (rp.from.username === 'GroupAnonymousBot' ? (rp.author_signature || "Админ") : rp.from.first_name) : "Кто-то";
+        rpAuthor = rp.from ? (rp.from.username === 'GroupAnonymousBot' ? (rp.author_signature || "Админ") : rp.from.first_name) : "Кто-то";
         replyPrefix = `(ответ ${rpAuthor}: "${(rp.text || "медиа").slice(0, 30)}...") `;
     }
 
     const fullContent = `${userName} ${replyPrefix}: ${userText}`;
+
+    // ИСПРАВЛЕНИЕ ДЛЯ ПАМЯТИ: Теперь буфер видит, кому был ответ!
+    let memoryLine = `${userName}: ${userText}`;
+    if (msg.reply_to_message) {
+        memoryLine = `${userName} (в ответ ${rpAuthor}): ${userText}`;
+    }
 
     const textLower = userText.toLowerCase();
     const nameTriggered = textLower.includes('нейроника') || textLower.includes('нейронику') || textLower.includes('нейронике') || textLower.includes('neironika');
@@ -636,10 +642,10 @@ async function processAI(msg, extra) {
     const isMentioned = nameTriggered || isReplyToBot;
 
     if (!extractionBuffer[chatId]) extractionBuffer[chatId] = [];
-    extractionBuffer[chatId].push(`${userName}: ${userText}`);
+    extractionBuffer[chatId].push(memoryLine); // Передаем линию с контекстом!
 
     if (!rollingHistory[chatId]) rollingHistory[chatId] = [];
-    rollingHistory[chatId].push(`${userName}: ${userText}`);
+    rollingHistory[chatId].push(memoryLine); // Передаем линию с контекстом!
     if (rollingHistory[chatId].length > 100) rollingHistory[chatId].shift();
 
     if (!messageCount[chatId]) messageCount[chatId] = 0;
