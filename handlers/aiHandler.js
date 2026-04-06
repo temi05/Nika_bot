@@ -33,8 +33,8 @@ try {
 } catch (e) { }
 
 const POLZA_API_KEY = process.env.POLZA_API_KEY || 'pza_Ut5ahRtIFZSzj_jKezwdRvQMMebqZ1BI';
-const AI_MODEL = process.env.AI_MODEL || 'gpt-4o-mini';
-const FALLBACK_MODEL = 'gpt-4o-mini';
+const AI_MODEL = process.env.AI_MODEL || 'google/gemini-2.5-flash-lite';
+
 const AI_NAME = process.env.AI_NAME || 'НейроНика';
 
 const openai = new OpenAI({
@@ -688,7 +688,7 @@ async function processAI(msg, extra) {
                 currentMessagesFirstCall[currentMessagesFirstCall.length - 1].content = fullContent;
             }
             completion = await fetchAIWithTimeout({
-                model: FALLBACK_MODEL,
+                model: AI_MODEL,
                 messages: [{ role: 'system', content: finalPrompt }, ...currentMessagesFirstCall],
                 tools: aiTools, max_tokens: 2500, temperature: 0.7
             });
