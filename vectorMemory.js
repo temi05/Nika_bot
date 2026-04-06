@@ -11,10 +11,12 @@ const {
 console.log('✅ [VECTOR MEMORY] Модуль графовой памяти (LightRAG v3.1) подключён');
 
 const POLZA_API_KEY = process.env.POLZA_API_KEY || 'pza_Ut5ahRtIFZSzj_jKezwdRvQMMebqZ1BI';
-// ИСПРАВЛЕНО: Используем реальный AI_MODEL из env, а не жёсткий gpt-4o-mini
-const EXTRACTOR_MODEL = process.env.AI_MODEL || 'google/gemini-2.5-flash-lite';
+// Основная модель чата берётся из env
+// Экстрактор фактов — отдельная модель: gpt-4o-mini точнее работает со структурированным JSON
+const EXTRACTOR_MODEL = process.env.MEMORY_EXTRACTOR_MODEL || process.env.AI_MODEL || 'gpt-4o-mini';
 // Эмбеддинги всегда через OpenAI-совместимый endpoint
 const EMBEDDING_MODEL = 'text-embedding-3-small';
+
 
 // Минимальная длина диалога для запуска экстракции (символов)
 const MIN_HISTORY_LENGTH = 80;
