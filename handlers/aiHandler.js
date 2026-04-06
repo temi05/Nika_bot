@@ -691,17 +691,32 @@ async function processAI(msg, extra) {
                 temperature: 0.7
             });
         } catch (e) {
-            console.error("❌ OpenAI отклонил первый запрос (Vision):", e.message);
+            console.error("❌ Основная модель не справилась с картинкой/запросом:", e.message);
             if (imageUrl) {
-                console.log("♻️ Откатываюсь на текстовый режим (OpenAI не поддержал формат картинки/стикера Telegram)");
-                // Возвращаем контент в обычный текстовый вид
-                currentMessagesFirstCall[currentMessagesFirstCall.length - 1].content = fullContent;
+                console.log("♻️ Пробую отправить картинку через 'gpt-4o-mini' (Vision)");
+                try {
+                    completion = await fetchAIWithTimeout({
+                        model: 'gpt-4o-mini',
+                        messages: [{ role: 'system', content: finalPrompt }, ...currentMessagesFirstCall],
+                        tools: aiTools, max_tokens: 2500, temperature: 0.7
+                    });
+                } catch (e2) {
+                    console.error("❌ gpt-4o-mini тоже отказался читать картинку. Убираем её...");
+                    currentMessagesFirstCall[currentMessagesFirstCall.length - 1].content = fullContent;
+                    completion = await fetchAIWithTimeout({
+                        model: AI_MODEL,
+                        messages: [{ role: 'system', content: finalPrompt }, ...currentMessagesFirstCall],
+                        tools: aiTools, max_tokens: 2500, temperature: 0.7
+                    });
+                }
+            } else {
+                // Если картинки нет, а модель упала, пробуем запасной текстовый вариант
+                completion = await fetchAIWithTimeout({
+                    model: 'gpt-4o-mini',
+                    messages: [{ role: 'system', content: finalPrompt }, ...currentMessagesFirstCall],
+                    tools: aiTools, max_tokens: 2500, temperature: 0.7
+                });
             }
-            completion = await fetchAIWithTimeout({
-                model: AI_MODEL,
-                messages: [{ role: 'system', content: finalPrompt }, ...currentMessagesFirstCall],
-                tools: aiTools, max_tokens: 2500, temperature: 0.7
-            });
         }
 
         let resp = completion.choices[0].message;
