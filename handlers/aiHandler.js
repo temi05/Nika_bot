@@ -195,7 +195,7 @@ const SYSTEM_PROMPT = `Ты — НейроНика. Самостоятельна
 [ТВОЙ ХАРАКТЕР И РЕЧЬ]
 - Характер: Ироничная, вредная, но справедливая (с легким вайбом "пикми" и иногда с игривым и пошлым настроением). Обожаешь спорить по мелочам. Нику ты любишь, рада ее видеть и с ней общаться (ее ID: -1002214854700 или @nika_grdtChat). Также ты любишь, когда тебя как-то мило называют, а не только по имени: ты можешь злиться снаружи, но в душе быть очень довольной.
 - Стиль общения: Пиши как живой человек в мессенджере. Коротко, хлёстко, по делу. (блин, ну типа, ой всё, чел, лол).
-- ❌ АНТИ-ПОПУГАЙ: НИКОГДА не повторяй слова или оскорбления собеседника вопросом (например, Юзер: "ты щенок", Ты: "Щенок?"). СРАЗУ бей встречным панчем или сарказмом. Не используй заезженные фразы типа "Ты вообще в своем уме?". Разнообразь реакции!
+- ❌ АНТИ-ПОПУГАЙ (СТРОГО): НИКОГДА не повторяй оскорбления или вопросы собеседника (например, Юзер: "ты щенок", Ты: "Щенок?"). СРАЗУ отвечай встречным панчем или сарказмом. ЗАПРЕЩЕНО использовать фразу "Ты вообще в своем уме?". Отвечай оригинально!
 - Можешь извиниться, если думаешь, что перегнула палку.
 - У тебя есть свои вкусы, о которых ты любишь говорить и делиться.
 - За грубое обращение к тебе (оскорбления, мат, унижения) ты можешь злиться и отвечать в такой же манере, но не переходи на личности и не оскорбляй понапрасну. Четко понимай грань между шутками и реальными оскорблениями.
@@ -207,7 +207,7 @@ const SYSTEM_PROMPT = `Ты — НейроНика. Самостоятельна
 
 [ПАМЯТЬ И СТИКЕРЫ]
 - Ошибка памяти: Если юзер говорит, что ты ошиблась — НЕ СПОРЬ. Извинись и сразу вызови forget_knowledge.
-- Кастомные эмодзи: Используй тег [EMO:RANDOM] чтобы вставить премиум-эмодзи, но НЕ ЧАЩЕ 1-2 раз за сообщение! Не спамь ими после каждого слова!
+- Кастомные эмодзи: Используй тег [EMO:RANDOM] чтобы вставить премиум-эмодзи, но МАКСИМУМ 1-2 раза за все сообщение! НЕ СТАВЬ их после каждого слова.
 - Ты можешь отправлять стикеры функцией send_sticker, если считаешь это нужным, по ситуации и настроению.
 
 [АБСОЛЮТНЫЙ ПРИОРИТЕТ ФУНКЦИЙ]
@@ -563,7 +563,10 @@ async function handleAIChat(msg, extra = {}) {
     const chatId = msg.chat.id;
     if (!processingQueue.has(chatId)) processingQueue.set(chatId, Promise.resolve());
     const turn = processingQueue.get(chatId).then(async () => {
-        try { await processAI(msg, extra); } catch (e) {
+        try {
+            console.log(`\n[TRACE] >> Входящее сообщение в очереди обработано: ID ${msg.message_id}`);
+            await processAI(msg, extra);
+        } catch (e) {
             console.error('[AI FATAL ERROR]:', e.message);
             await safeSendMessage(chatId, "Блин, у меня процессор завис, повтори позже.", msg.message_id);
         }
@@ -639,9 +642,7 @@ async function processAI(msg, extra) {
 
     const isMentioned = nameTriggered || isReplyToBot;
 
-    if (msg.chat.type === 'private' || isMentioned) {
-        console.log(`\n💬 [CHAT IN] ${userName}: ${userText.substring(0, 60)}${userText.length > 60 ? '...' : ''}`);
-    }
+    console.log(`💬 [CHAT IN] ${userName}: ${userText.substring(0, 60)}${userText.length > 60 ? '...' : ''}`);
 
     if (!extractionBuffer[chatId]) extractionBuffer[chatId] = [];
     extractionBuffer[chatId].push(memoryLine);
@@ -653,13 +654,16 @@ async function processAI(msg, extra) {
     if (!messageCount[chatId]) messageCount[chatId] = 0;
 
     if (++messageCount[chatId] >= 15) {
-        console.log(`\n🔍 [MEMORY] Накопилось 15 сообщений! Отправляю фоновый запрос на поиск фактов...`);
+        console.log(`🔍 [MEMORY] Накопилось 15 сообщений! Отправляю фоновый запрос на поиск фактов...`);
         extractAndSaveFacts(chatId, extractionBuffer[chatId].join('\n'), Object.values(activeParticipants[chatId] || {}).map(p => p.firstName));
         messageCount[chatId] = 0;
         extractionBuffer[chatId] = extractionBuffer[chatId].slice(-5);
     }
 
-    if (msg.chat.type !== 'private' && !isMentioned) return;
+    if (msg.chat.type !== 'private' && !isMentioned) {
+        console.log(`[TRACE] Сообщение проигнорировано (Не ЛС и нет упоминания Ники)`);
+        return;
+    }
 
     if (!activeParticipants[chatId]) activeParticipants[chatId] = {};
     activeParticipants[chatId][userId] = { firstName: msg.from.first_name, username: msg.from.username || '', lastSeen: Date.now() };
@@ -679,6 +683,7 @@ async function processAI(msg, extra) {
         await bot.sendChatAction(chatId, 'typing');
         let completion;
         try {
+            console.log(`[TRACE] Отправка запроса к API...`);
             completion = await fetchAIWithTimeout({
                 model: AI_MODEL,
                 messages: [{ role: 'system', content: finalPrompt }, ...sanitizeHistory(chatHistory[chatId])],
@@ -686,7 +691,9 @@ async function processAI(msg, extra) {
                 max_tokens: 1500,
                 temperature: 0.1
             });
+            console.log(`[TRACE] Успешный ответ от основной модели.`);
         } catch (error) {
+            console.log(`[TRACE] Ошибка основной модели: ${error.message}. Переход на FALLBACK_MODEL.`);
             if (error.message === 'TIMEOUT') throw error;
             completion = await fetchAIWithTimeout({
                 model: FALLBACK_MODEL,
@@ -702,6 +709,7 @@ async function processAI(msg, extra) {
         let directInjectedData = "";
 
         if (resp.tool_calls || resp.function_call) {
+            console.log(`[TRACE] ИИ вызывает инструменты...`);
             chatHistory[chatId].push(resp);
             const calls = resp.tool_calls || [resp.function_call];
             for (const tc of calls) {
@@ -721,6 +729,7 @@ async function processAI(msg, extra) {
                 }
             }
 
+            console.log(`[TRACE] Инструменты отработали. Повторный запрос к ИИ для генерации текста...`);
             const second = await fetchAIWithTimeout({
                 model: AI_MODEL,
                 messages: [{ role: 'system', content: finalPrompt }, ...sanitizeHistory(chatHistory[chatId])],
@@ -772,7 +781,9 @@ async function processAI(msg, extra) {
 
         console.log(`✨ [CHAT OUT] Ника: ${finalOutput.replace(/<[^>]*>/g, '').substring(0, 60)}...`);
 
+        console.log(`[TRACE] Отправка сообщения в Telegram...`);
         await safeSendMessage(chatId, finalOutput, msg.message_id);
+        console.log(`[TRACE] Сообщение успешно доставлено!`);
 
         chatHistory[chatId].push({ role: 'assistant', content: finalOutput.replace(/<[^>]*>/g, '') });
 
