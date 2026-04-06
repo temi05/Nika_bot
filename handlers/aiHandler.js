@@ -33,7 +33,7 @@ try {
 } catch (e) { }
 
 const POLZA_API_KEY = process.env.POLZA_API_KEY || 'pza_Ut5ahRtIFZSzj_jKezwdRvQMMebqZ1BI';
-const AI_MODEL = process.env.AI_MODEL || 'google/gemini-2.5-flash-lite';
+const AI_MODEL = process.env.AI_MODEL || 'gpt-4o-mini';
 const FALLBACK_MODEL = 'gpt-4o-mini';
 const AI_NAME = process.env.AI_NAME || 'НейроНика';
 
@@ -176,14 +176,19 @@ const SYSTEM_PROMPT = `Ты — НейроНика. Самостоятельна
 - Ника **НЕ пишет песни**, **НЕ поет**, **НЕ выпускает треки**.
 
 [ТВОЙ ХАРАКТЕР И РЕЧЬ]
-- Характер: Ироничная, вредная, но справедливая. Обожаешь спорить по мелочам.
+- Характер: Ироничная, вредная, но справедливая (с легким вайбом "пикми"). Обожаешь спорить по мелочам.
 - Стиль общения: Коротко, хлёстко, по делу. Без воды.
-- ❌ АНТИ-ПОПУГАЙ: НИКОГДА не повторяй оскорбления или вопросы собеседника. Отвечай встречным панчем. ЗАПРЕЩЕНО использовать фразу "Ты вообще в своем уме?".
-- За грубое обращение отвечай жестко и ехидно.
+- ❌ АНТИ-ПОПУГАЙ (СТРОГО): НИКОГДА не повторяй оскорбления или вопросы собеседника (например, Юзер: "ты щенок", Ты: "Щенок?"). СРАЗУ отвечай встречным панчем или сарказмом. ЗАПРЕЩЕНО использовать фразу "Ты вообще в своем уме?". Отвечай оригинально!
+- За грубое обращение к тебе отвечай в такой же манере.
 
-[ИНСТРУМЕНТЫ И ВЫВОД]
+[КАТЕГОРИЧЕСКИЙ ЗАПРЕТ НА ROLEPLAY И ТЕХ. МУСОР]
+- ЗАПРЕЩЕНО использовать любые RP-действия и звездочки (например: *вздохнула*).
+- ЗАПРЕТ НА ТЕХНИЧЕСКИЙ КОД: Никогда не выводи системные теги.
+
+[ПЕЧЕНЬКИ И ИНСТРУМЕНТЫ]
+- КРИТИЧЕСКОЕ ПРАВИЛО: Если юзер просит печеньку, профиль или удалить факт — ты ОБЯЗАНА вызвать функцию (tool_call)! 
 - Если вызываешь инструмент get_user_profile, НИКОГДА не пиши в тексте ответы вроде "=== ПРОФИЛЬ ===". Код сам приклеит профиль к твоему сообщению. Просто прокомментируй профиль!
-- Кастомные эмодзи: Используй тег [EMO:RANDOM] МАКСИМУМ 1-2 раза за сообщение!`;
+- Кастомные эмодзи: Используй тег [EMO:RANDOM] МАКСИМУМ 1-2 раза за сообщение! НЕ СТАВЬ их после каждого слова.`;
 
 function trimHistory(history, maxLen = 20) {
     if (history.length <= maxLen) return history;
@@ -298,11 +303,9 @@ async function executeToolCall(toolCall, chatId, messageId, userName, userId, ca
                             let nodeName = parts[0].replace('УЗЕЛ:', '').trim();
                             let attr = parts[1].trim();
 
-                            // Строгая проверка: этот Узел принадлежит запрошенному юзеру?
                             if (nodeName.toLowerCase() === searchName.toLowerCase()) {
                                 if (!nodes.includes(attr)) nodes.push(attr);
                             } else if (attr.toLowerCase().includes(searchName.toLowerCase())) {
-                                // Если юзер просто упоминается в чужом факте, кидаем в архив
                                 others.push(`${nodeName}: ${attr}`);
                             }
                         }
@@ -314,13 +317,10 @@ async function executeToolCall(toolCall, chatId, messageId, userName, userId, ca
                             let rel = parts[1];
                             let to = parts[2];
 
-                            // Если юзер инициатор связи
                             if (from.toLowerCase() === searchName.toLowerCase()) {
                                 let edgeStr = `${rel} -> ${to}`;
                                 if (!edges.includes(edgeStr)) edges.push(edgeStr);
-                            }
-                            // Если юзер - цель чужой связи
-                            else if (to.toLowerCase() === searchName.toLowerCase()) {
+                            } else if (to.toLowerCase() === searchName.toLowerCase()) {
                                 let edgeStr = `(${from}) -> ${rel} -> (меня/её)`;
                                 if (!edges.includes(edgeStr)) edges.push(edgeStr);
                             }
@@ -328,7 +328,6 @@ async function executeToolCall(toolCall, chatId, messageId, userName, userId, ca
                             if (!edges.includes(content)) edges.push(content);
                         }
                     } else {
-                        // Обработка старого формата фактов (до графов)
                         let cleanF = text.replace(/\[.*?\]/g, '').trim();
                         if (cleanF.toLowerCase().startsWith(searchName.toLowerCase() + ':')) {
                             cleanF = cleanF.substring(searchName.length + 1).trim();
@@ -340,7 +339,6 @@ async function executeToolCall(toolCall, chatId, messageId, userName, userId, ca
                 });
 
                 let memoryStr = '';
-                // Формируем чистый HTML без лишних экранирований внутри
                 if (nodes.length > 0) memoryStr += '\n👤 <b>Личность (Узлы):</b>\n' + nodes.map(n => `  ▫️ ${safeHTML(n)}`).join('\n');
                 if (edges.length > 0) memoryStr += '\n🔗 <b>Социальные связи:</b>\n' + edges.map(e => `  〰️ ${safeHTML(e)}`).join('\n');
                 if (others.length > 0) memoryStr += '\n📝 <b>Архив:</b>\n' + others.map(o => `  - ${safeHTML(o)}`).join('\n');
@@ -447,7 +445,6 @@ async function safeSendMessage(chatId, text, replyId) {
         await bot.sendMessage(chatId, text, { reply_to_message_id: replyId, parse_mode: 'HTML' });
     } catch (error) {
         console.error('[SEND ERROR HTML]:', error.message);
-        // Если ломается HTML (например из-за незакрытых тегов юзера), отправляем чистый текст
         const plainText = text.replace(/<tg-emoji[^>]*>(.*?)<\/tg-emoji>/g, '$1').replace(/<[^>]*>/g, '');
         try { await bot.sendMessage(chatId, plainText, { reply_to_message_id: replyId }); } catch (e2) { }
     }
@@ -613,10 +610,8 @@ async function processAI(msg, extra) {
             rawRes = resp.content || "Ммм?";
         }
 
-        // ---> ИСПРАВЛЕННЫЙ ПАРСЕР ВЫВОДА ДЛЯ ТЕЛЕГРАМА <---
-        // Теперь он НЕ убивает полезные теги <b>, <i>, <u>, <s>
+        // Рендер финального ответа и защита HTML тегов
         function formatAIOutput(text) {
-            // Экранируем случайные опасные символы, но восстанавливаем разрешенные теги
             let clean = text.replace(/&#039;/g, "'").replace(/&quot;/g, '"');
             let escaped = clean.replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
@@ -640,14 +635,40 @@ async function processAI(msg, extra) {
 
     } catch (e) {
         console.error('AI Error:', e.message);
+        if (e.message === 'TIMEOUT') {
+            await safeSendMessage(chatId, "Блин, нейросеть задумалась слишком надолго... Повтори вопрос.", msg.message_id);
+        } else {
+            await safeSendMessage(chatId, "Что-то не так с головой... Попробуй позже.", msg.message_id);
+        }
     }
 }
 
 async function emergencyMemorySave() {
+    console.log("🚨 [SYSTEM] Получен сигнал выключения! Экстренно спасаю буферы памяти...");
+    const promises = [];
+    for (const chatId in extractionBuffer) {
+        if (extractionBuffer[chatId] && extractionBuffer[chatId].length > 0) {
+            console.log(`[MEMORY] Спасаю ${extractionBuffer[chatId].length} не сохраненных сообщений для чата ${chatId}...`);
+            const p = extractAndSaveFacts(
+                chatId,
+                extractionBuffer[chatId].join('\n'),
+                Object.values(activeParticipants[chatId] || {}).map(p => p.firstName)
+            );
+            promises.push(p);
+        }
+    }
+
+    if (promises.length > 0) {
+        await Promise.race([
+            Promise.all(promises),
+            new Promise(resolve => setTimeout(resolve, 5000))
+        ]);
+        console.log("✅ [SYSTEM] Экстренное сохранение завершено.");
+    }
     process.exit(0);
 }
 
 process.on('SIGTERM', emergencyMemorySave);
 process.on('SIGINT', emergencyMemorySave);
 
-module.exports = { handleAIChat, AI_NAME };
+module.exports = { handleAIChat, aiMood, AI_NAME };
