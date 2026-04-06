@@ -33,7 +33,7 @@ try {
 } catch (e) { }
 
 const POLZA_API_KEY = process.env.POLZA_API_KEY || 'pza_Ut5ahRtIFZSzj_jKezwdRvQMMebqZ1BI';
-const AI_MODEL = process.env.AI_MODEL || 'gpt-4o-mini';
+const AI_MODEL = process.env.AI_MODEL || 'google/gemini-2.5-flash-lite';
 const FALLBACK_MODEL = 'gpt-4o-mini';
 const AI_NAME = process.env.AI_NAME || 'НейроНика';
 
@@ -185,7 +185,7 @@ const SYSTEM_PROMPT = `Ты — НейроНика. Самостоятельна
 [ИНСТРУМЕНТЫ, МОДЕРАЦИЯ И ВЫВОД]
 - ТВОИ ПРАВА: Ты имеешь ПОЛНОЕ ПРАВО мутить (mute_user) и давать варны (warn_user) тем, кто тебя оскорбляет, унижает или жестко матерится. Ты здесь главная помощница!
 - ВАЖНО: Выбирай для наказания что-то одно (или warn_user, или mute_user). Не вызывай их одновременно на одного человека!
-- Ты МОЖЕШЬ вызывать сразу несколько РАЗНЫХ инструментов (например, записать в досье и сразу показать профиль).
+- ❌ КРИТИЧЕСКОЕ ПРАВИЛО: Вызывай инструменты ТОЛЬКО через встроенный JSON API (tool_calls). КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО выводить текстовый код на Python (например, \`call print(default_api...)\`).
 - Если вызываешь инструмент get_user_profile, НИКОГДА не пиши в тексте ответы вроде "=== ПРОФИЛЬ ===". Код сам приклеит профиль к твоему сообщению. Просто прокомментируй профиль!
 - Кастомные эмодзи: Используй тег [EMO:RANDOM] МАКСИМУМ 1-2 раза за сообщение!`;
 
@@ -209,7 +209,6 @@ function sanitizeHistory(history) {
     });
 }
 
-// Увеличен таймаут до 40 секунд, чтобы сложные многоходовочки не роняли бота
 async function fetchAIWithTimeout(payload, timeoutMs = 40000) {
     const apiCall = openai.chat.completions.create(payload);
     const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error('TIMEOUT')), timeoutMs));
@@ -384,12 +383,11 @@ async function executeToolCall(toolCall, chatId, messageId, userName, userId, ca
                 const result = await warnUserById(chatId, args.target_name);
                 if (!result) return "Пользователь не найден.";
 
-                // ИНТЕЛЛЕКТУАЛЬНЫЙ АВТОМУТ при 3 варнах
                 if (result.shouldMute) {
                     try {
                         await bot.restrictChatMember(chatId, result.userId, {
                             permissions: { can_send_messages: false, can_send_media_messages: false },
-                            until_date: Math.floor(Date.now() / 1000) + 60 * 60 // Автомут на час
+                            until_date: Math.floor(Date.now() / 1000) + 60 * 60
                         });
                         return `Выдан варн (${result.newWarns}/3). Пользователь автоматически замучен на 60 минут за достижение лимита варнов!`;
                     } catch (e) {
@@ -405,7 +403,6 @@ async function executeToolCall(toolCall, chatId, messageId, userName, userId, ca
 
                 const dur = Math.min(Math.max(1, args.duration_minutes || 15), 1440);
                 try {
-                    // ИСПРАВЛЕНИЕ МУТА: Теперь передаем правильный объект permissions
                     await bot.restrictChatMember(chatId, u.user_id, {
                         permissions: {
                             can_send_messages: false,
@@ -601,7 +598,6 @@ async function processAI(msg, extra) {
     try {
         await bot.sendChatAction(chatId, 'typing');
 
-        // Изменено на temperature 0.7 и max_tokens 2500 для избежания повторов и обрывов
         let completion = await fetchAIWithTimeout({
             model: AI_MODEL,
             messages: [{ role: 'system', content: finalPrompt }, ...sanitizeHistory(chatHistory[chatId])],
@@ -617,6 +613,32 @@ async function processAI(msg, extra) {
         let resp = completion.choices[0].message;
         let rawRes = "";
         let directInjectedData = "";
+
+        // ---> АВАРИЙНЫЙ ПЕРЕХВАТЧИК PYTHON-ГАЛЛЮЦИНАЦИЙ <---
+        if (!resp.tool_calls && resp.content && resp.content.includes('default_api.')) {
+            console.log('[SYSTEM] Перехват Python-галлюцинации от ИИ!');
+            const funcMatch = resp.content.match(/default_api\.([a-zA-Z0-9_]+)\s*\((.*?)\)/s);
+            if (funcMatch) {
+                const fakeFnName = funcMatch[1];
+                let fakeArgs = {};
+
+                const targetMatch = funcMatch[2].match(/target_name=['"]([^'"]+)['"]/);
+                if (targetMatch) fakeArgs.target_name = targetMatch[1];
+
+                const amountMatch = funcMatch[2].match(/amount=(\d+)/);
+                if (amountMatch) fakeArgs.amount = parseInt(amountMatch[1]);
+
+                const reasonMatch = funcMatch[2].match(/reason=['"]([^'"]+)['"]/);
+                if (reasonMatch) fakeArgs.reason = reasonMatch[1];
+
+                resp.tool_calls = [{
+                    id: 'call_' + Date.now(),
+                    type: 'function',
+                    function: { name: fakeFnName, arguments: JSON.stringify(fakeArgs) }
+                }];
+                resp.content = "Ах ты ж... Сейчас покажу!"; // Стираем мусорный питон-код и ставим заглушку
+            }
+        }
 
         if (resp.tool_calls || resp.function_call) {
             chatHistory[chatId].push(resp);
