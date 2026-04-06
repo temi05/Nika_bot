@@ -713,9 +713,9 @@ async function processAI(msg, extra) {
 
         let completion;
         try {
-            // Если есть картинка, сразу отправляем в openai/gpt-5-nano, так как Gemini (в текущем API)
-            // молча игнорирует Base64-код и опирается только на текст, не выдавая ошибку.
-            const targetModel = imageUrl ? 'openai/gpt-5-nano' : AI_MODEL;
+            // Если есть картинка, сразу отправляем в google/gemini-2.0-flash-001, так как старые Gemini (в текущем API)
+            // молча игнорировали Base64-код. Проверяем, как справится 2.0.
+            const targetModel = imageUrl ? 'google/gemini-2.0-flash-001' : AI_MODEL;
 
             completion = await fetchAIWithTimeout({
                 model: targetModel,
@@ -727,15 +727,15 @@ async function processAI(msg, extra) {
         } catch (e) {
             console.error("❌ Основная модель не справилась с картинкой/запросом:", e.message);
             if (imageUrl) {
-                console.log("♻️ Пробую отправить картинку через 'openai/gpt-5-nano' (Vision)");
+                console.log("♻️ Пробую отправить картинку через 'google/gemini-2.0-flash-001' (Vision)");
                 try {
                     completion = await fetchAIWithTimeout({
-                        model: 'openai/gpt-5-nano',
+                        model: 'google/gemini-2.0-flash-001',
                         messages: [{ role: 'system', content: finalPrompt }, ...currentMessagesFirstCall],
                         tools: aiTools, max_tokens: 2500, temperature: 0.7
                     });
                 } catch (e2) {
-                    console.error("❌ openai/gpt-5-nano тоже отказался читать картинку. Убираем её...");
+                    console.error("❌ google/gemini-2.0-flash-001 тоже отказался читать картинку. Убираем её...");
                     currentMessagesFirstCall[currentMessagesFirstCall.length - 1].content = fullContent;
                     completion = await fetchAIWithTimeout({
                         model: AI_MODEL,
@@ -816,7 +816,7 @@ async function processAI(msg, extra) {
             } catch (e2) {
                 // Страховка на случай падения второго вызова
                 second = await fetchAIWithTimeout({
-                    model: 'openai/gpt-5-nano',
+                    model: 'google/gemini-2.0-flash-001',
                     messages: [{ role: 'system', content: finalPrompt }, ...currentMessagesSecondCall],
                     temperature: 0.7,
                     max_tokens: 2500
