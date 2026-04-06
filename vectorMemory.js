@@ -1,4 +1,4 @@
-﻿const OpenAI = require('openai');
+const OpenAI = require('openai');
 const {
     insertKnowledge,
     searchKnowledge,
@@ -8,254 +8,313 @@ const {
     transliterate
 } = require('./database');
 
-console.log('✅ [SYSTEM] Модуль СВЕРХ-УМНОЙ графовой памяти (LightRAG v3) успешно подключен!');
+console.log('✅ [VECTOR MEMORY] Модуль графовой памяти (LightRAG v3.1) подключён');
 
 const POLZA_API_KEY = process.env.POLZA_API_KEY || 'pza_Ut5ahRtIFZSzj_jKezwdRvQMMebqZ1BI';
-const AI_MODEL = process.env.AI_MODEL || 'gpt-4o-mini';
+// ИСПРАВЛЕНО: Используем реальный AI_MODEL из env, а не жёсткий gpt-4o-mini
+const EXTRACTOR_MODEL = process.env.AI_MODEL || 'google/gemini-2.5-flash-lite';
+// Эмбеддинги всегда через OpenAI-совместимый endpoint
+const EMBEDDING_MODEL = 'text-embedding-3-small';
+
+// Минимальная длина диалога для запуска экстракции (символов)
+const MIN_HISTORY_LENGTH = 80;
+// Макс. фактов за одну экстракцию
+const MAX_FACTS_PER_BATCH = 10;
+// Таймаут AI-вызовов
+const AI_TIMEOUT_MS = 30000;
 
 const openai = new OpenAI({
     apiKey: POLZA_API_KEY,
     baseURL: 'https://polza.ai/api/v1',
 });
 
+// ─────────────────────────────────────────────────────────────
+// ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+// ─────────────────────────────────────────────────────────────
+
+async function withTimeout(promise, ms = AI_TIMEOUT_MS) {
+    const timeout = new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('AI_TIMEOUT')), ms)
+    );
+    return Promise.race([promise, timeout]);
+}
+
 async function createEmbedding(text) {
+    if (!text || text.trim().length < 3) return null;
     try {
-        const res = await openai.embeddings.create({
-            model: 'text-embedding-3-small',
-            input: text,
-        });
+        const res = await withTimeout(
+            openai.embeddings.create({ model: EMBEDDING_MODEL, input: text.slice(0, 512) })
+        );
         return res.data[0].embedding;
     } catch (e) {
-        console.error('[VECTOR ERROR] Ошибка генерации эмбеддинга:', e.message);
+        if (e.message !== 'AI_TIMEOUT') {
+            console.error('[VECTOR] Ошибка эмбеддинга:', e.message);
+        }
         return null;
     }
 }
 
+// ─────────────────────────────────────────────────────────────
+// ЭКСТРАКЦИЯ ФАКТОВ ИЗ ДИАЛОГА
+// ─────────────────────────────────────────────────────────────
+
 async function extractAndSaveFacts(chatId, historyText, participants = []) {
+    // Защита от пустых и слишком коротких диалогов
+    if (!historyText || historyText.trim().length < MIN_HISTORY_LENGTH) {
+        console.log(`[MEMORY] Диалог слишком короткий (${historyText?.length || 0} симв.) — пропускаю`);
+        return;
+    }
+
     try {
-        // ---> ЖЕСТКАЯ ОЧИСТКА ИМЕН ДО ОТПРАВКИ К ИИ <---
-        let cleanHistory = historyText.replace(/Чатик 🫐 Nika_grdt 👾/gi, "Ника");
+        let cleanHistory = historyText.replace(/Чатик 🫐 Nika_grdt 👾/gi, 'Ника');
 
-        // Убираем фразу "Определи имена участников", чтобы ИИ не думал, что это его главная задача.
-        const participantInfo = participants.length > 0 ?
-            "Известные имена (для справки): " + participants.map(p => p.replace(/Чатик 🫐 Nika_grdt 👾/gi, "Ника")).join(', ') :
-            "";
+        const participantInfo = participants.length > 0
+            ? 'Известные имена (для справки): ' + participants
+                .map(p => p.replace(/Чатик 🫐 Nika_grdt 👾/gi, 'Ника'))
+                .join(', ')
+            : '';
 
-        const prompt = `Ты — сверх-интеллектуальное ядро памяти (LightRAG). 
-ТВОЯ ЕДИНСТВЕННАЯ ЦЕЛЬ: Находить ГЛУБОКИЕ ФАКТЫ о людях и их ОТНОШЕНИЯ друг к другу. 
-ЕСЛИ НЕТ ФАКТОВ — ВОЗВРАЩАЙ ПУСТОЙ МАССИВ.
+        const prompt = `Ты — ядро долгосрочной памяти чат-бота (LightRAG).
+ТВОЯ ЗАДАЧА: Находить ПОСТОЯННЫЕ факты о людях и их отношениях. Если фактов нет — вернуть пустой массив.
 
-[АБСОЛЮТНЫЕ ЗАПРЕТЫ (ЕСЛИ НАРУШИШЬ - СИСТЕМА УПАДЕТ)]:
-1. ❌ НИКОГДА не пиши "АТРИБУТ: участник диалога". Это мусор. 
-2. ❌ НИКОГДА не сохраняй временные действия: "играет", "смотрит", "пойдет в зал", "отдыхает", "сфоткал", "устал", "работает" (без указания кем).
-3. ❌ НИКОГДА не сохраняй мета-болтовню: команды боту ("покажи профиль", "удали", "запомни"), обсуждение логов, обсуждение настроек.
-4. ❌ НИКОГДА не выдумывай факты. Если сомневаешься — пропускай.
+[АБСОЛЮТНЫЕ ЗАПРЕТЫ]:
+1. ❌ Никогда не пиши "АТРИБУТ: участник диалога" — это мусор
+2. ❌ Никогда не сохраняй временные действия: "играет", "смотрит", "пойдёт в зал", "устал", "сфоткал"
+3. ❌ Никогда не сохраняй команды боту, обсуждение настроек, логов, профилей
+4. ❌ Никогда не выдумывай факты. Сомневаешься — пропускай
+5. ❌ Максимум ${MAX_FACTS_PER_BATCH} фактов за раз
 
-[РАЗРЕШЕННЫЙ ФОРМАТ]
-Формируй строки ТОЛЬКО так:
-✅ УЗЕЛ: [Имя] | АТРИБУТ: [Фундаментальный факт: реальная профессия, возраст, ориентация, хроническая болезнь, кинк, хобби (например, "занимается йогой")].
-✅ СВЯЗЬ: [Имя 1] -> [отношение] -> [Имя 2] (ненавидит, любит, фанатеет, в браке с).
+[РАЗРЕШЁННЫЙ ФОРМАТ]:
+✅ УЗЕЛ: [Имя] | АТРИБУТ: [Постоянный факт: профессия, возраст, хобби, болезнь, увлечение]
+✅ СВЯЗЬ: [Имя1] -> [отношение] -> [Имя2]
 
-[ФОРМАТ ВЫВОДА (JSON)]
-Сначала в поле "reasoning" (на русском языке) объясни, почему ты нашел именно эти факты или почему решил вернуть пустой массив.
-В поле "facts" помести массив строк. Очищай имена от смайликов и тегов (@).
-
-Пример правильного ответа:
+[ВЫВОД JSON]:
 {
-  "reasoning": "Большая часть текста — болтовня и обсуждение ИИ, игнорирую. Алина упомянула, что любит растяжку — это постоянное хобби, создаю УЗЕЛ.",
-  "facts": [
-    "УЗЕЛ: alina | АТРИБУТ: любит заниматься растяжкой"
-  ]
+  "reasoning": "краткое объяснение (1-2 предложения)",
+  "facts": ["УЗЕЛ: ...", "СВЯЗЬ: ..."]
 }
 
-Пример ПУСТОГО ответа (Используй часто!):
-{
-  "reasoning": "Пользователи шутят, просят профили и обсуждают временные события. Фундаментальных фактов и отношений нет. Возвращаю пустоту.",
-  "facts": []
-}`;
+Примеры ХОРОШИХ фактов: "УЗЕЛ: алина | АТРИБУТ: занимается йогой"
+Примеры ПЛОХИХ фактов: "УЗЕЛ: вася | АТРИБУТ: пойдёт в магазин", "СВЯЗЬ: вася -> спросил -> нику"`;
 
-        const completion = await openai.chat.completions.create({
-            model: AI_MODEL,
-            messages: [
-                { role: 'system', content: prompt },
-                { role: 'user', content: `${participantInfo}\n\nДиалог:\n${cleanHistory}` }
-            ],
-            temperature: 0.0,
-            max_tokens: 3000, // ИСПРАВЛЕНО: Увеличен лимит для избежания обрыва JSON
-            response_format: { type: 'json_object' }
-        });
+        const completion = await withTimeout(
+            openai.chat.completions.create({
+                model: EXTRACTOR_MODEL,
+                messages: [
+                    { role: 'system', content: prompt },
+                    { role: 'user', content: `${participantInfo}\n\nДиалог:\n${cleanHistory.slice(0, 3000)}` }
+                ],
+                temperature: 0.0,
+                max_tokens: 1000,
+                response_format: { type: 'json_object' }
+            })
+        );
 
         const rawContent = completion.choices[0].message.content;
-        console.log("[MEMORY EXTRACTOR] Ответ ИИ: " + rawContent);
 
         let result;
         try {
             result = JSON.parse(rawContent);
         } catch (parseError) {
-            console.log("[MEMORY EXTRACTOR] Ошибка парсинга JSON: " + parseError.message);
-            // ---> АВАРИЙНОЕ СПАСЕНИЕ ФАКТОВ <---
-            // Если JSON оборвался, "выковыриваем" факты с помощью регулярных выражений!
+            // Аварийное спасение через регулярку
             const fallbackFacts = [];
             const regex = /(УЗЕЛ:|СВЯЗЬ:)[^"\\]+/gi;
             let match;
             while ((match = regex.exec(rawContent)) !== null) {
-                let extracted = match[0].trim();
-                // Убираем случайные обрывки
+                const extracted = match[0].trim();
                 if (extracted.length > 10 && !extracted.endsWith('УЗЕЛ:')) {
                     fallbackFacts.push(extracted);
                 }
             }
             if (fallbackFacts.length > 0) {
-                console.log(`[MEMORY EXTRACTOR] Спасены факты через регулярку (${fallbackFacts.length} шт.)`);
+                console.log(`[MEMORY] Аварийное спасение: ${fallbackFacts.length} фактов через regex`);
                 result = { facts: fallbackFacts };
             } else {
-                return; // Если спасать нечего, просто выходим
+                return;
             }
         }
 
-        let facts = result.facts || [];
+        const facts = (result.facts || []).slice(0, MAX_FACTS_PER_BATCH);
+
+        if (facts.length === 0) {
+            if (result.reasoning) {
+                console.log(`[MEMORY] Факты не найдены: ${result.reasoning.slice(0, 80)}`);
+            }
+            return;
+        }
+
+        console.log(`[MEMORY] Найдено ${facts.length} фактов. Сохраняю...`);
+        let saved = 0;
 
         for (const fact of facts) {
-            // Двойная защита от мусора
             if (typeof fact !== 'string' || fact.trim() === '' || fact.includes('участник диалога')) continue;
 
+            // Быстрая текстовая проверка перед дорогим эмбеддингом
             const exists = await checkFactExists(chatId, fact);
             if (exists) continue;
 
             const embedding = await createEmbedding(fact);
-            if (embedding) {
-                const duplicates = await searchKnowledge(chatId, embedding, 1, 0.85);
-                if (duplicates && duplicates.length > 0) continue;
+            if (!embedding) continue;
 
-                await insertKnowledge(chatId, fact, embedding);
-                console.log("[MEMORY] Успешно добавлен узел/связь: " + fact);
+            // Проверка семантического дубликата (порог 0.88 — строже)
+            const duplicates = await searchKnowledge(chatId, embedding, 1, 0.88);
+            if (duplicates && duplicates.length > 0) {
+                console.log(`[MEMORY] Пропущен дубликат: "${fact.slice(0, 50)}"`);
+                continue;
             }
+
+            await insertKnowledge(chatId, fact, embedding);
+            saved++;
+            console.log(`[MEMORY] ✅ Добавлено: ${fact.slice(0, 70)}`);
         }
+
+        if (saved > 0) {
+            console.log(`[MEMORY] Итого сохранено ${saved}/${facts.length} фактов`);
+        }
+
     } catch (e) {
-        console.error('[MEMORY ERROR] Ошибка экстракции:', e.message);
+        if (e.message === 'AI_TIMEOUT') {
+            console.warn('[MEMORY] Таймаут экстракции — пропускаю');
+        } else {
+            console.error('[MEMORY] Ошибка экстракции:', e.message);
+        }
     }
 }
 
-async function getRelevantFacts(chatId, userMessage, userName = "", activeParticipants = []) {
+// ─────────────────────────────────────────────────────────────
+// ПОИСК РЕЛЕВАНТНЫХ ФАКТОВ ДЛЯ КОНТЕКСТА ИИ
+// ─────────────────────────────────────────────────────────────
+
+async function getRelevantFacts(chatId, userMessage, userName = '', activeParticipants = []) {
     try {
-        if (!userMessage || userMessage.trim() === '') return "";
+        if (!userMessage || userMessage.trim().length < 3) return '';
 
-        let cleanMessage = userMessage.replace(/Чатик 🫐 Nika_grdt 👾/gi, "Ника");
-        let cleanUserName = userName.replace(/Чатик 🫐 Nika_grdt 👾/gi, "Ника");
+        let cleanMessage = userMessage.replace(/Чатик 🫐 Nika_grdt 👾/gi, 'Ника');
+        let cleanUserName = userName.replace(/Чатик 🫐 Nika_grdt 👾/gi, 'Ника');
 
-        const allFoundFacts = new Set();
-        const finalFacts = [];
+        const allFoundFacts = new Map(); // fact -> { source, relevance }
 
-        const stopWords = new Set(['меня', 'тебя', 'чтобы', 'какой', 'такой', 'зачем', 'почему', 'когда', 'будет', 'очень', 'просто', 'может', 'нужно', 'хочу', 'люблю']);
+        const stopWords = new Set([
+            'меня', 'тебя', 'чтобы', 'какой', 'такой', 'зачем', 'почему',
+            'когда', 'будет', 'очень', 'просто', 'может', 'нужно', 'хочу', 'люблю',
+            'тебе', 'мене', 'этот', 'этого', 'этой', 'этом', 'всего', 'тоже',
+            'если', 'даже', 'вроде', 'опять', 'снова', 'уже', 'ещё', 'всё'
+        ]);
 
         const getStemLocal = (word) => {
             if (!word || word.length < 3) return word;
             return word.toLowerCase()
                 .replace(/[уаеяюиыо]$/i, '')
-                .replace(/(ов|ев|ий|ый|ые|ие|ах|ях|ом|ем|ам|ам|у|е|а|я)$/i, '')
+                .replace(/(ов|ев|ий|ый|ые|ие|ах|ях|ом|ем|ам|у|е|а|я)$/i, '')
                 .replace(/(s|es|ed|ing)$/i, '');
         };
 
-        const embeddingRaw = await createEmbedding(cleanMessage);
-        if (embeddingRaw) {
-            const vectorResults = await searchKnowledge(chatId, embeddingRaw, 10, 0.45);
-            vectorResults.forEach(r => {
-                if (!allFoundFacts.has(r.fact)) {
-                    allFoundFacts.add(r.fact);
-                    finalFacts.push({ source: 'semantic', text: r.fact, relevance: r.similarity || 0.5 });
-                }
-            });
-        }
-
-        const words = cleanMessage.split(/\s+/)
-            .map(w => w.replace(/[.,!?;:()]/g, '').toLowerCase())
-            .filter(w => w.length > 3 && !stopWords.has(w));
-
-        if (words.length > 0) {
-            for (const word of words.slice(0, 7)) {
-                const stem = getStemLocal(word);
-                const textResults = await searchKnowledgeByText(chatId, stem, 3);
-                textResults.forEach(r => {
-                    if (!allFoundFacts.has(r.fact)) {
-                        allFoundFacts.add(r.fact);
-                        finalFacts.push({ source: 'keyword', text: r.fact });
-                    }
-                });
+        const addFact = (fact, source, relevance = 0.5) => {
+            if (!allFoundFacts.has(fact)) {
+                allFoundFacts.set(fact, { source, relevance });
             }
-        }
-
-        if (cleanUserName) {
-            const recentResults = await getRecentKnowledge(chatId, cleanUserName, 10);
-            recentResults.forEach(r => {
-                if (!allFoundFacts.has(r.fact)) {
-                    allFoundFacts.add(r.fact);
-                    finalFacts.push({ source: 'recent', text: r.fact });
-                }
-            });
-        }
-
-        const searchStems = new Set();
-        const addTargetWithStem = (name) => {
-            if (!name || name.length < 3) return;
-            const stem = getStemLocal(name);
-            searchStems.add(stem);
-            searchStems.add(name.toLowerCase());
-            const trans = transliterate(name);
-            if (trans !== name.toLowerCase()) searchStems.add(getStemLocal(trans));
         };
 
-        addTargetWithStem(cleanUserName);
+        // 1. Семантический поиск по смыслу сообщения (самый точный)
+        const embeddingRaw = await createEmbedding(cleanMessage);
+        if (embeddingRaw) {
+            const vectorResults = await searchKnowledge(chatId, embeddingRaw, 8, 0.45);
+            vectorResults.forEach(r => addFact(r.fact, 'semantic', r.similarity || 0.5));
+        }
+
+        // 2. Недавние факты о конкретном пользователе
+        if (cleanUserName && cleanUserName.length >= 2) {
+            const recentResults = await getRecentKnowledge(chatId, cleanUserName, 8);
+            recentResults.forEach(r => addFact(r.fact, 'recent', 0.7));
+        }
+
+        // 3. Поиск по именам упомянутых людей и участников (ограничиваем стемы)
+        const searchStems = new Set();
+        const addTarget = (name) => {
+            if (!name || name.length < 2) return;
+            const clean = name.replace('@', '').toLowerCase();
+            searchStems.add(clean);
+            const stem = getStemLocal(clean);
+            if (stem !== clean && stem.length >= 3) searchStems.add(stem);
+            const trans = transliterate(name);
+            if (trans && trans.toLowerCase() !== clean) searchStems.add(trans.toLowerCase());
+        };
+
+        addTarget(cleanUserName);
+
+        // Только первые 3 участника чтобы не делать 20+ SQL запросов
         if (activeParticipants) {
-            activeParticipants.forEach(p => {
-                let pName = (p.firstName || "").replace(/Чатик 🫐 Nika_grdt 👾/gi, "Ника");
-                if (pName) addTargetWithStem(pName);
-                if (p.username) addTargetWithStem(p.username);
+            activeParticipants.slice(0, 3).forEach(p => {
+                let pName = (p.firstName || '').replace(/Чатик 🫐 Nika_grdt 👾/gi, 'Ника');
+                if (pName) addTarget(pName);
             });
         }
 
-        const potentialNames = cleanMessage.match(/([А-Я][а-я]+|@[a-zA-Z0-9_]+)/g) || [];
-        potentialNames.forEach(n => addTargetWithStem(n.replace('@', '')));
+        // Имена из сообщения (с заглавной = вероятно имя)
+        const potentialNames = cleanMessage.match(/([А-Я][а-яё]{2,}|@[a-zA-Z0-9_]+)/g) || [];
+        potentialNames.slice(0, 5).forEach(n => addTarget(n.replace('@', '')));
 
-        for (const stem of searchStems) {
-            const byStem = await searchKnowledgeByText(chatId, stem, 10);
-            byStem.forEach(r => {
-                if (!allFoundFacts.has(r.fact)) {
-                    allFoundFacts.add(r.fact);
-                    finalFacts.push({ source: 'subject', text: r.fact });
-                }
-            });
+        // Делаем не более 8 текстовых поисков
+        for (const stem of Array.from(searchStems).slice(0, 8)) {
+            if (stem.length < 3) continue;
+            const byStem = await searchKnowledgeByText(chatId, stem, 5);
+            byStem.forEach(r => addFact(r.fact, 'subject', 0.6));
         }
 
-        if (finalFacts.length === 0) return "";
+        // 4. Ключевые слова из сообщения (ограничиваем до 4 слов)
+        const keywords = cleanMessage.split(/\s+/)
+            .map(w => w.replace(/[.,!?;:()]/g, '').toLowerCase())
+            .filter(w => w.length > 4 && !stopWords.has(w))
+            .slice(0, 4);
 
-        const sortedFacts = finalFacts.sort((a, b) => {
-            const order = { 'subject': 0, 'recent': 1, 'semantic': 2, 'keyword': 3 };
-            return order[a.source] - order[b.source];
-        });
+        for (const word of keywords) {
+            const stem = getStemLocal(word);
+            const textResults = await searchKnowledgeByText(chatId, stem, 2);
+            textResults.forEach(r => addFact(r.fact, 'keyword', 0.4));
+        }
 
-        const factsText = sortedFacts
-            .slice(0, 15)
-            .map((f, i) => "- " + f.text)
+        if (allFoundFacts.size === 0) return '';
+
+        // Сортировка: semantic > recent > subject > keyword
+        const priorityOrder = { semantic: 0, recent: 1, subject: 2, keyword: 3 };
+        const sorted = Array.from(allFoundFacts.entries())
+            .sort(([, a], [, b]) => {
+                const pDiff = priorityOrder[a.source] - priorityOrder[b.source];
+                return pDiff !== 0 ? pDiff : b.relevance - a.relevance;
+            });
+
+        const factsText = sorted
+            .slice(0, 12)
+            .map(([fact]) => '- ' + fact)
             .join('\n');
 
         return factsText;
 
     } catch (e) {
-        console.error('[MEMORY FATAL ERROR] Ошибка при поиске релевантных фактов:', e.message);
-        return "";
+        console.error('[MEMORY] Ошибка поиска фактов:', e.message);
+        return '';
     }
 }
 
+// ─────────────────────────────────────────────────────────────
+// УДАЛЕНИЕ ФАКТА
+// ─────────────────────────────────────────────────────────────
+
 async function forgetFact(chatId, query) {
     if (!query || query.trim() === '') return false;
-    const embedding = await createEmbedding(query);
-    const results = await searchKnowledge(chatId, embedding, 1, 0.75);
-    if (results && results.length > 0) {
-        const target = results[0];
-        if (target.id) {
-            const success = await require('./database').deleteKnowledge(chatId, target.id);
-            return success ? target.fact : false;
+    try {
+        const embedding = await createEmbedding(query);
+        if (!embedding) return false;
+        const results = await searchKnowledge(chatId, embedding, 1, 0.72);
+        if (results && results.length > 0) {
+            const target = results[0];
+            if (target.id) {
+                const success = await require('./database').deleteKnowledge(chatId, target.id);
+                return success ? target.fact : false;
+            }
         }
+    } catch (e) {
+        console.error('[MEMORY] Ошибка удаления факта:', e.message);
     }
     return false;
 }
