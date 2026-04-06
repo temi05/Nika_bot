@@ -423,8 +423,8 @@ async function executeToolCall(toolCall, chatId, messageId, userName, userId, ca
                         return "Пользователь не найден.";
                     }
                     if (u.user_id === BOT_ID || u.user_id === ANONYMOUS_ADMIN_ID || u.user_id === SUPER_ADMIN_ID) {
-                         console.log(`[TOOL] Отклонено: попытка замутить защищенного пользователя ID ${u.user_id}`);
-                         return "Ха, я не могу применять наказания к себе, к админам или к Создателю!";
+                        console.log(`[TOOL] Отклонено: попытка замутить защищенного пользователя ID ${u.user_id}`);
+                        return "Ха, я не могу применять наказания к себе, к админам или к Создателю!";
                     }
 
                     if (args.action === "mute") {
@@ -691,11 +691,11 @@ async function processAI(msg, extra) {
                 const arrayBuffer = await imgRes.arrayBuffer();
                 const buffer = Buffer.from(arrayBuffer);
                 const base64 = buffer.toString('base64');
-                
+
                 let mimeType = 'image/jpeg';
                 if (tempUrl.endsWith('.webp')) mimeType = 'image/webp';
                 else if (tempUrl.endsWith('.png')) mimeType = 'image/png';
-                
+
                 imageUrl = `data:${mimeType};base64,${base64}`;
             }
         } catch (e) {
@@ -713,10 +713,10 @@ async function processAI(msg, extra) {
 
         let completion;
         try {
-            // Если есть картинка, сразу отправляем в qwen/qwen2.5-vl-32b-instruct, так как Gemini (в текущем API)
+            // Если есть картинка, сразу отправляем в gpt-4o-mini, так как Gemini (в текущем API)
             // молча игнорирует Base64-код и опирается только на текст, не выдавая ошибку.
-            const targetModel = imageUrl ? 'qwen/qwen2.5-vl-32b-instruct' : AI_MODEL;
-            
+            const targetModel = imageUrl ? 'qwen/qwen3.5-flash-02-23' : AI_MODEL;
+
             completion = await fetchAIWithTimeout({
                 model: targetModel,
                 messages: [{ role: 'system', content: finalPrompt }, ...currentMessagesFirstCall],
@@ -727,15 +727,15 @@ async function processAI(msg, extra) {
         } catch (e) {
             console.error("❌ Основная модель не справилась с картинкой/запросом:", e.message);
             if (imageUrl) {
-                console.log("♻️ Пробую отправить картинку через 'qwen/qwen2.5-vl-32b-instruct' (Vision)");
+                console.log("♻️ Пробую отправить картинку через 'gpt-4o-mini' (Vision)");
                 try {
                     completion = await fetchAIWithTimeout({
-                        model: 'qwen/qwen2.5-vl-32b-instruct',
+                        model: 'gpt-4o-mini',
                         messages: [{ role: 'system', content: finalPrompt }, ...currentMessagesFirstCall],
                         tools: aiTools, max_tokens: 2500, temperature: 0.7
                     });
                 } catch (e2) {
-                    console.error("❌ qwen/qwen2.5-vl-32b-instruct тоже отказался читать картинку. Убираем её...");
+                    console.error("❌ gpt-4o-mini тоже отказался читать картинку. Убираем её...");
                     currentMessagesFirstCall[currentMessagesFirstCall.length - 1].content = fullContent;
                     completion = await fetchAIWithTimeout({
                         model: AI_MODEL,
@@ -816,7 +816,7 @@ async function processAI(msg, extra) {
             } catch (e2) {
                 // Страховка на случай падения второго вызова
                 second = await fetchAIWithTimeout({
-                    model: 'qwen/qwen2.5-vl-32b-instruct',
+                    model: 'gpt-4o-mini',
                     messages: [{ role: 'system', content: finalPrompt }, ...currentMessagesSecondCall],
                     temperature: 0.7,
                     max_tokens: 2500
