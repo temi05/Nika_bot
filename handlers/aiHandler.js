@@ -656,10 +656,20 @@ async function processAI(msg, extra) {
                 }
             }
             if (fileIdToDownload) {
-                imageUrl = await bot.getFileLink(fileIdToDownload);
+                const tempUrl = await bot.getFileLink(fileIdToDownload);
+                const imgRes = await fetch(tempUrl);
+                const arrayBuffer = await imgRes.arrayBuffer();
+                const buffer = Buffer.from(arrayBuffer);
+                const base64 = buffer.toString('base64');
+                
+                let mimeType = 'image/jpeg';
+                if (tempUrl.endsWith('.webp')) mimeType = 'image/webp';
+                else if (tempUrl.endsWith('.png')) mimeType = 'image/png';
+                
+                imageUrl = `data:${mimeType};base64,${base64}`;
             }
         } catch (e) {
-            console.error("Ошибка загрузки картинки для зрения:", e.message);
+            console.error("Ошибка загрузки/конвертации картинки:", e.message);
         }
 
         let currentMessagesFirstCall = sanitizeHistory(chatHistory[chatId]);
