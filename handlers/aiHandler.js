@@ -172,7 +172,7 @@ const aiTools = [
 const SYSTEM_PROMPT = `Ты — НейроНика. Самостоятельная личность, живая, дерзкая, доминантная и верная помощница стримерши Ники.
 
 [ТВОИ ФАКТЫ-КОНСТАНТЫ]
-- Ника — ТОЛЬКО стримерша. Ее ID: -1002214854700.
+- Ника — ТОЛЬКО стримерша. Ее ID: -1002214854700 или @nika_grdtChat
 - Ника **НЕ пишет песни**, **НЕ поет**, **НЕ выпускает треки**.
 
 [ТВОЙ ХАРАКТЕР И РЕЧЬ]
@@ -184,7 +184,7 @@ const SYSTEM_PROMPT = `Ты — НейроНика. Самостоятельна
 
 [ИНСТРУМЕНТЫ, МОДЕРАЦИЯ И ВЫВОД]
 - ТВОИ ПРАВА: Ты имеешь ПОЛНОЕ ПРАВО мутить (mute_user) и давать варны (warn_user) тем, кто тебя оскорбляет, унижает или жестко матерится. Ты здесь главная помощница!
-- ВАЖНО: Выбирай для наказания что-то одно (или warn_user, или mute_user). Не вызывай их одновременно на одного человека!
+- ВАЖНО: Выбирай для наказания что-то одно (или warn_user, или mute_user). Не вызывай их одновременно на одного человека! и не будь слишком жестокой может они просто шутят
 - ❌ КРИТИЧЕСКОЕ ПРАВИЛО: Вызывай инструменты ТОЛЬКО через встроенный JSON API (tool_calls). КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО выводить текстовый код на Python (например, \`call print(default_api...)\`).
 - Если вызываешь инструмент get_user_profile, НИКОГДА не пиши в тексте ответы вроде "=== ПРОФИЛЬ ===". Код сам приклеит профиль к твоему сообщению. Просто прокомментируй профиль!
 - Кастомные эмодзи: Используй тег [EMO:RANDOM] МАКСИМУМ 1-2 раза за сообщение!`;
@@ -387,6 +387,8 @@ async function executeToolCall(toolCall, chatId, messageId, userName, userId, ca
                     try {
                         await bot.restrictChatMember(chatId, result.userId, {
                             permissions: { can_send_messages: false, can_send_media_messages: false },
+                            can_send_messages: false,
+                            can_send_media_messages: false,
                             until_date: Math.floor(Date.now() / 1000) + 60 * 60
                         });
                         return `Выдан варн (${result.newWarns}/3). Пользователь автоматически замучен на 60 минут за достижение лимита варнов!`;
@@ -409,6 +411,9 @@ async function executeToolCall(toolCall, chatId, messageId, userName, userId, ca
                             can_send_media_messages: false,
                             can_send_other_messages: false
                         },
+                        can_send_messages: false,
+                        can_send_media_messages: false,
+                        can_send_other_messages: false,
                         until_date: Math.floor(Date.now() / 1000) + dur * 60
                     });
                     return `Пользователь ${u.first_name} успешно замучен на ${dur} минут. Скажи ему пару ласковых на прощание!`;
@@ -427,7 +432,11 @@ async function executeToolCall(toolCall, chatId, messageId, userName, userId, ca
                             can_send_media_messages: true,
                             can_send_other_messages: true,
                             can_add_web_page_previews: true
-                        }
+                        },
+                        can_send_messages: true,
+                        can_send_media_messages: true,
+                        can_send_other_messages: true,
+                        can_add_web_page_previews: true
                     });
                     return `Пользователь ${u.first_name} успешно размучен.`;
                 } catch (e) { return `Ошибка снятия мута: ${e.message}`; }
@@ -444,17 +453,34 @@ async function executeToolCall(toolCall, chatId, messageId, userName, userId, ca
             }
             case 'react_to_message': {
                 try {
-                    await bot.setMessageReaction(chatId, messageId, { reaction: [{ type: 'emoji', emoji: args.emoji || '🔥' }] });
+                    await bot.setMessageReaction(chatId, messageId, [{ type: 'emoji', emoji: args.emoji || '🔥' }]);
                     return "OK.";
-                } catch (e) { return `Ошибка: ${e.message}`; }
+                } catch (e) { return `Ошибка реакции: ${e.message}`; }
             }
             case 'send_sticker': {
                 let fileId = args.sticker_file_id;
-                if (!fileId) return "Стикер отправлен.";
+                if (!fileId || fileId.trim() === '' || fileId === 'random') {
+                    if (nikaStickers.length > 0) {
+                        const rnd = nikaStickers[Math.floor(Math.random() * nikaStickers.length)];
+                        fileId = rnd.file_id || rnd.emoji_id;
+                    } else {
+                        return "Стикеры не найдены в базе.";
+                    }
+                }
                 try {
+                    if (/^[a-zA-Z0-9_-]{10,}$/.test(fileId) && !fileId.startsWith('CAAC') && !fileId.startsWith('AgAD')) {
+                        try {
+                            const customEmojis = await bot.getCustomEmojiStickers([fileId]);
+                            if (customEmojis && customEmojis.length > 0 && customEmojis[0].file_id) {
+                                fileId = customEmojis[0].file_id;
+                            }
+                        } catch (err) { }
+                    }
                     await bot.sendSticker(chatId, fileId, { reply_to_message_id: messageId });
                     return "Стикер отправлен.";
-                } catch (e) { return "Ошибка стикера."; }
+                } catch (e) {
+                    return `Ошибка отправки стикера: ${e.message}`;
+                }
             }
             case 'update_user_bio': {
                 let u = await resolveUser(chatId, args.target_name);
@@ -465,16 +491,46 @@ async function executeToolCall(toolCall, chatId, messageId, userName, userId, ca
             case 'update_user_notes': {
                 let u = await resolveUser(chatId, args.target_name);
                 if (!u) return "Не найден.";
-                const oldNotes = u.ai_notes || "";
-                const finalNotes = oldNotes ? oldNotes + "\n- " + args.new_note_item : "- " + args.new_note_item;
+                let finalNotes;
+                if (args.replace_all) {
+                    finalNotes = args.new_note_item;
+                } else {
+                    const oldNotes = u.ai_notes || "";
+                    finalNotes = oldNotes ? oldNotes + "\n- " + args.new_note_item : "- " + args.new_note_item;
+                }
                 await updateUser(u.id, { ai_notes: finalNotes });
                 return `Добавлено в досье.`;
             }
             case 'create_poll': {
-                return "Опрос запущен.";
+                try {
+                    let opts = args.options;
+                    if (typeof opts === 'string') {
+                        try { opts = JSON.parse(opts); } catch (e) { opts = opts.split(',').map(s => s.trim()); }
+                    }
+                    if (!Array.isArray(opts) || opts.length < 2) return "Ошибка: нужно минимум 2 варианта ответа.";
+
+                    const safeQuestion = String(args.question).substring(0, 295);
+                    const safeOptions = opts.slice(0, 10).map(opt => String(opt).substring(0, 95));
+
+                    await bot.sendPoll(chatId, safeQuestion, safeOptions, {
+                        is_anonymous: args.is_anonymous !== false,
+                        allows_multiple_answers: args.allows_multiple_answers === true
+                    });
+                    return "Опрос успешно запущен.";
+                } catch (e) {
+                    return `Ошибка запуска опроса: ${e.message}`;
+                }
             }
             case 'set_reminder': {
-                return "Таймер установлен.";
+                try {
+                    const delay = Math.max(1, args.delay_minutes || 1);
+                    const triggerTime = new Date(Date.now() + delay * 60 * 1000).toISOString();
+                    const nameToSave = userHandle ? `@${userHandle}` : userName;
+                    const ok = await insertReminder(chatId, userId, nameToSave, args.text, triggerTime);
+                    return ok ? `Таймер на ${delay} минут установлен.` : "Ошибка базы данных.";
+                } catch (e) {
+                    return `Ошибка установки таймера: ${e.message}`;
+                }
             }
             default: return "Неизвестный инструмент.";
         }
@@ -607,7 +663,7 @@ async function processAI(msg, extra) {
         }).catch(e => fetchAIWithTimeout({
             model: FALLBACK_MODEL,
             messages: [{ role: 'system', content: finalPrompt }, ...sanitizeHistory(chatHistory[chatId])],
-            tools: aiTools, max_tokens: 2000, temperature: 0.7
+            tools: aiTools, max_tokens: 2500, temperature: 0.7
         }));
 
         let resp = completion.choices[0].message;
@@ -653,7 +709,7 @@ async function processAI(msg, extra) {
                     chatHistory[chatId].push({ role: 'function', name: fnName, content: String(res) });
                 }
 
-                if (['get_user_profile', 'find_users_by_criteria', 'give_cookies', 'mute_user', 'warn_user'].includes(fnName)) {
+                if (['get_user_profile', 'find_users_by_criteria', 'give_cookies', 'mute_user', 'warn_user', 'create_poll', 'set_reminder'].includes(fnName)) {
                     if (!directInjectedData.includes(res)) directInjectedData += `\n\n${res}`;
                 }
             }
@@ -661,7 +717,8 @@ async function processAI(msg, extra) {
             const second = await fetchAIWithTimeout({
                 model: AI_MODEL,
                 messages: [{ role: 'system', content: finalPrompt }, ...sanitizeHistory(chatHistory[chatId])],
-                temperature: 0.8
+                temperature: 0.7,
+                max_tokens: 2500
             });
 
             let aiText = second.choices[0].message.content || "Секундочку...";
