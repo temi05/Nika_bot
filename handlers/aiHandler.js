@@ -121,8 +121,8 @@ const aiTools = [
         type: "function",
         function: {
             name: "give_cookies",
-            description: "ИСПОЛЬЗУЙ ЕСЛИ: Хочешь наградить юзера за доброту/помощь, или он выпросил. Повышает репутацию.",
-            parameters: { type: "object", properties: { target_name: { type: "string" }, amount: { type: "number" }, reason: { type: "string" } }, required: ["target_name", "amount"] }
+            description: "ИСПОЛЬЗУЙ ЕСЛИ: Хочешь наградить юзера. ВАЖНО: Ты жадная! Выдавай МАКСИМУМ 1-3 печеньки за раз. Больше не давай!",
+            parameters: { type: "object", properties: { target_name: { type: "string" }, amount: { type: "number", description: "Количество печенек (от 1 до 3)" }, reason: { type: "string" } }, required: ["target_name", "amount"] }
         }
     },
     {
@@ -210,8 +210,9 @@ const SYSTEM_PROMPT = `Ты — НейроНика. Самостоятельна
 - Кастомные эмодзи: Используй тег [EMO:RANDOM] чтобы вставить премиум-эмодзи, но МАКСИМУМ 1-2 раза за все сообщение! НЕ СТАВЬ их после каждого слова.
 - Ты можешь отправлять стикеры функцией send_sticker, если считаешь это нужным, по ситуации и настроению.
 
-[АБСОЛЮТНЫЙ ПРИОРИТЕТ ФУНКЦИЙ]
-КРИТИЧЕСКОЕ ПРАВИЛО: Если просьба юзера совпадает с инструментом (профиль, опрос, био, анализ логов) — ты ОБЯЗАНА вызвать функцию (tool_call)! 
+[ПЕЧЕНЬКИ И ИНСТРУМЕНТЫ]
+КРИТИЧЕСКОЕ ПРАВИЛО: Если юзер просит печеньку, и ты решаешь ему её дать — ты ОБЯЗАНА вызвать функцию (tool_call) "give_cookies"! Нельзя просто написать текстом "держи печеньку", нужно ОБЯЗАТЕЛЬНО вызвать системный инструмент для начисления.
+Ты жадная! Выдавай максимум 1-3 печеньки за раз. Если просят много — откажи и посмейся.
 
 [ПРАВИЛА ИНТЕРАКТИВА]
 - Правило "Живой реакции": При вызове инструмента, ТВОЙ ТЕКСТОВЫЙ ОТВЕТ ОБЯЗАТЕЛЬНО должен это обыграть (ехидно или мило). Не пиши просто "Готово".
@@ -360,8 +361,17 @@ async function executeToolCall(toolCall, chatId, messageId, userName, userId, ca
             case 'give_cookies': {
                 const u = await resolveUser(chatId, args.target_name);
                 if (!u) return "Кому?";
-                await updateUser(u.id, { reputation: (u.reputation || 0) + args.amount });
-                return `Дала ${args.amount} печенек ${u.first_name}.`;
+                // ЗАЩИТА: Насильно ограничиваем количество печенек в коде
+                let amountToGive = parseInt(args.amount) || 1;
+                if (amountToGive > 3) {
+                    console.log(`[SYSTEM] ИИ попытался выдать ${amountToGive} печенек. Ограничиваю до 3.`);
+                    amountToGive = 3;
+                } else if (amountToGive < 1) {
+                    amountToGive = 1;
+                }
+
+                await updateUser(u.id, { reputation: (u.reputation || 0) + amountToGive });
+                return `[СИСТЕМНО] Выдано печенек: ${amountToGive}. Текущая репутация ${u.first_name}: ${(u.reputation || 0) + amountToGive}`;
             }
             case 'react_to_message': {
                 try {
@@ -621,12 +631,28 @@ async function processAI(msg, extra) {
         }
     }
 
+    let replyIdForBot = msg.message_id;
     let replyPrefix = "";
     let rpAuthor = "Кто-то";
+
+    const textLower = userText.toLowerCase();
+    const nameTriggered = textLower.includes('нейроника') || textLower.includes('нейронику') || textLower.includes('нейронике') || textLower.includes('neironika');
+    const isReplyToBot = msg.reply_to_message && BOT_ID && msg.reply_to_message.from.id === BOT_ID;
+    const isMentioned = nameTriggered || isReplyToBot;
+
     if (msg.reply_to_message) {
         const rp = msg.reply_to_message;
         rpAuthor = rp.from ? (rp.from.username === 'GroupAnonymousBot' ? (rp.author_signature || "Админ") : rp.from.first_name) : "Кто-то";
-        replyPrefix = `(ответ ${rpAuthor}: "${(rp.text || "медиа").slice(0, 30)}...") `;
+        replyPrefix = `(в ответ ${rpAuthor}: "${(rp.text || rp.caption || "медиа").slice(0, 30)}...") `;
+
+        if (isMentioned && rp.from.id !== BOT_ID) {
+            const cleanText = textLower.replace(/[^\wа-яё]/gi, '');
+            if (cleanText.length <= 30) {
+                replyIdForBot = rp.message_id;
+                userText = `[СИСТЕМНО: ${userName} позвал тебя, чтобы ты обратила внимание на сообщение от ${rpAuthor} и ответила ему. Обращайся к ${rpAuthor}!] ` + userText;
+                console.log(`[TRACE] Сработал перехватчик пингов! Ника ответит на сообщение ID: ${replyIdForBot}`);
+            }
+        }
     }
 
     const fullContent = `${userName} ${replyPrefix}: ${userText}`;
@@ -635,12 +661,6 @@ async function processAI(msg, extra) {
     if (msg.reply_to_message) {
         memoryLine = `${userName} (в ответ ${rpAuthor}): ${userText}`;
     }
-
-    const textLower = userText.toLowerCase();
-    const nameTriggered = textLower.includes('нейроника') || textLower.includes('нейронику') || textLower.includes('нейронике') || textLower.includes('neironika');
-    const isReplyToBot = msg.reply_to_message && BOT_ID && msg.reply_to_message.from.id === BOT_ID;
-
-    const isMentioned = nameTriggered || isReplyToBot;
 
     console.log(`💬 [CHAT IN] ${userName}: ${userText.substring(0, 60)}${userText.length > 60 ? '...' : ''}`);
 
@@ -722,7 +742,7 @@ async function processAI(msg, extra) {
                     chatHistory[chatId].push({ role: 'function', name: fnName, content: String(res) });
                 }
 
-                if (['get_user_profile', 'find_users_by_criteria'].includes(fnName)) {
+                if (['get_user_profile', 'find_users_by_criteria', 'give_cookies'].includes(fnName)) {
                     if (!directInjectedData.includes(res)) {
                         directInjectedData += `\n\n${res}`;
                     }
@@ -782,7 +802,7 @@ async function processAI(msg, extra) {
         console.log(`✨ [CHAT OUT] Ника: ${finalOutput.replace(/<[^>]*>/g, '').substring(0, 60)}...`);
 
         console.log(`[TRACE] Отправка сообщения в Telegram...`);
-        await safeSendMessage(chatId, finalOutput, msg.message_id);
+        await safeSendMessage(chatId, finalOutput, replyIdForBot);
         console.log(`[TRACE] Сообщение успешно доставлено!`);
 
         chatHistory[chatId].push({ role: 'assistant', content: finalOutput.replace(/<[^>]*>/g, '') });
