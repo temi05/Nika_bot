@@ -477,29 +477,215 @@ async function updateChatMemory(chatId, memory) {
         .eq('chat_id', chatId);
 }
 
-async function insertKnowledge(chatId, factText, embedding) {
-    const { error } = await supabase
-        .from('bot_knowledge')
-        .insert([{ chat_id: chatId, fact: factText, embedding: embedding }]);
-    if (error) console.error('[DB ERROR] insertKnowledge:', error.message);
+function normalizeMemoryText(value) {
+    return String(value || '')
+        .toLowerCase()
+        .replace(/\s+/g, ' ')
+        .trim();
 }
 
-async function searchKnowledge(chatId, queryEmbedding, limit = 3, threshold = 0.3) {
-    const { data, error } = await supabase.rpc('match_knowledge', {
+function buildKnowledgeFactText(payload) {
+    if (payload.fact) return String(payload.fact).trim();
+
+    if (payload.factType === 'relation' && payload.subjectName && payload.relationType && payload.objectName) {
+        return `СВЯЗЬ: ${payload.subjectName} -> ${payload.relationType} -> ${payload.objectName}`;
+    }
+
+    if (payload.subjectName && payload.attribute && payload.value) {
+        return `УЗЕЛ: ${payload.subjectName} | ${payload.attribute}: ${payload.value}`;
+    }
+
+    return '';
+}
+
+function buildKnowledgeFingerprint(payload) {
+    if (payload.fingerprint) return normalizeMemoryText(payload.fingerprint);
+
+    if (payload.factType === 'relation') {
+        return `relation|${normalizeMemoryText(payload.subjectName)}|${normalizeMemoryText(payload.relationType)}|${normalizeMemoryText(payload.objectName)}`;
+    }
+
+    if (payload.subjectName && payload.attribute && payload.value) {
+        return `attribute|${normalizeMemoryText(payload.subjectName)}|${normalizeMemoryText(payload.attribute)}|${normalizeMemoryText(payload.value)}`;
+    }
+
+    return `fact|${normalizeMemoryText(buildKnowledgeFactText(payload))}`;
+}
+
+function shouldPromoteKnowledge(status, confidence, sourceCount, timesSeen) {
+    if (status === 'confirmed') return true;
+    return (sourceCount >= 2 && confidence >= 0.72) || timesSeen >= 3;
+}
+
+async function insertKnowledge(chatId, factText, embedding) {
+    const payload = (typeof factText === 'object' && factText !== null)
+        ? { ...factText }
+        : { fact: factText };
+
+    const fact = buildKnowledgeFactText(payload);
+    if (!fact) return null;
+
+    const fingerprint = buildKnowledgeFingerprint({ ...payload, fact });
+    const confidence = Math.max(0.3, Math.min(0.98, Number(payload.confidence || 0.55)));
+    const nowIso = new Date().toISOString();
+
+    try {
+        const { data: existing, error: existingError } = await supabase
+            .from('bot_knowledge')
+            .select('*')
+            .eq('chat_id', chatId)
+            .eq('fingerprint', fingerprint)
+            .limit(1)
+            .maybeSingle();
+
+        if (existingError && !String(existingError.message || '').includes('fingerprint')) {
+            console.error('[DB ERROR] insertKnowledge lookup:', existingError.message);
+        }
+
+        if (existing) {
+            const nextTimesSeen = (existing.times_seen || 1) + 1;
+            const nextSourceCount = (existing.source_count || 1) + 1;
+            const nextConfidence = Math.min(
+                0.98,
+                Math.max(existing.confidence || 0.55, confidence) + 0.08
+            );
+            const nextStatus = shouldPromoteKnowledge(existing.status, nextConfidence, nextSourceCount, nextTimesSeen)
+                ? 'confirmed'
+                : 'candidate';
+
+            const mergedMeta = {
+                ...(existing.meta || {}),
+                ...(payload.meta || {}),
+            };
+
+            const { data, error } = await supabase
+                .from('bot_knowledge')
+                .update({
+                    fact,
+                    embedding: embedding || existing.embedding,
+                    fact_type: payload.factType || existing.fact_type || 'fact',
+                    subject_name: payload.subjectName || existing.subject_name || null,
+                    relation_type: payload.relationType || existing.relation_type || null,
+                    object_name: payload.objectName || existing.object_name || null,
+                    confidence: nextConfidence,
+                    status: nextStatus,
+                    source_count: nextSourceCount,
+                    times_seen: nextTimesSeen,
+                    fingerprint,
+                    meta: mergedMeta,
+                    last_seen_at: nowIso
+                })
+                .eq('id', existing.id)
+                .select()
+                .maybeSingle();
+
+            if (error) throw error;
+            return data;
+        }
+
+        const status = shouldPromoteKnowledge(payload.status || 'candidate', confidence, 1, 1)
+            ? 'confirmed'
+            : (payload.status || 'candidate');
+
+        const row = {
+            chat_id: chatId,
+            fact,
+            embedding: embedding || null,
+            fact_type: payload.factType || 'fact',
+            subject_name: payload.subjectName || null,
+            relation_type: payload.relationType || null,
+            object_name: payload.objectName || null,
+            confidence,
+            status,
+            source_count: 1,
+            times_seen: 1,
+            fingerprint,
+            meta: payload.meta || {},
+            last_seen_at: nowIso
+        };
+
+        const { data, error } = await supabase
+            .from('bot_knowledge')
+            .insert([row])
+            .select()
+            .maybeSingle();
+
+        if (error) throw error;
+        return data;
+    } catch (error) {
+        const fallback = await supabase
+            .from('bot_knowledge')
+            .insert([{ chat_id: chatId, fact, embedding: embedding || null }])
+            .select()
+            .maybeSingle();
+
+        if (fallback.error) {
+            console.error('[DB ERROR] insertKnowledge:', fallback.error.message || error.message);
+            return null;
+        }
+        return fallback.data;
+    }
+}
+
+async function searchKnowledge(chatId, queryEmbedding, limit = 3, threshold = 0.3, options = {}) {
+    const statuses = options.statuses || ['confirmed'];
+    const minConfidence = options.minConfidence ?? 0.55;
+
+    const advanced = await supabase.rpc('match_knowledge_v2', {
+        query_embedding: queryEmbedding,
+        match_threshold: threshold,
+        match_count: limit,
+        p_chat_id: chatId,
+        p_statuses: statuses,
+        p_min_confidence: minConfidence
+    });
+
+    if (!advanced.error) {
+        return advanced.data || [];
+    }
+
+    const legacy = await supabase.rpc('match_knowledge', {
         query_embedding: queryEmbedding,
         match_threshold: threshold,
         match_count: limit,
         p_chat_id: chatId
     });
-    if (error) {
-        console.error('[DB ERROR] searchKnowledge:', error.message);
+
+    if (legacy.error) {
+        console.error('[DB ERROR] searchKnowledge:', advanced.error.message || legacy.error.message);
         return [];
     }
-    return data || [];
+
+    return (legacy.data || []).map(item => ({
+        ...item,
+        confidence: 0.7,
+        status: 'confirmed',
+        times_seen: 1,
+        source_count: 1
+    }));
 }
 
-async function searchKnowledgeByText(chatId, query, limit = 5) {
-    const { data, error } = await supabase
+async function searchKnowledgeByText(chatId, query, limit = 5, options = {}) {
+    const statuses = options.statuses || ['confirmed', 'candidate'];
+    const minConfidence = options.minConfidence ?? 0;
+
+    let advancedQuery = supabase
+        .from('bot_knowledge')
+        .select('*')
+        .eq('chat_id', chatId)
+        .ilike('fact', `%${query}%`)
+        .gte('confidence', minConfidence)
+        .in('status', statuses)
+        .order('confidence', { ascending: false })
+        .order('last_seen_at', { ascending: false })
+        .limit(limit);
+
+    const advanced = await advancedQuery;
+    if (!advanced.error) {
+        return advanced.data || [];
+    }
+
+    const legacy = await supabase
         .from('bot_knowledge')
         .select('*')
         .eq('chat_id', chatId)
@@ -507,44 +693,87 @@ async function searchKnowledgeByText(chatId, query, limit = 5) {
         .order('id', { ascending: false })
         .limit(limit);
 
-    if (error) {
-        console.error('[DB ERROR] searchKnowledgeByText:', error.message);
+    if (legacy.error) {
+        console.error('[DB ERROR] searchKnowledgeByText:', advanced.error.message || legacy.error.message);
         return [];
     }
-    return data || [];
+
+    return legacy.data || [];
 }
 
-async function getRecentKnowledge(chatId, userName = "", limit = 10) {
-    let query = supabase
+async function getRecentKnowledge(chatId, userName = "", limit = 10, options = {}) {
+    const statuses = options.statuses || ['confirmed', 'candidate'];
+    const minConfidence = options.minConfidence ?? 0;
+
+    let advancedQuery = supabase
+        .from('bot_knowledge')
+        .select('*')
+        .eq('chat_id', chatId)
+        .gte('confidence', minConfidence)
+        .in('status', statuses);
+
+    if (userName) {
+        advancedQuery = advancedQuery.or(
+            `subject_name.ilike.%${userName}%,fact.ilike.%${userName}%`
+        );
+    }
+
+    const advanced = await advancedQuery
+        .order('last_seen_at', { ascending: false })
+        .limit(limit);
+
+    if (!advanced.error) {
+        return advanced.data || [];
+    }
+
+    let legacyQuery = supabase
         .from('bot_knowledge')
         .select('*')
         .eq('chat_id', chatId);
 
     if (userName) {
-        query = query.ilike('fact', `${userName}:%`);
+        legacyQuery = legacyQuery.ilike('fact', `%${userName}%`);
     }
 
-    const { data, error } = await query
+    const legacy = await legacyQuery
         .order('id', { ascending: false })
         .limit(limit);
 
-    if (error) {
-        console.error('[DB ERROR] getRecentKnowledge:', error.message);
+    if (legacy.error) {
+        console.error('[DB ERROR] getRecentKnowledge:', advanced.error.message || legacy.error.message);
         return [];
     }
-    return data || [];
+    return legacy.data || [];
 }
 
 async function checkFactExists(chatId, factText) {
-    const { data, error } = await supabase
+    const payload = (typeof factText === 'object' && factText !== null)
+        ? { ...factText }
+        : { fact: factText };
+
+    const fact = buildKnowledgeFactText(payload);
+    const fingerprint = buildKnowledgeFingerprint({ ...payload, fact });
+
+    const advanced = await supabase
         .from('bot_knowledge')
         .select('id')
         .eq('chat_id', chatId)
-        .eq('fact', factText)
+        .eq('fingerprint', fingerprint)
         .limit(1)
         .maybeSingle();
-    if (error) return false;
-    return !!data;
+
+    if (!advanced.error) return !!advanced.data;
+
+    const legacy = await supabase
+        .from('bot_knowledge')
+        .select('id')
+        .eq('chat_id', chatId)
+        .eq('fact', fact)
+        .limit(1)
+        .maybeSingle();
+
+    if (legacy.error) return false;
+    return !!legacy.data;
 }
 
 async function deleteKnowledge(chatId, knowledgeId) {
@@ -559,6 +788,96 @@ async function deleteKnowledge(chatId, knowledgeId) {
         return false;
     }
     return true;
+}
+
+async function upsertMemorySummary(chatId, periodKey, summary, sourceInc = 1) {
+    if (!chatId || !periodKey || !summary) return false;
+
+    const rpcResult = await supabase.rpc('touch_bot_memory_summary', {
+        p_chat_id: chatId,
+        p_period_key: periodKey,
+        p_summary: summary,
+        p_source_inc: sourceInc
+    });
+
+    if (!rpcResult.error) return true;
+
+    const fallback = await supabase
+        .from('bot_memory_summaries')
+        .upsert([{
+            chat_id: chatId,
+            period_key: periodKey,
+            summary,
+            source_count: Math.max(sourceInc, 1),
+            updated_at: new Date().toISOString()
+        }], { onConflict: 'chat_id,period_key' });
+
+    if (fallback.error) {
+        if (!String(fallback.error.message || '').includes('bot_memory_summaries')) {
+            console.error('[DB ERROR] upsertMemorySummary:', fallback.error.message);
+        }
+        return false;
+    }
+    return true;
+}
+
+async function getRecentMemorySummaries(chatId, limit = 3) {
+    const { data, error } = await supabase
+        .from('bot_memory_summaries')
+        .select('*')
+        .eq('chat_id', chatId)
+        .order('updated_at', { ascending: false })
+        .limit(limit);
+
+    if (error) {
+        if (!String(error.message || '').includes('bot_memory_summaries')) {
+            console.error('[DB ERROR] getRecentMemorySummaries:', error.message);
+        }
+        return [];
+    }
+    return data || [];
+}
+
+async function weakenStaleKnowledge(chatId, options = {}) {
+    const staleBeforeIso = options.staleBeforeIso;
+    if (!chatId || !staleBeforeIso) return 0;
+
+    const { data, error } = await supabase
+        .from('bot_knowledge')
+        .select('id, confidence, status, times_seen, last_seen_at')
+        .eq('chat_id', chatId)
+        .in('status', ['candidate', 'confirmed'])
+        .lt('last_seen_at', staleBeforeIso)
+        .lt('times_seen', options.maxTimesSeen || 3)
+        .lt('confidence', options.maxConfidence || 0.75)
+        .limit(options.limit || 25);
+
+    if (error) {
+        if (!String(error.message || '').includes('last_seen_at')) {
+            console.error('[DB ERROR] weakenStaleKnowledge:', error.message);
+        }
+        return 0;
+    }
+
+    if (!data || data.length === 0) return 0;
+
+    let updated = 0;
+    for (const row of data) {
+        const nextConfidence = Math.max(0.2, Number(row.confidence || 0.55) - 0.08);
+        const nextStatus = nextConfidence < 0.45 ? 'candidate' : row.status;
+
+        const { error: updateError } = await supabase
+            .from('bot_knowledge')
+            .update({
+                confidence: nextConfidence,
+                status: nextStatus
+            })
+            .eq('id', row.id);
+
+        if (!updateError) updated++;
+    }
+
+    return updated;
 }
 
 async function insertReminder(chatId, userId, userName, text, triggerTime) {
@@ -625,7 +944,7 @@ module.exports = {
     getChatSettings, updateChatSettings,
     setBirthday, setBio, getBirthdaysToday, setBioByUsernameOrName, setNotesByUsernameOrName, setFirstNameByUsernameOrName,
     getChatMemory, updateChatMemory, insertKnowledge, searchKnowledge, searchKnowledgeByText, getRecentKnowledge,
-    checkFactExists, deleteKnowledge, transliterate,
+    checkFactExists, deleteKnowledge, upsertMemorySummary, getRecentMemorySummaries, weakenStaleKnowledge, transliterate,
     insertReminder, getDueReminders, markReminderAsSent,
     getChatStats, searchUserByName, warnUserById, getUpcomingBirthdays,
     findSingleUser, getAllUserFacts, // <-- Восстановленная функция здесь!

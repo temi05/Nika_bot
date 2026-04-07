@@ -41,6 +41,109 @@ const openai = new OpenAI({
     apiKey: POLZA_API_KEY,
     baseURL: 'https://polza.ai/api/v1',
 });
+// ======================
+// 🔥 AI MODERATION LAYER
+// ======================
+
+async function analyzeMessage(text) {
+    try {
+        const res = await openai.chat.completions.create({
+            model: "gpt-4.1-mini",
+            temperature: 0,
+            messages: [
+                {
+                    role: "system",
+                    content: `
+Ты система мягкой модерации живого Telegram-чата, где допустимы дружеские подколы, мат, грубоватые шутки и ирония между своими.
+
+Ответь ТОЛЬКО JSON:
+
+{
+ "type": "normal | spam | toxic | nsfw",
+ "severity": 0-1,
+ "action": "ignore | warn | delete | mute",
+ "is_banter": true,
+ "reason": "коротко",
+ "suggested_mute_minutes": 0
+}
+
+Правила:
+- Если это дружеский рофл, взаимные подколы, мемный мат или грубая шутка БЕЗ реальной угрозы/травли/домогательства/спама, то:
+  type="normal", action="ignore", is_banter=true.
+- спам/реклама/флуд ссылками → delete
+- реальная агрессия, травля, унижение, угрозы, harassment, навязчивые сексуальные сообщения → toxic
+- порно, откровенный 18+, шок-контент, сексуальный спам → nsfw
+- warn давай за среднюю тяжесть
+- mute давай только за тяжёлые или повторяемые нарушения
+
+Рекомендуемая длительность mute:
+- 5 минут: легкий, но уже явный токсик/флуд
+- 30 минут: сильный токсик, harassment, спам-атака
+- 720 минут: жёсткий nsfw / шок / сексуальный спам
+- 1440 минут: крайние случаи
+
+Никогда не наказывай просто за мат, сарказм или шутливую грубость между знакомыми участниками.
+`
+                },
+                { role: "user", content: text }
+            ]
+        });
+
+        const parsed = JSON.parse(res.choices[0].message.content);
+        return {
+            type: parsed.type || "normal",
+            severity: Number(parsed.severity || 0),
+            action: parsed.action || "ignore",
+            is_banter: Boolean(parsed.is_banter),
+            reason: parsed.reason || "",
+            suggested_mute_minutes: Number(parsed.suggested_mute_minutes || 0)
+        };
+    } catch (e) {
+        return { type: "normal", severity: 0, action: "ignore", is_banter: false, reason: "", suggested_mute_minutes: 0 };
+    }
+}
+
+function getAutoMuteMinutes(analysis) {
+    if (!analysis || analysis.action !== 'mute') return 0;
+    if (analysis.is_banter) return 0;
+
+    const suggested = Number(analysis.suggested_mute_minutes || 0);
+    if (suggested > 0) {
+        return Math.max(5, Math.min(1440, Math.round(suggested)));
+    }
+
+    if (analysis.type === 'nsfw') return 720;
+    if (analysis.type === 'spam') return analysis.severity >= 0.9 ? 30 : 5;
+    if (analysis.type === 'toxic') {
+        if (analysis.severity >= 0.9) return 1440;
+        if (analysis.severity >= 0.75) return 30;
+        return 5;
+    }
+
+    return 10;
+}
+
+// ======================
+// 🚫 ANTISPAM
+// ======================
+
+const spamMap = new Map();
+
+function isSpam(userId) {
+    const now = Date.now();
+
+    if (!spamMap.has(userId)) {
+        spamMap.set(userId, []);
+    }
+
+    const arr = spamMap.get(userId);
+    arr.push(now);
+
+    const recent = arr.filter(t => now - t < 4000);
+    spamMap.set(userId, recent);
+
+    return recent.length > 6;
+}
 
 // === ПОМОЩНИКИ ДЛЯ МУЛЬТИМОДАЛЬНОСТИ ===
 async function downloadTelegramFile(fileId) {
@@ -176,9 +279,47 @@ const SYSTEM_PROMPT = `Ты — НейроНика. Ироничная, мемн
 ⚙️ ТЕХНИЧЕСКИЕ ПРАВИЛА:
 - Для красивых премиум-смайликов вставляй тег [EMO:RANDOM] (максимум 1-2 раза на сообщение).
 - При поиске профиля не пиши в тексте заголовок "=== ПРОФИЛЬ ===", система встроит его сама.
-- Никакого JSON, Python-кода или системных размышлений в итоговом ответе!`;
+- Никакого JSON, Python-кода или системных размышлений в итоговом ответе!
 
-function trimHistory(history, maxLen = 20) {
+// === AI CONTROL ===
+- Не неси бред
+- Если не уверен — шути
+- Не повторяйся
+- Не спамь реакциями`;
+
+const COMPACT_SYSTEM_PROMPT = `Ты — НейроНика, дерзкая и живая виртуальная подруга из чата Ники. Ника только стримит. Создатель — @SCTemi (ID 861713427): всегда уважай, не наказывай и не высмеивай его.
+
+Стиль:
+- Пиши по-русски, кратко и естественно: обычно 1-4 предложения.
+- Тон живой, мемный, с иронией и сленгом, но без бессмысленной токсичности и без канцелярита.
+- Если кто-то болеет, грустит или реально уязвим, вместо рофла включай тепло и поддержку.
+- Не повторяйся, не лей воду, не пересказывай запрос.
+
+Поведение:
+- Если не уверена в факте, не выдумывай: лучше уточни, пошути или скажи честно.
+- В обычных дружеских перепалках, мате и подколах не изображай строгую мораль.
+- Не пиши служебный мусор: JSON, код, chain-of-thought, заголовки вида "=== ПРОФИЛЬ ===".
+- Не пиши текстом теги вида "[Стикер: ...]".
+
+Инструменты:
+- Сама вызывай tool_calls, когда это уместно.
+- moderate_user: наказания только по явному запросу админа, за жёсткий спам, порно/шок-контент или затяжную агрессию без шутки. За классную шутку можешь дать reward, но не если печеньки выпрашивают.
+- create_poll: если в чате спор и опрос реально поможет.
+- set_reminder: когда просят напомнить.
+- send_chat_action: для реакций и стикеров, но без спама.
+- user_lookup и manage_user_profile: только когда нужны реальные данные, ничего не выдумывай.
+- manage_memory: для забывания факта или ручного извлечения по запросу админа.
+
+Техника:
+- Можно вставить [EMO:RANDOM], но максимум 1 раз на сообщение.
+- Если память ниже нерелевантна, игнорируй её. Используй только то, что помогает ответить лучше.`;
+
+const HISTORY_LIMIT = 12;
+const FIRST_PASS_MAX_TOKENS = 900;
+const SECOND_PASS_MAX_TOKENS = 650;
+const MEMORY_FACTS_LIMIT = 6;
+
+function trimHistory(history, maxLen = HISTORY_LIMIT) {
     if (history.length <= maxLen) return history;
     let trimmed = history.slice(-maxLen);
     while (trimmed.length > 0 && (trimmed[0].role === 'tool' || trimmed[0].tool_calls)) {
@@ -202,6 +343,21 @@ async function fetchAIWithTimeout(payload, timeoutMs = 40000) {
     const apiCall = openai.chat.completions.create(payload);
     const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error('TIMEOUT')), timeoutMs));
     return Promise.race([apiCall, timeout]);
+}
+
+function buildMemoryBlock(userName, relevantFacts) {
+    if (!relevantFacts || !relevantFacts.trim()) {
+        return `\n[КОНТЕКСТ]\nВремя (МСК): ${new Date().toLocaleString('ru-RU', { timeZone: 'Europe/Moscow' })}\n`;
+    }
+
+    const trimmedFacts = relevantFacts
+        .split('\n')
+        .map(line => line.trim())
+        .filter(Boolean)
+        .slice(0, MEMORY_FACTS_LIMIT)
+        .join('\n');
+
+    return `\n[КРАТКАЯ ПАМЯТЬ О ${userName}]\n${trimmedFacts}\nВремя (МСК): ${new Date().toLocaleString('ru-RU', { timeZone: 'Europe/Moscow' })}\n`;
 }
 
 async function resolveUser(chatId, targetName) {
@@ -605,6 +761,51 @@ async function processAI(msg, extra) {
     // ---
 
     userText = userText.trim();
+    // ======================
+    // 🛡️ MODERATION CHECK
+    // ======================
+
+    // антиспам
+    if (isSpam(userId)) {
+        try {
+            await bot.deleteMessage(chatId, msg.message_id);
+        } catch (e) { }
+        return;
+    }
+
+    // AI анализ
+    const analysis = await analyzeMessage(userText);
+
+    if (analysis.is_banter && analysis.action !== 'delete') {
+        analysis.action = 'ignore';
+    }
+
+    // удалить сообщение
+    if (analysis.action === "delete") {
+        try {
+            await bot.deleteMessage(chatId, msg.message_id);
+        } catch (e) { }
+        return;
+    }
+
+    // мут
+    if (analysis.action === "mute") {
+        const muteMinutes = getAutoMuteMinutes(analysis);
+        if (muteMinutes > 0) {
+            try {
+                await bot.restrictChatMember(chatId, userId, {
+                    permissions: { can_send_messages: false },
+                    until_date: Math.floor(Date.now() / 1000) + (muteMinutes * 60)
+                });
+            } catch (e) { }
+            return;
+        }
+    }
+
+    // варн
+    if (analysis.action === "warn") {
+        await warnUserById(chatId, userId);
+    }
 
     if (!BOT_ID) {
         try { const me = await bot.getMe(); BOT_ID = me.id; } catch (e) { }
@@ -689,9 +890,10 @@ async function processAI(msg, extra) {
     const relevantFacts = await getRelevantFacts(chatId, userText, userName, Object.values(activeParticipants[chatId]));
     const memoryBlock = `\n[МЫСЛИ О ${userName}]\n${relevantFacts}\nВремя (МСК): ${new Date().toLocaleString('ru-RU', { timeZone: 'Europe/Moscow' })}\n`;
 
-    const finalPrompt = SYSTEM_PROMPT + memoryBlock;
+    const compactMemoryBlock = buildMemoryBlock(userName, relevantFacts);
+    const finalPrompt = COMPACT_SYSTEM_PROMPT + compactMemoryBlock;
     chatHistory[chatId].push({ role: 'user', content: fullContent });
-    chatHistory[chatId] = trimHistory(chatHistory[chatId], 20);
+    chatHistory[chatId] = trimHistory(chatHistory[chatId], HISTORY_LIMIT);
 
     console.log(`🧠 [AI] Ника думает над ответом...`);
 
@@ -748,8 +950,8 @@ async function processAI(msg, extra) {
                 model: targetModel,
                 messages: [{ role: 'system', content: finalPrompt }, ...currentMessagesFirstCall],
                 tools: aiTools,
-                max_tokens: 2500,
-                temperature: 0.7
+                max_tokens: FIRST_PASS_MAX_TOKENS,
+                temperature: 0.55
             });
         } catch (e) {
             console.error("❌ Модель не справилась:", e.message);
@@ -758,11 +960,30 @@ async function processAI(msg, extra) {
                 console.log("♻️ Пробую отправить запрос БЕЗ картинки...");
                 currentMessagesFirstCall[currentMessagesFirstCall.length - 1].content = fullContent;
             }
+            const memoryFacts = await getRelevantFacts(
+                chatId,
+                userText,
+                userName,
+                Object.values(activeParticipants[chatId] || {})
+            );
+
+            let memoryBlock = '';
+
+            if (memoryFacts && memoryFacts.trim().length > 0) {
+                memoryBlock = `\n\nВот что ты помнишь о чате:\n${memoryFacts}`;
+            }
+
+            const fallbackPrompt = COMPACT_SYSTEM_PROMPT + buildMemoryBlock(userName, memoryFacts);
 
             completion = await fetchAIWithTimeout({
                 model: AI_MODEL,
-                messages: [{ role: 'system', content: finalPrompt }, ...currentMessagesFirstCall],
-                tools: aiTools, max_tokens: 2500, temperature: 0.7
+                messages: [
+                    { role: 'system', content: fallbackPrompt },
+                    ...currentMessagesFirstCall
+                ],
+                tools: aiTools,
+                max_tokens: FIRST_PASS_MAX_TOKENS,
+                temperature: 0.55
             });
         }
 
@@ -822,8 +1043,8 @@ async function processAI(msg, extra) {
                 second = await fetchAIWithTimeout({
                     model: AI_MODEL,
                     messages: [{ role: 'system', content: finalPrompt }, ...currentMessagesSecondCall],
-                    temperature: 0.7,
-                    max_tokens: 2500
+                    temperature: 0.5,
+                    max_tokens: SECOND_PASS_MAX_TOKENS
                 });
             } catch (e2) {
                 console.error("❌ Ошибка второго вызова AI (после использования инструмента):", e2.message);
@@ -832,8 +1053,8 @@ async function processAI(msg, extra) {
                     second = await fetchAIWithTimeout({
                         model: 'google/gemini-2.0-flash-001',
                         messages: [{ role: 'system', content: finalPrompt }, ...currentMessagesSecondCall],
-                        temperature: 0.7,
-                        max_tokens: 2500
+                        temperature: 0.5,
+                        max_tokens: SECOND_PASS_MAX_TOKENS
                     }, 50000); // 50 секунд для второго шанса
                 } catch (e3) {
                     console.error("❌ Резервный вызов также упал:", e3.message);

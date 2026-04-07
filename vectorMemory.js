@@ -5,24 +5,23 @@ const {
     checkFactExists,
     searchKnowledgeByText,
     getRecentKnowledge,
+    upsertMemorySummary,
+    getRecentMemorySummaries,
+    weakenStaleKnowledge,
     transliterate
 } = require('./database');
 
-console.log('✅ [VECTOR MEMORY] Модуль графовой памяти (LightRAG v3.1) подключён');
+console.log('✅ [VECTOR MEMORY] Модуль улучшенной памяти подключён');
 
 const POLZA_API_KEY = process.env.POLZA_API_KEY || 'pza_Ut5ahRtIFZSzj_jKezwdRvQMMebqZ1BI';
-// Основная модель чата берётся из env
-// Экстрактор фактов — отдельная модель: gpt-4o-mini точнее работает со структурированным JSON
-const EXTRACTOR_MODEL = process.env.MEMORY_EXTRACTOR_MODEL || process.env.AI_MODEL || 'gpt-4o-mini';
-// Эмбеддинги всегда через OpenAI-совместимый endpoint
+const EXTRACTOR_MODEL = process.env.MEMORY_EXTRACTOR_MODEL || 'gpt-4.1-mini';
 const EMBEDDING_MODEL = 'text-embedding-3-small';
 
-
-// Минимальная длина диалога для запуска экстракции (символов)
-const MIN_HISTORY_LENGTH = 80;
-// Макс. фактов за одну экстракцию
-const MAX_FACTS_PER_BATCH = 10;
-// Таймаут AI-вызовов
+const MIN_HISTORY_LENGTH = 140;
+const MAX_FACTS_PER_BATCH = 5;
+const MAX_FACTS_IN_CONTEXT = 6;
+const MAX_KEYWORDS = 4;
+const MAX_SUMMARIES_IN_CONTEXT = 2;
 const AI_TIMEOUT_MS = 30000;
 
 const openai = new OpenAI({
@@ -30,15 +29,154 @@ const openai = new OpenAI({
     baseURL: 'https://polza.ai/api/v1',
 });
 
-// ─────────────────────────────────────────────────────────────
-// ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
-// ─────────────────────────────────────────────────────────────
-
 async function withTimeout(promise, ms = AI_TIMEOUT_MS) {
-    const timeout = new Promise((_, reject) =>
-        setTimeout(() => reject(new Error('AI_TIMEOUT')), ms)
-    );
+    const timeout = new Promise((_, reject) => {
+        setTimeout(() => reject(new Error('AI_TIMEOUT')), ms);
+    });
     return Promise.race([promise, timeout]);
+}
+
+function normalizeName(value) {
+    return String(value || '')
+        .replace(/Чатик 🫐 Nika_grdt 👾/gi, 'Ника')
+        .replace(/^channel$/i, 'Ника')
+        .replace(/^канал$/i, 'Ника')
+        .replace(/^ника \(канал\)$/i, 'Ника')
+        .trim();
+}
+
+function normalizeText(value) {
+    return String(value || '')
+        .replace(/\s+/g, ' ')
+        .trim();
+}
+
+function clamp(num, min, max) {
+    return Math.max(min, Math.min(max, Number(num)));
+}
+
+function getSummaryPeriodKey(date = new Date()) {
+    return date.toISOString().slice(0, 10);
+}
+
+function getStemLocal(word) {
+    if (!word || word.length < 3) return word;
+    return word.toLowerCase()
+        .replace(/[уаеяяюииыо]$/i, '')
+        .replace(/(ов|ев|ий|ый|ые|ие|ах|ях|ом|ем|ам|у|е|а|я)$/i, '')
+        .replace(/(s|es|ed|ing)$/i, '');
+}
+
+function buildFactText(item) {
+    if (item.kind === 'relation') {
+        return `СВЯЗЬ: ${item.subject} -> ${item.relation} -> ${item.object}`;
+    }
+    return `УЗЕЛ: ${item.subject} | ${item.attribute}: ${item.value}`;
+}
+
+function convertExtractedFact(rawFact) {
+    if (!rawFact || typeof rawFact !== 'object') return null;
+
+    const kind = rawFact.kind === 'relation' ? 'relation' : 'attribute';
+    const subject = normalizeName(rawFact.subject);
+    if (!subject) return null;
+
+    if (kind === 'relation') {
+        const relation = normalizeText(rawFact.relation);
+        const object = normalizeName(rawFact.object);
+        if (!relation || !object) return null;
+
+        return {
+            factType: 'relation',
+            kind,
+            subject,
+            relation,
+            object,
+            confidence: clamp(rawFact.confidence || 0.62, 0.35, 0.95),
+            status: 'candidate',
+            meta: {
+                evidence: normalizeText(rawFact.evidence || ''),
+                extractor: 'memory_v2',
+            }
+        };
+    }
+
+    const attribute = normalizeText(rawFact.attribute || 'факт');
+    const value = normalizeText(rawFact.value);
+    if (!attribute || !value) return null;
+
+    return {
+        factType: 'attribute',
+        kind,
+        subject,
+        attribute,
+        value,
+        confidence: clamp(rawFact.confidence || 0.6, 0.35, 0.95),
+        status: 'candidate',
+        meta: {
+            evidence: normalizeText(rawFact.evidence || ''),
+            extractor: 'memory_v2',
+        }
+    };
+}
+
+function fallbackFactsFromText(rawContent) {
+    const fallbackFacts = [];
+    const regex = /(УЗЕЛ:|СВЯЗЬ:)[^"\\]+/gi;
+    let match;
+
+    while ((match = regex.exec(rawContent || '')) !== null) {
+        const extracted = normalizeText(match[0]);
+        if (extracted.length > 10 && !extracted.endsWith('УЗЕЛ:')) {
+            fallbackFacts.push({
+                factType: extracted.startsWith('СВЯЗЬ:') ? 'relation' : 'fact',
+                fact: extracted,
+                confidence: 0.55,
+                status: 'candidate',
+                meta: { extractor: 'fallback_regex' }
+            });
+        }
+    }
+
+    return fallbackFacts;
+}
+
+async function summarizeDialogue(historyText, participants = []) {
+    const cleanHistory = normalizeText(historyText).slice(0, 2600);
+    if (!cleanHistory) return '';
+
+    const participantLine = participants.length
+        ? `Участники: ${participants.map(normalizeName).filter(Boolean).join(', ')}`
+        : '';
+
+    try {
+        const completion = await withTimeout(
+            openai.chat.completions.create({
+                model: EXTRACTOR_MODEL,
+                messages: [
+                    {
+                        role: 'system',
+                        content: `Сделай очень короткую сводку фрагмента чата для памяти бота.
+Нужно 2-4 короткие строки:
+- кто обсуждался;
+- какие устойчивые темы/отношения всплыли;
+- без воды, без шуток, без выдумки.
+Пиши по-русски обычным текстом.`
+                    },
+                    { role: 'user', content: `${participantLine}\n\n${cleanHistory}` }
+                ],
+                temperature: 0,
+                max_tokens: 180
+            })
+        );
+
+        return normalizeText(completion.choices[0]?.message?.content || '').slice(0, 500);
+    } catch (e) {
+        if (e.message !== 'AI_TIMEOUT') {
+            console.error('[MEMORY] Ошибка summary:', e.message);
+        }
+        return '';
+    }
 }
 
 async function createEmbedding(text) {
@@ -56,53 +194,56 @@ async function createEmbedding(text) {
     }
 }
 
-// ─────────────────────────────────────────────────────────────
-// ЭКСТРАКЦИЯ ФАКТОВ ИЗ ДИАЛОГА
-// ─────────────────────────────────────────────────────────────
-
 async function extractAndSaveFacts(chatId, historyText, participants = []) {
-    // Защита от пустых и слишком коротких диалогов
     if (!historyText || historyText.trim().length < MIN_HISTORY_LENGTH) {
         console.log(`[MEMORY] Диалог слишком короткий (${historyText?.length || 0} симв.) — пропускаю`);
         return;
     }
 
     try {
-        // Жесткая зачистка системных имен каналов и привязка их к Нике
-        let cleanHistory = historyText
+        const cleanHistory = historyText
             .replace(/Чатик 🫐 Nika_grdt 👾/gi, 'Ника')
-            .replace(/^(?:Channel|Канал):\s/gmi, 'Ника (канал): ');
+            .replace(/^(?:Channel|Канал):\s/gmi, 'Ника: ');
 
         const participantInfo = participants.length > 0
-            ? 'Известные имена (для справки): ' + participants
-                .map(p => p.replace(/Чатик 🫐 Nika_grdt 👾/gi, 'Ника'))
-                .join(', ')
+            ? 'Известные имена: ' + participants.map(normalizeName).filter(Boolean).join(', ')
             : '';
 
-        const prompt = `Ты — ядро долгосрочной памяти чат-бота (LightRAG).
-ТВОЯ ЗАДАЧА: Находить ПОСТОЯННЫЕ факты о людях и их отношениях. Если фактов нет — вернуть пустой массив.
+        const prompt = `Извлеки только устойчивые факты для долговременной памяти чата.
 
-[АБСОЛЮТНЫЕ ЗАПРЕТЫ]:
-1. ❌ Никогда не пиши "АТРИБУТ: участник диалога" — это мусор.
-2. ❌ Никогда не сохраняй временные действия: "играет", "смотрит", "пойдёт", "устал", "сфоткал".
-3. ❌ Никогда не выдумывай факты. Сомневаешься — пропускай.
+Сохраняй только то, что может пригодиться позже:
+- кто кому кем приходится;
+- устойчивые предпочтения, роли, прозвища, связи;
+- биографические факты, если они звучат уверенно.
 
-[ВНИМАНИЕ — НАПРАВЛЕНИЕ СВЯЗИ (КРИТИЧЕСКИ ВАЖНО)]:
-Жестко контролируй, КТО к КОМУ относится! Не переворачивай смысл!
-✅ ПРАВИЛЬНО: Если Саня фанат Ники, пиши "СВЯЗЬ: Саня -> фанат -> Ника".
-❌ ОШИБКА: "СВЯЗЬ: Ника -> фанатка -> Саня" (Ты перепутал субъект и объект!).
+Не сохраняй:
+- разовые действия, шутки момента, эмоции, планы на вечер;
+- мусор вроде "участник диалога";
+- сомнительные и неявные факты.
 
-[ПРАВИЛО ИМЁН]:
-Если в диалоге кто-то пишет под именем "Channel", "Канал" или "Ника (канал)" - считай, что это пишет стримерша Ника.
+Если в диалоге встречаются Channel, Канал или Ника (канал), это Ника.
+Следи за направлением связи: "Саня -> фанат -> Ника", а не наоборот.
 
-[РАЗРЕШЁННЫЙ ФОРМАТ]:
-✅ УЗЕЛ: [Имя] | АТРИБУТ: [Постоянный факт: профессия, возраст, хобби, привычка]
-✅ СВЯЗЬ: [Кто (Субъект)] -> [отношение] -> [К кому/чему (Объект)]
-
-[ВЫВОД JSON]:
+Верни JSON:
 {
-  "reasoning": "краткий анализ: кто есть кто, и кто к кому как относится",
-  "facts": ["УЗЕЛ: ...", "СВЯЗЬ: ..."]
+  "facts": [
+    {
+      "kind": "attribute",
+      "subject": "имя",
+      "attribute": "роль|интерес|факт|прозвище|привычка",
+      "value": "значение",
+      "confidence": 0.0,
+      "evidence": "короткая цитата или пересказ"
+    },
+    {
+      "kind": "relation",
+      "subject": "кто",
+      "relation": "отношение",
+      "object": "к кому",
+      "confidence": 0.0,
+      "evidence": "короткая цитата или пересказ"
+    }
+  ]
 }`;
 
         const completion = await withTimeout(
@@ -110,76 +251,82 @@ async function extractAndSaveFacts(chatId, historyText, participants = []) {
                 model: EXTRACTOR_MODEL,
                 messages: [
                     { role: 'system', content: prompt },
-                    { role: 'user', content: `${participantInfo}\n\nДиалог:\n${cleanHistory.slice(0, 3000)}` }
+                    { role: 'user', content: `${participantInfo}\n\nДиалог:\n${cleanHistory.slice(0, 3200)}` }
                 ],
-                temperature: 0.0, // Убираем креативность для максимальной точности
-                max_tokens: 1000,
+                temperature: 0,
+                max_tokens: 500,
                 response_format: { type: 'json_object' }
             })
         );
 
-        const rawContent = completion.choices[0].message.content;
+        const rawContent = completion.choices[0]?.message?.content || '{}';
+        let parsed;
 
-        let result;
         try {
-            result = JSON.parse(rawContent);
-        } catch (parseError) {
-            // Аварийное спасение через регулярку
-            const fallbackFacts = [];
-            const regex = /(УЗЕЛ:|СВЯЗЬ:)[^"\\]+/gi;
-            let match;
-            while ((match = regex.exec(rawContent)) !== null) {
-                const extracted = match[0].trim();
-                if (extracted.length > 10 && !extracted.endsWith('УЗЕЛ:')) {
-                    fallbackFacts.push(extracted);
-                }
-            }
-            if (fallbackFacts.length > 0) {
-                console.log(`[MEMORY] Аварийное спасение: ${fallbackFacts.length} фактов через regex`);
-                result = { facts: fallbackFacts };
-            } else {
-                return;
-            }
+            parsed = JSON.parse(rawContent);
+        } catch {
+            parsed = { facts: fallbackFactsFromText(rawContent) };
         }
 
-        const facts = (result.facts || []).slice(0, MAX_FACTS_PER_BATCH);
+        const extractedFacts = Array.isArray(parsed.facts)
+            ? parsed.facts.map(convertExtractedFact).filter(Boolean).slice(0, MAX_FACTS_PER_BATCH)
+            : [];
 
-        if (facts.length === 0) {
-            if (result.reasoning) {
-                console.log(`[MEMORY] Факты не найдены: ${result.reasoning.slice(0, 80)}`);
+        if (extractedFacts.length === 0) {
+            const fallbackFacts = fallbackFactsFromText(rawContent).slice(0, MAX_FACTS_PER_BATCH);
+            for (const fact of fallbackFacts) {
+                const exists = await checkFactExists(chatId, fact);
+                if (exists) continue;
+                const embedding = await createEmbedding(fact.fact);
+                await insertKnowledge(chatId, fact, embedding);
             }
             return;
         }
 
-        console.log(`[MEMORY] Найдено ${facts.length} фактов. Сохраняю...`);
         let saved = 0;
 
-        for (const fact of facts) {
-            if (typeof fact !== 'string' || fact.trim() === '' || fact.includes('участник диалога')) continue;
+        for (const fact of extractedFacts) {
+            const factText = buildFactText(fact);
+            if (!factText || factText.includes('участник диалога')) continue;
 
-            // Быстрая текстовая проверка перед дорогим эмбеддингом
             const exists = await checkFactExists(chatId, fact);
-            if (exists) continue;
+            if (!exists) {
+                const embedding = await createEmbedding(factText);
+                const duplicates = embedding
+                    ? await searchKnowledge(chatId, embedding, 1, 0.9, {
+                        statuses: ['confirmed', 'candidate'],
+                        minConfidence: 0.45
+                    })
+                    : [];
 
-            const embedding = await createEmbedding(fact);
-            if (!embedding) continue;
-
-            // Проверка семантического дубликата (порог 0.88 — строже)
-            const duplicates = await searchKnowledge(chatId, embedding, 1, 0.88);
-            if (duplicates && duplicates.length > 0) {
-                console.log(`[MEMORY] Пропущен дубликат: "${fact.slice(0, 50)}"`);
-                continue;
+                if (duplicates.length > 0) {
+                    await insertKnowledge(chatId, fact, embedding);
+                    saved++;
+                    continue;
+                }
             }
 
+            const embedding = await createEmbedding(factText);
             await insertKnowledge(chatId, fact, embedding);
             saved++;
-            console.log(`[MEMORY] ✅ Добавлено: ${fact.slice(0, 70)}`);
         }
 
         if (saved > 0) {
-            console.log(`[MEMORY] Итого сохранено ${saved}/${facts.length} фактов`);
+            console.log(`[MEMORY] Сохранено ${saved}/${extractedFacts.length} фактов`);
         }
 
+        const summary = await summarizeDialogue(cleanHistory, participants);
+        if (summary) {
+            await upsertMemorySummary(chatId, getSummaryPeriodKey(), summary, 1);
+        }
+
+        const staleBefore = new Date(Date.now() - 1000 * 60 * 60 * 24 * 21).toISOString();
+        await weakenStaleKnowledge(chatId, {
+            staleBeforeIso: staleBefore,
+            limit: 20,
+            maxTimesSeen: 3,
+            maxConfidence: 0.76
+        });
     } catch (e) {
         if (e.message === 'AI_TIMEOUT') {
             console.warn('[MEMORY] Таймаут экстракции — пропускаю');
@@ -189,131 +336,150 @@ async function extractAndSaveFacts(chatId, historyText, participants = []) {
     }
 }
 
-// ─────────────────────────────────────────────────────────────
-// ПОИСК РЕЛЕВАНТНЫХ ФАКТОВ ДЛЯ КОНТЕКСТА ИИ
-// ─────────────────────────────────────────────────────────────
-
 async function getRelevantFacts(chatId, userMessage, userName = '', activeParticipants = []) {
     try {
         if (!userMessage || userMessage.trim().length < 3) return '';
 
-        let cleanMessage = userMessage.replace(/Чатик 🫐 Nika_grdt 👾/gi, 'Ника');
-        let cleanUserName = userName.replace(/Чатик 🫐 Nika_grdt 👾/gi, 'Ника').replace(/Channel/gi, 'Ника');
-
-        const allFoundFacts = new Map(); // fact -> { source, relevance }
+        const cleanMessage = normalizeText(userMessage.replace(/Чатик 🫐 Nika_grdt 👾/gi, 'Ника'));
+        const cleanUserName = normalizeName(userName);
+        const allFoundFacts = new Map();
 
         const stopWords = new Set([
             'меня', 'тебя', 'чтобы', 'какой', 'такой', 'зачем', 'почему',
             'когда', 'будет', 'очень', 'просто', 'может', 'нужно', 'хочу', 'люблю',
-            'тебе', 'мене', 'этот', 'этого', 'этой', 'этом', 'всего', 'тоже',
+            'тебе', 'этот', 'этого', 'этой', 'этом', 'всего', 'тоже',
             'если', 'даже', 'вроде', 'опять', 'снова', 'уже', 'ещё', 'всё'
         ]);
 
-        const getStemLocal = (word) => {
-            if (!word || word.length < 3) return word;
-            return word.toLowerCase()
-                .replace(/[уаеяюиыо]$/i, '')
-                .replace(/(ов|ев|ий|ый|ые|ие|ах|ях|ом|ем|ам|у|е|а|я)$/i, '')
-                .replace(/(s|es|ed|ing)$/i, '');
-        };
+        const addFact = (fact, source, relevance = 0.5, extra = {}) => {
+            if (!fact) return;
+            const existing = allFoundFacts.get(fact);
+            const score = {
+                source,
+                relevance,
+                confidence: extra.confidence ?? 0.6,
+                timesSeen: extra.timesSeen ?? 1,
+                status: extra.status || 'confirmed'
+            };
 
-        const addFact = (fact, source, relevance = 0.5) => {
-            if (!allFoundFacts.has(fact)) {
-                allFoundFacts.set(fact, { source, relevance });
+            if (!existing || existing.relevance < relevance) {
+                allFoundFacts.set(fact, score);
             }
         };
 
-        // 1. Семантический поиск по смыслу сообщения (самый точный)
-        const embeddingRaw = await createEmbedding(cleanMessage);
-        if (embeddingRaw) {
-            const vectorResults = await searchKnowledge(chatId, embeddingRaw, 8, 0.45);
-            vectorResults.forEach(r => addFact(r.fact, 'semantic', r.similarity || 0.5));
+        const embedding = await createEmbedding(cleanMessage);
+        if (embedding) {
+            const semanticResults = await searchKnowledge(chatId, embedding, 5, 0.56, {
+                statuses: ['confirmed'],
+                minConfidence: 0.62
+            });
+            semanticResults.forEach(item => {
+                addFact(item.fact, 'semantic', item.similarity || 0.55, item);
+            });
         }
 
-        // 2. Недавние факты о конкретном пользователе
-        if (cleanUserName && cleanUserName.length >= 2) {
-            const recentResults = await getRecentKnowledge(chatId, cleanUserName, 8);
-            recentResults.forEach(r => addFact(r.fact, 'recent', 0.7));
+        if (cleanUserName) {
+            const recentResults = await getRecentKnowledge(chatId, cleanUserName, 4, {
+                statuses: ['confirmed', 'candidate'],
+                minConfidence: 0.58
+            });
+            recentResults.forEach(item => {
+                addFact(item.fact, 'recent', 0.68, item);
+            });
         }
 
-        // 3. Поиск по именам упомянутых людей и участников (ограничиваем стемы)
-        const searchStems = new Set();
-        const addTarget = (name) => {
-            if (!name || name.length < 2) return;
-            const clean = name.replace('@', '').toLowerCase();
-            searchStems.add(clean);
+        const searchTerms = new Set();
+        const pushTerm = (value) => {
+            const clean = normalizeName(value).replace('@', '').toLowerCase();
+            if (!clean || clean.length < 2) return;
+            searchTerms.add(clean);
             const stem = getStemLocal(clean);
-            if (stem !== clean && stem.length >= 3) searchStems.add(stem);
-            const trans = transliterate(name);
-            if (trans && trans.toLowerCase() !== clean) searchStems.add(trans.toLowerCase());
+            if (stem && stem.length >= 3) searchTerms.add(stem);
+            const trans = transliterate(clean);
+            if (trans && trans.length >= 3) searchTerms.add(trans.toLowerCase());
         };
 
-        addTarget(cleanUserName);
+        pushTerm(cleanUserName);
+        activeParticipants.slice(0, 3).forEach(person => pushTerm(person.firstName || person.username || ''));
 
-        // Только первые 3 участника чтобы не делать 20+ SQL запросов
-        if (activeParticipants) {
-            activeParticipants.slice(0, 3).forEach(p => {
-                let pName = (p.firstName || '').replace(/Чатик 🫐 Nika_grdt 👾/gi, 'Ника');
-                if (pName) addTarget(pName);
-            });
-        }
-
-        // Имена из сообщения (с заглавной = вероятно имя)
         const potentialNames = cleanMessage.match(/([А-Я][а-яё]{2,}|@[a-zA-Z0-9_]+)/g) || [];
-        potentialNames.slice(0, 5).forEach(n => addTarget(n.replace('@', '')));
+        potentialNames.slice(0, 5).forEach(name => pushTerm(name.replace('@', '')));
 
-        // Делаем не более 8 текстовых поисков
-        for (const stem of Array.from(searchStems).slice(0, 8)) {
-            if (stem.length < 3) continue;
-            const byStem = await searchKnowledgeByText(chatId, stem, 5);
-            byStem.forEach(r => addFact(r.fact, 'subject', 0.6));
+        for (const term of Array.from(searchTerms).slice(0, 5)) {
+            if (term.length < 3) continue;
+            const rows = await searchKnowledgeByText(chatId, term, 3, {
+                statuses: ['confirmed', 'candidate'],
+                minConfidence: 0.58
+            });
+            rows.forEach(item => addFact(item.fact, 'subject', 0.62, item));
         }
 
-        // 4. Ключевые слова из сообщения (ограничиваем до 4 слов)
         const keywords = cleanMessage.split(/\s+/)
-            .map(w => w.replace(/[.,!?;:()]/g, '').toLowerCase())
-            .filter(w => w.length > 4 && !stopWords.has(w))
-            .slice(0, 4);
+            .map(word => word.replace(/[.,!?;:()]/g, '').toLowerCase())
+            .filter(word => word.length > 4 && !stopWords.has(word))
+            .slice(0, MAX_KEYWORDS);
 
-        for (const word of keywords) {
-            const stem = getStemLocal(word);
-            const textResults = await searchKnowledgeByText(chatId, stem, 2);
-            textResults.forEach(r => addFact(r.fact, 'keyword', 0.4));
+        for (const keyword of keywords) {
+            const rows = await searchKnowledgeByText(chatId, getStemLocal(keyword), 1, {
+                statuses: ['confirmed'],
+                minConfidence: 0.64
+            });
+            rows.forEach(item => addFact(item.fact, 'keyword', 0.45, item));
         }
 
-        if (allFoundFacts.size === 0) return '';
+        const summaries = await getRecentMemorySummaries(chatId, MAX_SUMMARIES_IN_CONTEXT);
 
-        // Сортировка: semantic > recent > subject > keyword
+        if (allFoundFacts.size === 0 && summaries.length === 0) return '';
+
         const priorityOrder = { semantic: 0, recent: 1, subject: 2, keyword: 3 };
-        const sorted = Array.from(allFoundFacts.entries())
-            .sort(([, a], [, b]) => {
-                const pDiff = priorityOrder[a.source] - priorityOrder[b.source];
-                return pDiff !== 0 ? pDiff : b.relevance - a.relevance;
+        const ranked = Array.from(allFoundFacts.entries())
+            .sort(([, left], [, right]) => {
+                const priorityDiff = priorityOrder[left.source] - priorityOrder[right.source];
+                if (priorityDiff !== 0) return priorityDiff;
+
+                const confidenceDiff = (right.confidence || 0) - (left.confidence || 0);
+                if (confidenceDiff !== 0) return confidenceDiff;
+
+                const timesSeenDiff = (right.timesSeen || 0) - (left.timesSeen || 0);
+                if (timesSeenDiff !== 0) return timesSeenDiff;
+
+                return (right.relevance || 0) - (left.relevance || 0);
             });
 
-        const factsText = sorted
-            .slice(0, 12)
-            .map(([fact]) => '- ' + fact)
+        const factLines = ranked
+            .filter(([fact]) => fact.length <= 220)
+            .slice(0, MAX_FACTS_IN_CONTEXT)
+            .map(([fact, meta]) => {
+                const marker = meta.status === 'candidate' ? '~- ' : '- ';
+                return `${marker}${fact}`;
+            })
             .join('\n');
 
-        return factsText;
+        const summaryLines = summaries
+            .map(item => normalizeText(item.summary))
+            .filter(Boolean)
+            .slice(0, MAX_SUMMARIES_IN_CONTEXT)
+            .map(text => `[SUMMARY] ${text}`)
+            .join('\n');
 
+        return [factLines, summaryLines].filter(Boolean).join('\n');
     } catch (e) {
         console.error('[MEMORY] Ошибка поиска фактов:', e.message);
         return '';
     }
 }
 
-// ─────────────────────────────────────────────────────────────
-// УДАЛЕНИЕ ФАКТА
-// ─────────────────────────────────────────────────────────────
-
 async function forgetFact(chatId, query) {
     if (!query || query.trim() === '') return false;
     try {
         const embedding = await createEmbedding(query);
         if (!embedding) return false;
-        const results = await searchKnowledge(chatId, embedding, 1, 0.72);
+
+        const results = await searchKnowledge(chatId, embedding, 1, 0.72, {
+            statuses: ['confirmed', 'candidate'],
+            minConfidence: 0.4
+        });
+
         if (results && results.length > 0) {
             const target = results[0];
             if (target.id) {
