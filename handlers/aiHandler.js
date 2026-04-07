@@ -88,6 +88,7 @@ let personaConfigCache = null;
 
 const POLZA_API_KEY = process.env.POLZA_API_KEY || 'pza_Ut5ahRtIFZSzj_jKezwdRvQMMebqZ1BI';
 const AI_MODEL = process.env.AI_MODEL || 'google/gemini-2.5-flash-lite';
+const MODERATION_MODEL = process.env.MODERATION_MODEL || AI_MODEL;
 const AI_BASE_URL = process.env.AI_BASE_URL || process.env.OPENAI_BASE_URL || 'https://polza.ai/api/v1';
 const AI_PROVIDER_ORDER = String(process.env.AI_PROVIDER_ORDER || '').split(',').map(item => item.trim()).filter(Boolean);
 const AI_ALLOW_PROVIDER_FALLBACKS = String(process.env.AI_ALLOW_PROVIDER_FALLBACKS || 'true').toLowerCase() !== 'false';
@@ -105,7 +106,7 @@ const openai = new OpenAI({
 async function analyzeMessage(text) {
     try {
         const res = await openai.chat.completions.create(withProviderRouting({
-            model: "gpt-4.1-mini",
+            model: MODERATION_MODEL,
             temperature: 0,
             messages: [
                 {
@@ -690,6 +691,20 @@ function withProviderRouting(payload) {
     };
 }
 
+function shouldExposeToolResultToChat(fnName, resultText) {
+    const text = String(resultText || '').trim();
+    if (!text) return false;
+
+    if (fnName === 'moderate_user') return false;
+    if (fnName === 'manage_memory') return false;
+
+    if (fnName === 'manage_user_profile') {
+        return !text.startsWith('[SYSTEM:');
+    }
+
+    return ['user_lookup', 'create_poll', 'set_reminder'].includes(fnName);
+}
+
 async function fetchAIWithTimeout(payload, timeoutMs = 40000) {
     const apiCall = openai.chat.completions.create(withProviderRouting(payload));
     const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error('TIMEOUT')), timeoutMs));
@@ -741,7 +756,7 @@ async function continueToolChain(chatId, finalPrompt, toolContext, maxRounds = M
                 chatHistory[chatId].push({ role: 'function', name: fnName, content: String(res) });
             }
 
-            if (['user_lookup', 'moderate_user', 'create_poll', 'set_reminder', 'manage_memory', 'manage_user_profile'].includes(fnName)) {
+            if (shouldExposeToolResultToChat(fnName, res)) {
                 if (!directInjectedData.includes(res)) directInjectedData += `\n\n${res}`;
             }
         }
@@ -1481,7 +1496,7 @@ async function processAI(msg, extra) {
                     chatHistory[chatId].push({ role: 'function', name: fnName, content: String(res) });
                 }
 
-                if (['user_lookup', 'moderate_user', 'create_poll', 'set_reminder', 'manage_memory', 'manage_user_profile'].includes(fnName)) {
+                if (shouldExposeToolResultToChat(fnName, res)) {
                     if (!directInjectedData.includes(res)) directInjectedData += `\n\n${res}`;
                 }
             }
@@ -1527,7 +1542,7 @@ async function processAI(msg, extra) {
                     const fnName = tc.function ? tc.function.name : tc.name;
                     chatHistory[chatId].push({ role: 'tool', tool_call_id: tc.id, name: fnName, content: String(res) });
 
-                    if (['user_lookup', 'moderate_user', 'create_poll', 'set_reminder', 'manage_memory', 'manage_user_profile'].includes(fnName)) {
+                    if (shouldExposeToolResultToChat(fnName, res)) {
                         if (!directInjectedData.includes(res)) directInjectedData += `\n\n${res}`;
                     }
                 }
