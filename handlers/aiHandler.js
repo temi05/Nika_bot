@@ -88,12 +88,15 @@ let personaConfigCache = null;
 
 const POLZA_API_KEY = process.env.POLZA_API_KEY || 'pza_Ut5ahRtIFZSzj_jKezwdRvQMMebqZ1BI';
 const AI_MODEL = process.env.AI_MODEL || 'google/gemini-2.5-flash-lite';
+const AI_BASE_URL = process.env.AI_BASE_URL || process.env.OPENAI_BASE_URL || 'https://polza.ai/api/v1';
+const AI_PROVIDER_ORDER = String(process.env.AI_PROVIDER_ORDER || '').split(',').map(item => item.trim()).filter(Boolean);
+const AI_ALLOW_PROVIDER_FALLBACKS = String(process.env.AI_ALLOW_PROVIDER_FALLBACKS || 'true').toLowerCase() !== 'false';
 
 const AI_NAME = process.env.AI_NAME || 'НейроНика';
 
 const openai = new OpenAI({
     apiKey: POLZA_API_KEY,
-    baseURL: 'https://polza.ai/api/v1',
+    baseURL: AI_BASE_URL,
 });
 // ======================
 // 🔥 AI MODERATION LAYER
@@ -101,7 +104,7 @@ const openai = new OpenAI({
 
 async function analyzeMessage(text) {
     try {
-        const res = await openai.chat.completions.create({
+        const res = await openai.chat.completions.create(withProviderRouting({
             model: "gpt-4.1-mini",
             temperature: 0,
             messages: [
@@ -141,7 +144,7 @@ async function analyzeMessage(text) {
                 },
                 { role: "user", content: text }
             ]
-        });
+        }));
 
         const parsed = JSON.parse(res.choices[0].message.content);
         return {
@@ -517,6 +520,87 @@ function ensureCharacterfulFallback(text) {
     return 'Не беси мне драму на ровном месте. Сформулируй ещё раз нормально.';
 }
 
+function buildFailureReply(chatId, kind = 'generic') {
+    const mood = getOrCreateMood(chatId);
+    const genericReplies = [
+        'У меня мысль сейчас красиво споткнулась. Скажи ещё раз, но без магии вне Хогвартса.',
+        'Ща, вселенная икнула и сбила мне реплику. Повтори нормально.',
+        'Я уже почти ответила, но реальность решила выпендриться. Давай ещё раз.'
+    ];
+
+    const spicyReplies = [
+        'Секунду. Даже у меня бывают приступы \"что за бред я сейчас увидела\". Повтори.',
+        'Ладно, сцена поехала не туда. Заходи ещё раз, только без кривых приколов судьбы.',
+        'Я бы ответила красиво, но момент сейчас сломался об колено. Повтори вопрос.'
+    ];
+
+    const timeoutReplies = [
+        'Я зависла на полумысли. Кинь это ещё раз, только не так внезапно.',
+        'Сейчас было неловкое молчание между мной и реальностью. Повтори.',
+        'Я уже почти дожала ответ, но тайминг решил поиграть против нас. Давай ещё раз.'
+    ];
+
+    const pool = kind === 'timeout'
+        ? timeoutReplies
+        : mood.troll >= 0.6
+            ? spicyReplies
+            : genericReplies;
+
+    return pool[Math.floor(Math.random() * pool.length)];
+}
+
+function buildProfanityRefusalReply(chatId) {
+    const mood = getOrCreateMood(chatId);
+    const softReplies = [
+        'Мат сам по себе меня не пугает, но мысль ты туда так и не положил. Попробуй ещё раз, только с содержанием.',
+        'Хуй у тебя получился убедительно, а вот запрос пока не очень. Сформулируй нормально.',
+        'Ругаться ты умеешь, это я уже поняла. Теперь давай ещё и мысль сюда.'
+    ];
+
+    const spicyReplies = [
+        'Мат засчитан, драматургия пока нет. Давай теперь по-человечески, а не просто ртом по клавиатуре.',
+        'О, словарь крепкий. Осталось научиться упаковывать в него смысл, и вообще цены тебе не будет.',
+        'Хорошо, грязно, громко. А теперь скажи, чего ты от меня хочешь, а не просто кидайся слогами.'
+    ];
+
+    const pool = mood.troll >= 0.58 ? spicyReplies : softReplies;
+    return pool[Math.floor(Math.random() * pool.length)];
+}
+
+function rewriteProviderRefusal(text, chatId, userText = '') {
+    const raw = String(text || '').trim();
+    if (!raw) return raw;
+
+    const normalized = raw.toLowerCase();
+    const profanityRefusalPatterns = [
+        'не могу отвечать на сообщения, содержащие нецензурную лексику',
+        'содержащие нецензурную лексику',
+        'нецензурн',
+        'contains profanity',
+        'offensive language',
+        'explicit language'
+    ];
+
+    if (profanityRefusalPatterns.some(pattern => normalized.includes(pattern))) {
+        return buildProfanityRefusalReply(chatId);
+    }
+
+    const genericRefusalPatterns = [
+        'я не могу помочь с этим',
+        'не могу помочь с этим',
+        'i can\'t help with that',
+        'i cannot help with that',
+        'content policy',
+        'violates policy'
+    ];
+
+    if (genericRefusalPatterns.some(pattern => normalized.includes(pattern))) {
+        return buildFailureReply(chatId, 'generic');
+    }
+
+    return raw;
+}
+
 function loadPersonaConfig() {
     if (personaConfigCache) return personaConfigCache;
     try {
@@ -595,8 +679,19 @@ function sanitizeHistory(history) {
     });
 }
 
+function withProviderRouting(payload) {
+    if (!AI_PROVIDER_ORDER.length) return payload;
+    return {
+        ...payload,
+        provider: {
+            order: AI_PROVIDER_ORDER,
+            allow_fallbacks: AI_ALLOW_PROVIDER_FALLBACKS
+        }
+    };
+}
+
 async function fetchAIWithTimeout(payload, timeoutMs = 40000) {
-    const apiCall = openai.chat.completions.create(payload);
+    const apiCall = openai.chat.completions.create(withProviderRouting(payload));
     const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error('TIMEOUT')), timeoutMs));
     return Promise.race([apiCall, timeout]);
 }
@@ -1483,12 +1578,7 @@ async function processAI(msg, extra) {
                     aiText = unmutePhrases[Math.floor(Math.random() * unmutePhrases.length)];
                 } else {
                     // Если это был поиск фактов, профиля или другой обычный запрос
-                    const errorPhrases = [
-                        "Ой, что-то я запуталась... Можешь повторить?",
-                        "Блин, процессор закипел. Еще раз спроси!",
-                        "Хм, я задумалась и забыла, что хотела сказать. 😅"
-                    ];
-                    aiText = errorPhrases[Math.floor(Math.random() * errorPhrases.length)];
+                    aiText = buildFailureReply(chatId, 'generic');
                 }
             }
 
@@ -1505,7 +1595,7 @@ async function processAI(msg, extra) {
             }
 
         } else {
-            rawRes = resp.content || "Блин, у меня процессор закипел от таких запросов... Давай еще раз.";
+            rawRes = resp.content || buildFailureReply(chatId, 'generic');
         }
 
         function formatAIOutput(text) {
@@ -1517,6 +1607,7 @@ async function processAI(msg, extra) {
             }
 
             let clean = withoutMediaTags.replace(/&#039;/g, "'").replace(/&quot;/g, '"');
+            clean = rewriteProviderRefusal(clean, chatId, userText);
             clean = ensureCharacterfulFallback(stripAIDisclaimer(clean));
             let escaped = clean.replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
@@ -1551,7 +1642,7 @@ async function processAI(msg, extra) {
     } catch (e) {
         console.error('AI Error:', e.message);
         if (e.message === 'TIMEOUT') {
-            await safeSendMessage(chatId, "Мой процессор только что завис намертво... Повтори вопрос, пожалуйста.", msg.message_id);
+            await safeSendMessage(chatId, buildFailureReply(chatId, 'timeout'), msg.message_id);
         }
     }
 }
