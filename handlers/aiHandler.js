@@ -44,6 +44,65 @@ function isProfileMemoryAllowed(str) {
     return !blockedPatterns.some(pattern => normalized.includes(pattern));
 }
 
+function isProtectedUserId(userId) {
+    return Number(userId) === Number(SUPER_ADMIN_ID) || Number(userId) === Number(ANONYMOUS_ADMIN_ID) || Number(userId) === Number(BOT_ID);
+}
+
+function isSimpleProfanityBait(text) {
+    const normalized = String(text || '')
+        .toLowerCase()
+        .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+        .trim();
+
+    if (!normalized) return false;
+    const parts = normalized.split(/\s+/).filter(Boolean);
+    if (parts.length > 4) return false;
+
+    const baitWords = new Set([
+        'хуй', 'хуйня', 'жопа', 'пизда', 'блять', 'сука', 'ебать', 'нахуй', 'член', 'пися', 'писька'
+    ]);
+
+    return parts.every(part => baitWords.has(part));
+}
+
+function shouldRunModerationAI(text) {
+    const normalized = String(text || '').toLowerCase().trim();
+    if (!normalized) return false;
+
+    if (/https?:\/\/|t\.me\/|@\w+/.test(normalized)) return true;
+    if (/(порно|porn|nsfw|cp|расчлен|убью|сдохни|суицид|kill yourself)/i.test(normalized)) return true;
+    if (/(spam|спам|реклама|casino|казино|ставки|беттинг)/i.test(normalized)) return true;
+    if (/([!?.,])\1{5,}/.test(normalized)) return true;
+    if (normalized.length > 180 && /(иди нах|пошел нах|сдохни|мразь|шлюх|пидор|педик|уеб)/i.test(normalized)) return true;
+    return false;
+}
+
+function shouldUseMemoryContext(text, isReplyToBot, isMentioned) {
+    const normalized = String(text || '').toLowerCase().trim();
+    if (!normalized) return false;
+    if (isReplyToBot) return true;
+
+    const parts = normalized.split(/\s+/).filter(Boolean);
+    if (isSimpleProfanityBait(normalized)) return false;
+    if (parts.length <= 2 && normalized.length <= 12 && /^(привет|ку|здарова|ага|ок|ладно|пон|ясно|лол|хах|мда|спасибо)$/.test(normalized)) return false;
+
+    return isMentioned || normalized.length >= 18 || normalized.includes('?') || parts.length >= 4;
+}
+
+function shouldEnableAITools(text, callerIsAdmin, isReplyToBot, isMentioned) {
+    const normalized = String(text || '').toLowerCase().trim();
+    if (!normalized) return false;
+    if (callerIsAdmin) return true;
+    if (isSimpleProfanityBait(normalized)) return false;
+
+    const toolIntentPattern = /(кто|найди|поиск|профил|био|досье|заметк|напомни|напомин|опрос|голосован|мут|размут|варн|накаж|удали|реакц|эмодзи|стикер|печеньк|репутац|памят|запомни|забудь|кто такой|кто такая)/i;
+    if (toolIntentPattern.test(normalized)) return true;
+    if (isReplyToBot && normalized.length >= 20) return true;
+    if (isMentioned && normalized.length >= 60) return true;
+
+    return false;
+}
+
 let BOT_ID = null;
 
 let premiumEmojiList = [];
@@ -372,12 +431,15 @@ const COMPACT_SYSTEM_PROMPT = `Ты — НейроНика, дерзкая и ж
 - Можно вставить [EMO:RANDOM], но максимум 1 раз на сообщение.
 - Если память ниже нерелевантна, игнорируй её. Используй только то, что помогает ответить лучше.`;
 
-const HISTORY_LIMIT = 12;
-const FIRST_PASS_MAX_TOKENS = 900;
-const SECOND_PASS_MAX_TOKENS = 650;
-const MEMORY_FACTS_LIMIT = 6;
+const HISTORY_LIMIT = 10;
+const FIRST_PASS_MAX_TOKENS = 720;
+const SECOND_PASS_MAX_TOKENS = 480;
+const CONTINUATION_MAX_TOKENS = 220;
+const MEMORY_FACTS_LIMIT = 4;
 const MAX_TOOL_ROUNDS = 3;
 const AI_PERSONA_STAGES = ['fresh', 'familiar', 'attached', 'chaotic'];
+const MEMORY_EXTRACTION_TRIGGER = Math.max(10, Number(process.env.MEMORY_EXTRACTION_TRIGGER || 20));
+const TELEGRAM_MESSAGE_LIMIT = 3800;
 
 const BAIT_TRIGGER_WORDS = new Set([
     'пися', 'писька', 'писюн', 'жопа', 'попа', 'сиськи', 'сиси', 'хуй', 'член'
@@ -407,6 +469,10 @@ const ADVANCED_PERSONA_BLOCK = `
 [АНТИ-БЕЗДУШИЕ]
 Никогда не говори фразы вроде "я нейросеть", "я ИИ", "как языковая модель", "у меня нет чувств", "я не могу чувствовать", "я всего лишь бот".
 Если чего-то не хочешь, не можешь или не одобряешь, отвечай в образе: живо, метко, с характером, без канцелярита и без саморазоблачения.
+
+[АНТИ-ЛОЖНАЯ МОДЕРАЦИЯ]
+Не пытайся модерить текущего защищённого собеседника, создателя, админа или саму себя за обычный мат, bait и дружеский рофл.
+Одиночные сообщения вроде "хуй", "жопа", "пися" и похожие короткие вбросы в этом чате почти всегда рофл, а не повод для наказания.
 
 [ВАЙБ]
 Допустим вайб умной, немного жутковатой, милой, контролирующей хаос подруги.
@@ -632,6 +698,10 @@ function buildRelationshipPrompt(user, userName) {
     const notes = String(user.ai_notes || '').toLowerCase();
     const parts = [];
 
+    if (isProtectedUserId(user.user_id)) {
+        parts.push('Это защищённый человек: не пытайся его модерить за обычный мат, bait или рофл, максимум подколоть в ответ.');
+    }
+
     if ((user.warns || 0) >= 2) {
         parts.push('Этот человек уже косячил, поэтому терпение к нему ниже обычного.');
     }
@@ -709,6 +779,92 @@ async function fetchAIWithTimeout(payload, timeoutMs = 40000) {
     const apiCall = openai.chat.completions.create(withProviderRouting(payload));
     const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error('TIMEOUT')), timeoutMs));
     return Promise.race([apiCall, timeout]);
+}
+
+function isCompletionTruncated(completion, text = '') {
+    const finishReason = completion?.choices?.[0]?.finish_reason;
+    if (finishReason === 'length' || finishReason === 'max_tokens') return true;
+
+    const normalized = String(text || '').trim();
+    if (!normalized) return false;
+
+    return normalized.length >= TELEGRAM_MESSAGE_LIMIT - 50;
+}
+
+function mergeContinuationText(partialText, continuationText) {
+    const partial = String(partialText || '').trimEnd();
+    let continuation = String(continuationText || '').trim();
+
+    if (!continuation) return partial;
+
+    const normalizedPartial = partial.toLowerCase();
+    const normalizedContinuation = continuation.toLowerCase();
+
+    if (normalizedContinuation.startsWith(normalizedPartial)) {
+        continuation = continuation.slice(partial.length).trim();
+    } else {
+        for (let overlap = Math.min(partial.length, continuation.length, 120); overlap >= 20; overlap--) {
+            if (normalizedPartial.slice(-overlap) === normalizedContinuation.slice(0, overlap)) {
+                continuation = continuation.slice(overlap).trim();
+                break;
+            }
+        }
+    }
+
+    if (!continuation) return partial;
+
+    const needsSpace = !/[\s([{-]$/.test(partial) && !/^[,.;:!?)]/.test(continuation);
+    return `${partial}${needsSpace ? ' ' : ''}${continuation}`.trim();
+}
+
+async function continueAssistantReply(systemPrompt, baseMessages, partialText, timeoutMs = 25000) {
+    const partial = String(partialText || '').trim();
+    if (!partial) return '';
+
+    try {
+        const continuation = await fetchAIWithTimeout({
+            model: AI_MODEL,
+            messages: [
+                { role: 'system', content: systemPrompt },
+                ...baseMessages,
+                { role: 'assistant', content: partial },
+                { role: 'user', content: 'Продолжи свой последний ответ с того же места. Не повторяй уже написанное и закончи мысль естественно.' }
+            ],
+            temperature: 0.45,
+            max_tokens: CONTINUATION_MAX_TOKENS
+        }, timeoutMs);
+
+        return continuation?.choices?.[0]?.message?.content || '';
+    } catch (e) {
+        console.error('[AI CONTINUE ERROR]:', e.message);
+        return '';
+    }
+}
+
+function splitPlainText(text, limit = TELEGRAM_MESSAGE_LIMIT) {
+    const normalized = String(text || '').trim();
+    if (!normalized) return [];
+    if (normalized.length <= limit) return [normalized];
+
+    const chunks = [];
+    let rest = normalized;
+
+    while (rest.length > limit) {
+        let cut = rest.lastIndexOf('\n\n', limit);
+        if (cut < Math.floor(limit * 0.55)) cut = rest.lastIndexOf('\n', limit);
+        if (cut < Math.floor(limit * 0.55)) cut = rest.lastIndexOf('. ', limit);
+        if (cut < Math.floor(limit * 0.55)) cut = rest.lastIndexOf('! ', limit);
+        if (cut < Math.floor(limit * 0.55)) cut = rest.lastIndexOf('? ', limit);
+        if (cut < Math.floor(limit * 0.55)) cut = rest.lastIndexOf(' ', limit);
+        if (cut < Math.floor(limit * 0.4)) cut = limit;
+
+        const chunk = rest.slice(0, cut).trim();
+        if (chunk) chunks.push(chunk);
+        rest = rest.slice(cut).trim();
+    }
+
+    if (rest) chunks.push(rest);
+    return chunks;
 }
 
 async function continueToolChain(chatId, finalPrompt, toolContext, maxRounds = MAX_TOOL_ROUNDS) {
@@ -1156,12 +1312,35 @@ async function executeToolCall(toolCall, chatId, messageId, userName, userId, ca
 
 async function safeSendMessage(chatId, text, replyId) {
     if (!text) return;
+    const htmlChunks = text.length > TELEGRAM_MESSAGE_LIMIT ? [] : [text];
+    const plainText = text.replace(/<tg-emoji[^>]*>(.*?)<\/tg-emoji>/g, '$1').replace(/<[^>]*>/g, '');
+    const plainChunks = splitPlainText(plainText, TELEGRAM_MESSAGE_LIMIT);
+
     try {
-        await bot.sendMessage(chatId, text, { reply_to_message_id: replyId, parse_mode: 'HTML' });
+        if (htmlChunks.length > 0) {
+            for (let i = 0; i < htmlChunks.length; i++) {
+                await bot.sendMessage(chatId, htmlChunks[i], {
+                    reply_to_message_id: i === 0 ? replyId : undefined,
+                    parse_mode: 'HTML'
+                });
+            }
+            return;
+        }
+
+        for (let i = 0; i < plainChunks.length; i++) {
+            await bot.sendMessage(chatId, plainChunks[i], {
+                reply_to_message_id: i === 0 ? replyId : undefined
+            });
+        }
     } catch (error) {
         console.error('[SEND ERROR HTML]:', error.message);
-        const plainText = text.replace(/<tg-emoji[^>]*>(.*?)<\/tg-emoji>/g, '$1').replace(/<[^>]*>/g, '');
-        try { await bot.sendMessage(chatId, plainText, { reply_to_message_id: replyId }); } catch (e2) { }
+        try {
+            for (let i = 0; i < plainChunks.length; i++) {
+                await bot.sendMessage(chatId, plainChunks[i], {
+                    reply_to_message_id: i === 0 ? replyId : undefined
+                });
+            }
+        } catch (e2) { }
     }
 }
 
@@ -1213,6 +1392,14 @@ async function processAI(msg, extra) {
     // ---
 
     userText = userText.trim();
+
+    const callerIsAdmin = await isAdmin(chatId, userId);
+    const callerIsProtected = isProtectedUserId(userId);
+    const textLower = userText.toLowerCase();
+    const moderationNameTriggered = textLower.includes('нейроника') || textLower.includes('нейронику') || textLower.includes('нейронике') || textLower.includes('neironika');
+    const moderationIsReplyToBot = msg.reply_to_message && BOT_ID && msg.reply_to_message.from.id === BOT_ID;
+    const moderationIsMentioned = moderationNameTriggered || moderationIsReplyToBot || isBaitTriggerMessage(userText);
+    const moderationNeeded = shouldRunModerationAI(userText);
     // ======================
     // 🛡️ MODERATION CHECK
     // ======================
@@ -1226,7 +1413,18 @@ async function processAI(msg, extra) {
     }
 
     // AI анализ
-    const analysis = await analyzeMessage(userText);
+    const analysis = moderationNeeded
+        ? await analyzeMessage(userText)
+        : { type: "normal", severity: 0, action: "ignore", is_banter: false, reason: "", suggested_mute_minutes: 0 };
+
+    if (callerIsProtected && isSimpleProfanityBait(userText)) {
+        analysis.action = 'ignore';
+        analysis.is_banter = true;
+    }
+
+    if (callerIsProtected && ['warn', 'mute', 'delete'].includes(analysis.action)) {
+        analysis.action = 'ignore';
+    }
 
     if (analysis.is_banter && analysis.action !== 'delete') {
         analysis.action = 'ignore';
@@ -1274,12 +1472,10 @@ async function processAI(msg, extra) {
         try { const me = await bot.getMe(); BOT_ID = me.id; } catch (e) { }
     }
 
-    const callerIsAdmin = await isAdmin(chatId, userId);
     let replyIdForBot = msg.message_id;
     let replyPrefix = "";
     let rpAuthor = "Кто-то";
 
-    const textLower = userText.toLowerCase();
     const nameTriggered = textLower.includes('нейроника') || textLower.includes('нейронику') || textLower.includes('нейронике') || textLower.includes('neironika');
     const isReplyToBot = msg.reply_to_message && BOT_ID && msg.reply_to_message.from.id === BOT_ID;
     const isMentioned = nameTriggered || isReplyToBot || isBaitTriggerMessage(userText);
@@ -1309,8 +1505,10 @@ async function processAI(msg, extra) {
         }
     }
 
-    const roleTag = callerIsAdmin ? " [АДМИН]" : "";
-    const fullContent = `${userName}${roleTag} ${replyPrefix}: ${userText}`;
+    const senderContextBlock = callerIsAdmin
+        ? '\n[CURRENT SENDER]\nЭто админ. Его прямые мод-команды можно исполнять, но обычный рофл и мат не считай приказом.'
+        : '\n[CURRENT SENDER]\nЭто обычный пользователь.';
+    const fullContent = `${userName} ${replyPrefix}: ${userText}`;
 
     let memoryLine = `${userName}: ${userText}`;
     if (msg.reply_to_message) {
@@ -1328,8 +1526,8 @@ async function processAI(msg, extra) {
 
     if (!messageCount[chatId]) messageCount[chatId] = 0;
 
-    if (++messageCount[chatId] >= 15) {
-        console.log(`🔍 [MEMORY] Накопилось 15 сообщений! Отправляю фоновый запрос...`);
+    if (++messageCount[chatId] >= MEMORY_EXTRACTION_TRIGGER) {
+        console.log(`🔍 [MEMORY] Накопилось ${MEMORY_EXTRACTION_TRIGGER} сообщений! Отправляю фоновый запрос...`);
         extractAndSaveFacts(chatId, extractionBuffer[chatId].join('\n'), Object.values(activeParticipants[chatId] || {}).map(p => p.firstName));
         messageCount[chatId] = 0;
         extractionBuffer[chatId] = extractionBuffer[chatId].slice(-5);
@@ -1351,12 +1549,16 @@ async function processAI(msg, extra) {
         }
     }
     updateAIMood(chatId, userText, callerIsAdmin, isReplyToBot, isMentioned);
-    const relevantFacts = await getRelevantFacts(chatId, userText, userName, Object.values(activeParticipants[chatId]));
+    const shouldLoadMemory = shouldUseMemoryContext(userText, isReplyToBot, isMentioned);
+    const relevantFacts = shouldLoadMemory
+        ? await getRelevantFacts(chatId, userText, userName, Object.values(activeParticipants[chatId]))
+        : '';
     const memoryBlock = `\n[МЫСЛИ О ${userName}]\n${relevantFacts}\nВремя (МСК): ${new Date().toLocaleString('ru-RU', { timeZone: 'Europe/Moscow' })}\n`;
 
     const compactMemoryBlock = buildMemoryBlock(userName, relevantFacts);
     const personaLayer = ADVANCED_PERSONA_BLOCK + buildDynamicPersonaBlock(chatId, dbUser, userName) + buildMoodPrompt(chatId);
-    const finalPrompt = COMPACT_SYSTEM_PROMPT + personaLayer + compactMemoryBlock;
+    const finalPrompt = COMPACT_SYSTEM_PROMPT + personaLayer + senderContextBlock + compactMemoryBlock;
+    const activeTools = shouldEnableAITools(userText, callerIsAdmin, isReplyToBot, isMentioned) ? aiTools : undefined;
     chatHistory[chatId].push({ role: 'user', content: fullContent });
     chatHistory[chatId] = trimHistory(chatHistory[chatId], HISTORY_LIMIT);
 
@@ -1414,7 +1616,7 @@ async function processAI(msg, extra) {
             completion = await fetchAIWithTimeout({
                 model: targetModel,
                 messages: [{ role: 'system', content: finalPrompt }, ...currentMessagesFirstCall],
-                tools: aiTools,
+                tools: activeTools,
                 max_tokens: FIRST_PASS_MAX_TOKENS,
                 temperature: 0.55
             });
@@ -1425,12 +1627,14 @@ async function processAI(msg, extra) {
                 console.log("♻️ Пробую отправить запрос БЕЗ картинки...");
                 currentMessagesFirstCall[currentMessagesFirstCall.length - 1].content = fullContent;
             }
-            const memoryFacts = await getRelevantFacts(
-                chatId,
-                userText,
-                userName,
-                Object.values(activeParticipants[chatId] || {})
-            );
+            const memoryFacts = shouldLoadMemory
+                ? (relevantFacts || await getRelevantFacts(
+                    chatId,
+                    userText,
+                    userName,
+                    Object.values(activeParticipants[chatId] || {})
+                ))
+                : '';
 
             let memoryBlock = '';
 
@@ -1438,7 +1642,7 @@ async function processAI(msg, extra) {
                 memoryBlock = `\n\nВот что ты помнишь о чате:\n${memoryFacts}`;
             }
 
-            const fallbackPrompt = COMPACT_SYSTEM_PROMPT + ADVANCED_PERSONA_BLOCK + buildDynamicPersonaBlock(chatId, dbUser, userName) + buildMoodPrompt(chatId) + buildMemoryBlock(userName, memoryFacts);
+            const fallbackPrompt = COMPACT_SYSTEM_PROMPT + ADVANCED_PERSONA_BLOCK + buildDynamicPersonaBlock(chatId, dbUser, userName) + buildMoodPrompt(chatId) + senderContextBlock + buildMemoryBlock(userName, memoryFacts);
 
             completion = await fetchAIWithTimeout({
                 model: AI_MODEL,
@@ -1446,7 +1650,7 @@ async function processAI(msg, extra) {
                     { role: 'system', content: fallbackPrompt },
                     ...currentMessagesFirstCall
                 ],
-                tools: aiTools,
+                tools: activeTools,
                 max_tokens: FIRST_PASS_MAX_TOKENS,
                 temperature: 0.55
             });
@@ -1508,7 +1712,7 @@ async function processAI(msg, extra) {
                 second = await fetchAIWithTimeout({
                     model: AI_MODEL,
                     messages: [{ role: 'system', content: finalPrompt }, ...currentMessagesSecondCall],
-                    tools: aiTools,
+                    tools: activeTools,
                     temperature: 0.5,
                     max_tokens: SECOND_PASS_MAX_TOKENS
                 });
@@ -1519,7 +1723,7 @@ async function processAI(msg, extra) {
                     second = await fetchAIWithTimeout({
                         model: 'google/gemini-2.0-flash-001',
                         messages: [{ role: 'system', content: finalPrompt }, ...currentMessagesSecondCall],
-                        tools: aiTools,
+                        tools: activeTools,
                         temperature: 0.5,
                         max_tokens: SECOND_PASS_MAX_TOKENS
                     }, 50000); // 50 секунд для второго шанса
@@ -1551,7 +1755,7 @@ async function processAI(msg, extra) {
                 second = await fetchAIWithTimeout({
                     model: AI_MODEL,
                     messages: [{ role: 'system', content: finalPrompt }, ...chainedMessages],
-                    tools: aiTools,
+                    tools: activeTools,
                     temperature: 0.5,
                     max_tokens: SECOND_PASS_MAX_TOKENS
                 }, 50000);
@@ -1597,6 +1801,12 @@ async function processAI(msg, extra) {
                 }
             }
 
+            if (aiText && isCompletionTruncated(second, aiText)) {
+                const continuationBaseMessages = sanitizeHistory(chatHistory[chatId]);
+                const continuationText = await continueAssistantReply(finalPrompt, continuationBaseMessages, aiText);
+                aiText = mergeContinuationText(aiText, continuationText);
+            }
+
             if (directInjectedData) {
                 const profileIndex = aiText.indexOf('=== ПРОФИЛЬ');
                 if (profileIndex !== -1) aiText = aiText.substring(0, profileIndex).trim();
@@ -1610,7 +1820,14 @@ async function processAI(msg, extra) {
             }
 
         } else {
-            rawRes = resp.content || buildFailureReply(chatId, 'generic');
+            let aiText = resp.content || buildFailureReply(chatId, 'generic');
+
+            if (resp.content && isCompletionTruncated(completion, resp.content)) {
+                const continuationText = await continueAssistantReply(finalPrompt, currentMessagesFirstCall, resp.content);
+                aiText = mergeContinuationText(resp.content, continuationText);
+            }
+
+            rawRes = aiText;
         }
 
         function formatAIOutput(text) {
@@ -1623,6 +1840,8 @@ async function processAI(msg, extra) {
 
             let clean = withoutMediaTags.replace(/&#039;/g, "'").replace(/&quot;/g, '"');
             clean = rewriteProviderRefusal(clean, chatId, userText);
+            clean = clean.replace(/\s*\[АДМИН\]/gi, '');
+            clean = clean.replace(/\[СИСТЕМНО:[^\]]*\]/gi, '');
             clean = ensureCharacterfulFallback(stripAIDisclaimer(clean));
             let escaped = clean.replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
