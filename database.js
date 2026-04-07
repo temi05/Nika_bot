@@ -514,7 +514,8 @@ async function findSingleUser(chatId, query) {
     const user = await findBestUserMatch(chatId, query, {
         select: '*',
         limit: 25,
-        minScore: 100
+        minScore: 100,
+        excludeProfileFields: true
     });
     return user || null;
 }

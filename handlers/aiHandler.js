@@ -489,14 +489,6 @@ async function resolveUser(chatId, targetName) {
     let u = await findSingleUser(chatId, cleanName);
     if (u) return u;
 
-    try {
-        const searchResults = await searchUserByName(chatId, cleanName);
-        if (searchResults && searchResults.length > 0) {
-            console.log(`[SYSTEM] Умный поиск: Нашли юзера по алиасу/досье! ID: ${searchResults[0].user_id}`);
-            return await getUser(chatId, searchResults[0].user_id);
-        }
-    } catch (e) { }
-
     return null;
 }
 
