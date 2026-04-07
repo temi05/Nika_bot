@@ -318,6 +318,24 @@ const HISTORY_LIMIT = 12;
 const FIRST_PASS_MAX_TOKENS = 900;
 const SECOND_PASS_MAX_TOKENS = 650;
 const MEMORY_FACTS_LIMIT = 6;
+const MAX_TOOL_ROUNDS = 3;
+
+const BAIT_TRIGGER_WORDS = new Set([
+    'пися', 'писька', 'писюн', 'жопа', 'попа', 'сиськи', 'сиси', 'хуй', 'член'
+]);
+
+const REACTION_ALIASES = {
+    fire: '🔥',
+    laugh: '😂',
+    lol: '😂',
+    clown: '🤡',
+    skull: '💀',
+    heart: '❤️',
+    eyes: '👀',
+    angry: '😡',
+    horny: '😏',
+    wow: '😳'
+};
 
 function trimHistory(history, maxLen = HISTORY_LIMIT) {
     if (history.length <= maxLen) return history;
@@ -345,6 +363,60 @@ async function fetchAIWithTimeout(payload, timeoutMs = 40000) {
     return Promise.race([apiCall, timeout]);
 }
 
+async function continueToolChain(chatId, finalPrompt, toolContext, maxRounds = MAX_TOOL_ROUNDS) {
+    let rounds = 0;
+    let directInjectedData = '';
+    let lastMessage = null;
+
+    while (rounds < maxRounds) {
+        rounds++;
+        const currentMessages = sanitizeHistory(chatHistory[chatId]);
+        const completion = await fetchAIWithTimeout({
+            model: AI_MODEL,
+            messages: [{ role: 'system', content: finalPrompt }, ...currentMessages],
+            tools: aiTools,
+            temperature: 0.5,
+            max_tokens: SECOND_PASS_MAX_TOKENS
+        }, 50000);
+
+        const resp = completion?.choices?.[0]?.message;
+        if (!resp) break;
+        lastMessage = resp;
+
+        if (!(resp.tool_calls || resp.function_call)) {
+            return { message: resp, directInjectedData };
+        }
+
+        chatHistory[chatId].push(resp);
+        const calls = resp.tool_calls || [resp.function_call];
+
+        for (const tc of calls) {
+            const res = await executeToolCall(
+                tc,
+                chatId,
+                toolContext.messageId,
+                toolContext.userName,
+                toolContext.userId,
+                toolContext.callerIsAdmin,
+                toolContext.userHandle
+            );
+            const fnName = tc.function ? tc.function.name : tc.name;
+
+            if (resp.tool_calls) {
+                chatHistory[chatId].push({ role: 'tool', tool_call_id: tc.id, name: fnName, content: String(res) });
+            } else {
+                chatHistory[chatId].push({ role: 'function', name: fnName, content: String(res) });
+            }
+
+            if (['user_lookup', 'moderate_user', 'create_poll', 'set_reminder', 'manage_memory', 'manage_user_profile'].includes(fnName)) {
+                if (!directInjectedData.includes(res)) directInjectedData += `\n\n${res}`;
+            }
+        }
+    }
+
+    return { message: lastMessage, directInjectedData };
+}
+
 function buildMemoryBlock(userName, relevantFacts) {
     if (!relevantFacts || !relevantFacts.trim()) {
         return `\n[КОНТЕКСТ]\nВремя (МСК): ${new Date().toLocaleString('ru-RU', { timeZone: 'Europe/Moscow' })}\n`;
@@ -358,6 +430,31 @@ function buildMemoryBlock(userName, relevantFacts) {
         .join('\n');
 
     return `\n[КРАТКАЯ ПАМЯТЬ О ${userName}]\n${trimmedFacts}\nВремя (МСК): ${new Date().toLocaleString('ru-RU', { timeZone: 'Europe/Moscow' })}\n`;
+}
+
+function isBaitTriggerMessage(text) {
+    const normalized = String(text || '')
+        .toLowerCase()
+        .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+        .trim();
+    if (!normalized) return false;
+    if (normalized.length > 24) return false;
+    const parts = normalized.split(/\s+/).filter(Boolean);
+    if (parts.length > 3) return false;
+    return parts.some(part => BAIT_TRIGGER_WORDS.has(part));
+}
+
+function normalizeReactionEmoji(value) {
+    const raw = String(value || '').trim();
+    if (!raw) return '🔥';
+
+    const alias = REACTION_ALIASES[raw.toLowerCase()];
+    if (alias) return alias;
+
+    const match = raw.match(/[\p{Extended_Pictographic}\u2600-\u27BF]/u);
+    if (match) return match[0];
+
+    return '🔥';
 }
 
 async function resolveUser(chatId, targetName) {
@@ -619,9 +716,18 @@ async function executeToolCall(toolCall, chatId, messageId, userName, userId, ca
             case 'send_chat_action': {
                 if (args.action === 'reaction') {
                     try {
-                        await bot.setMessageReaction(chatId, messageId, [{ type: 'emoji', emoji: args.value || '🔥' }]);
-                        return "OK.";
-                    } catch (e) { return `Ошибка реакции: ${e.message}`; }
+                        const emoji = normalizeReactionEmoji(args.value);
+                        await bot.setMessageReaction(chatId, messageId, [{ type: 'emoji', emoji }]);
+                        return `[SYSTEM: reaction:${emoji}]`;
+                    } catch (e) {
+                        try {
+                            const fallbackEmoji = normalizeReactionEmoji(args.value);
+                            await bot.sendMessage(chatId, fallbackEmoji, { reply_to_message_id: messageId });
+                            return `[SYSTEM: fallback_reaction:${fallbackEmoji}]`;
+                        } catch (e2) {
+                            return `Ошибка реакции: ${e.message}`;
+                        }
+                    }
                 } else {
                     let fileId = args.value;
                     if (!fileId || fileId.trim() === '' || fileId === 'random') {
@@ -819,7 +925,7 @@ async function processAI(msg, extra) {
     const textLower = userText.toLowerCase();
     const nameTriggered = textLower.includes('нейроника') || textLower.includes('нейронику') || textLower.includes('нейронике') || textLower.includes('neironika');
     const isReplyToBot = msg.reply_to_message && BOT_ID && msg.reply_to_message.from.id === BOT_ID;
-    const isMentioned = nameTriggered || isReplyToBot;
+    const isMentioned = nameTriggered || isReplyToBot || isBaitTriggerMessage(userText);
 
     if (msg.reply_to_message) {
         const rp = msg.reply_to_message;
@@ -1043,6 +1149,7 @@ async function processAI(msg, extra) {
                 second = await fetchAIWithTimeout({
                     model: AI_MODEL,
                     messages: [{ role: 'system', content: finalPrompt }, ...currentMessagesSecondCall],
+                    tools: aiTools,
                     temperature: 0.5,
                     max_tokens: SECOND_PASS_MAX_TOKENS
                 });
@@ -1053,6 +1160,7 @@ async function processAI(msg, extra) {
                     second = await fetchAIWithTimeout({
                         model: 'google/gemini-2.0-flash-001',
                         messages: [{ role: 'system', content: finalPrompt }, ...currentMessagesSecondCall],
+                        tools: aiTools,
                         temperature: 0.5,
                         max_tokens: SECOND_PASS_MAX_TOKENS
                     }, 50000); // 50 секунд для второго шанса
@@ -1063,6 +1171,33 @@ async function processAI(msg, extra) {
 
             // ИСПРАВЛЕНИЕ #3: Логика fallback-фраз (заглушек)
             let aiText = second?.choices?.[0]?.message?.content;
+            let extraRounds = 0;
+
+            while (second?.choices?.[0]?.message?.tool_calls && extraRounds < 2) {
+                extraRounds++;
+                const chainedResp = second.choices[0].message;
+                chatHistory[chatId].push(chainedResp);
+
+                for (const tc of chainedResp.tool_calls) {
+                    const res = await executeToolCall(tc, chatId, msg.message_id, userName, userId, callerIsAdmin, userHandle);
+                    const fnName = tc.function ? tc.function.name : tc.name;
+                    chatHistory[chatId].push({ role: 'tool', tool_call_id: tc.id, name: fnName, content: String(res) });
+
+                    if (['user_lookup', 'moderate_user', 'create_poll', 'set_reminder', 'manage_memory', 'manage_user_profile'].includes(fnName)) {
+                        if (!directInjectedData.includes(res)) directInjectedData += `\n\n${res}`;
+                    }
+                }
+
+                const chainedMessages = sanitizeHistory(chatHistory[chatId]);
+                second = await fetchAIWithTimeout({
+                    model: AI_MODEL,
+                    messages: [{ role: 'system', content: finalPrompt }, ...chainedMessages],
+                    tools: aiTools,
+                    temperature: 0.5,
+                    max_tokens: SECOND_PASS_MAX_TOKENS
+                }, 50000);
+                aiText = second?.choices?.[0]?.message?.content;
+            }
 
             if (!aiText) {
                 let isPunishment = false;

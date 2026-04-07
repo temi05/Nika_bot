@@ -235,58 +235,42 @@ async function setBio(chatId, userId, bio) {
 }
 
 async function setBioByUsernameOrName(chatId, queryName, bio) {
-    if (!queryName) return null;
-    let cleanName = queryName.replace('@', '').toLowerCase();
-    const latinName = transliterate(cleanName);
+    const data = await findBestUserMatch(chatId, queryName, {
+        select: 'id, first_name',
+        limit: 20,
+        minScore: 100,
+        excludeProfileFields: true
+    });
 
-    const { data, error } = await supabase
-        .from('users')
-        .select('id, first_name')
-        .eq('chat_id', chatId)
-        .or(`username.ilike.%${cleanName}%,first_name.ilike.%${cleanName}%,username.ilike.%${latinName}%,first_name.ilike.%${latinName}%`)
-        .limit(1)
-        .maybeSingle();
-
-    if (!data || error) return null;
+    if (!data) return null;
 
     await updateUser(data.id, { bio });
     return data.first_name;
 }
 
 async function setNotesByUsernameOrName(chatId, queryName, notes) {
-    if (!queryName) return null;
-    let cleanName = queryName.replace('@', '').toLowerCase().trim();
-    const stem = getStem(cleanName);
-    const latinStem = transliterate(stem);
+    const data = await findBestUserMatch(chatId, queryName, {
+        select: 'id, first_name',
+        limit: 20,
+        minScore: 100
+    });
 
-    const { data, error } = await supabase
-        .from('users')
-        .select('id, first_name')
-        .eq('chat_id', chatId)
-        .or(`username.ilike.%${cleanName}%,first_name.ilike.%${cleanName}%,username.ilike.%${latinStem}%,first_name.ilike.%${latinStem}%`)
-        .limit(1)
-        .maybeSingle();
-
-    if (!data || error) return null;
+    if (!data) return null;
 
     await updateUser(data.id, { ai_notes: notes });
     return data.first_name;
 }
 
 async function setFirstNameByUsernameOrName(chatId, queryName, newName) {
-    if (!queryName || !newName) return null;
-    let cleanName = queryName.replace('@', '').toLowerCase().trim();
-    const latinStem = transliterate(cleanName);
+    if (!newName) return null;
+    const data = await findBestUserMatch(chatId, queryName, {
+        select: 'id, first_name',
+        limit: 20,
+        minScore: 100,
+        excludeProfileFields: true
+    });
 
-    const { data, error } = await supabase
-        .from('users')
-        .select('id, first_name')
-        .eq('chat_id', chatId)
-        .or(`username.ilike.%${cleanName}%,first_name.ilike.%${cleanName}%,username.ilike.%${latinStem}%,first_name.ilike.%${latinStem}%`)
-        .limit(1)
-        .maybeSingle();
-
-    if (!data || error) return null;
+    if (!data) return null;
 
     await updateUser(data.id, { first_name: newName });
     return data.first_name;
@@ -328,21 +312,130 @@ function getStem(word) {
         .replace(/(s|es|ed|ing)$/i, '');
 }
 
-async function searchUserByName(chatId, query) {
+function normalizeUserSearchText(value) {
+    return String(value || '')
+        .toLowerCase()
+        .replace(/@/g, '')
+        .replace(/[^\p{L}\p{N}\s_-]/gu, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+}
+
+function buildUserSearchVariants(query) {
+    const clean = normalizeUserSearchText(query);
+    const variants = new Set();
+    if (!clean) return [];
+
+    variants.add(clean);
+    const stem = getStem(clean);
+    if (stem) variants.add(stem);
+
+    const translitClean = transliterate(clean);
+    if (translitClean) variants.add(translitClean);
+
+    const translitStem = transliterate(stem);
+    if (translitStem) variants.add(translitStem);
+
+    clean.split(/\s+/).forEach(part => {
+        if (!part) return;
+        variants.add(part);
+        const partStem = getStem(part);
+        if (partStem) variants.add(partStem);
+        const partTranslit = transliterate(part);
+        if (partTranslit) variants.add(partTranslit);
+    });
+
+    return Array.from(variants).filter(Boolean);
+}
+
+function scoreUserCandidate(user, variants) {
+    const fields = [
+        normalizeUserSearchText(user.first_name || ''),
+        normalizeUserSearchText(user.username || ''),
+        normalizeUserSearchText(user.bio || ''),
+        normalizeUserSearchText(user.ai_notes || '')
+    ];
+
+    let score = 0;
+    for (const variant of variants) {
+        if (!variant) continue;
+        const variantTokens = variant.split(/\s+/).filter(Boolean);
+
+        for (const field of fields) {
+            if (!field) continue;
+            if (field === variant) score = Math.max(score, 150);
+            if (field.startsWith(variant)) score = Math.max(score, 130);
+            if (field.includes(` ${variant}`) || field.includes(`${variant} `)) score = Math.max(score, 120);
+            if (field.includes(variant)) score = Math.max(score, 100);
+
+            for (const token of field.split(/\s+/)) {
+                if (token === variant) score = Math.max(score, 140);
+                else if (token.startsWith(variant)) score = Math.max(score, 125);
+                else if (variant.startsWith(token) && token.length >= 3) score = Math.max(score, 110);
+            }
+
+            if (variantTokens.length > 1) {
+                const hits = variantTokens.filter(token => field.includes(token)).length;
+                if (hits === variantTokens.length) score = Math.max(score, 135);
+                else if (hits > 0) score = Math.max(score, 105 + hits);
+            }
+        }
+    }
+
+    return score;
+}
+
+async function findBestUserMatch(chatId, query, options = {}) {
     if (!query) return null;
-    const cleanQuery = query.replace('@', '').toLowerCase().trim();
-    const stem = getStem(cleanQuery);
-    const latinStem = transliterate(stem);
+    const variants = buildUserSearchVariants(query);
+    if (variants.length === 0) return null;
+
+    const broadNeedles = Array.from(new Set(
+        variants
+            .map(v => v.slice(0, Math.max(3, Math.min(v.length, 8))))
+            .filter(v => v.length >= 3)
+    )).slice(0, 6);
+
+    const orParts = [];
+    for (const needle of broadNeedles) {
+        orParts.push(`username.ilike.%${needle}%`);
+        orParts.push(`first_name.ilike.%${needle}%`);
+        if (!options.excludeProfileFields) {
+            orParts.push(`bio.ilike.%${needle}%`);
+            orParts.push(`ai_notes.ilike.%${needle}%`);
+        }
+    }
+
+    if (orParts.length === 0) return null;
 
     const { data, error } = await supabase
         .from('users')
-        .select('user_id, first_name, username, level, xp, reputation, bio, ai_notes, warns, birthday')
+        .select(options.select || '*')
         .eq('chat_id', chatId)
-        .or(`username.ilike.%${stem}%,first_name.ilike.%${stem}%,username.ilike.%${latinStem}%,first_name.ilike.%${latinStem}%,ai_notes.ilike.%${stem}%,bio.ilike.%${stem}%`)
-        .limit(5);
+        .or(orParts.join(','))
+        .limit(options.limit || 40);
 
     if (error || !data || data.length === 0) return null;
-    return data.map(u => ({
+
+    const ranked = data
+        .map(user => ({ user, score: scoreUserCandidate(user, variants) }))
+        .filter(item => item.score >= (options.minScore || 100))
+        .sort((a, b) => b.score - a.score);
+
+    if (ranked.length === 0) return null;
+    return options.returnMany ? ranked : ranked[0].user;
+}
+
+async function searchUserByName(chatId, query) {
+    const matches = await findBestUserMatch(chatId, query, {
+        select: 'user_id, first_name, username, level, xp, reputation, bio, ai_notes, warns, birthday',
+        returnMany: true,
+        limit: 25,
+        minScore: 95
+    });
+
+    if (!matches || matches.length === 0) return null;
+    return matches.slice(0, 5).map(({ user: u }) => ({
         user_id: u.user_id,
         name: u.username ? `@${u.username}` : u.first_name,
         level: u.level,
@@ -355,19 +448,14 @@ async function searchUserByName(chatId, query) {
 }
 
 async function warnUserById(chatId, targetName) {
-    if (!targetName) return null;
-    const cleanName = targetName.replace('@', '').toLowerCase();
-    const latinName = transliterate(cleanName);
+    const data = await findBestUserMatch(chatId, targetName, {
+        select: 'id, first_name, username, warns, user_id',
+        limit: 20,
+        minScore: 100,
+        excludeProfileFields: true
+    });
 
-    const { data, error } = await supabase
-        .from('users')
-        .select('id, first_name, username, warns, user_id')
-        .eq('chat_id', chatId)
-        .or(`username.ilike.%${cleanName}%,first_name.ilike.%${cleanName}%,username.ilike.%${latinName}%,first_name.ilike.%${latinName}%`)
-        .limit(1)
-        .maybeSingle();
-
-    if (!data || error) return null;
+    if (!data) return null;
 
     const newWarns = (data.warns || 0) + 1;
     await updateUser(data.id, { warns: newWarns });
@@ -423,24 +511,12 @@ async function getUpcomingBirthdays(chatId) {
 }
 
 async function findSingleUser(chatId, query) {
-    if (!query) return null;
-    const cleanQuery = query.replace('@', '').toLowerCase().trim();
-    const stem = (cleanQuery.length > 3) ? getStem(cleanQuery) : cleanQuery;
-    const latinStem = transliterate(stem);
-
-    const { data: user, error } = await supabase
-        .from('users')
-        .select('*')
-        .eq('chat_id', chatId)
-        .or(`username.ilike.%${cleanQuery}%,first_name.ilike.%${cleanQuery}%,username.ilike.%${latinStem}%,first_name.ilike.%${latinStem}%`)
-        .limit(1)
-        .maybeSingle();
-
-    if (error) {
-        console.error('[DB ERROR] findSingleUser:', error.message || error);
-        return null;
-    }
-    return user;
+    const user = await findBestUserMatch(chatId, query, {
+        select: '*',
+        limit: 25,
+        minScore: 100
+    });
+    return user || null;
 }
 
 async function getBirthdaysToday(chatId) {
