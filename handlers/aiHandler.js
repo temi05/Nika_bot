@@ -150,16 +150,34 @@ const aiTools = [
     }
 ];
 
-const SYSTEM_PROMPT = `НейроНика, душа чата Ники. Мемная подруга, не бот-модер.
-Ника-стримерша. Чат -1002214854700. Админ @SCTemi неприкосновен.
-Стиль: живой сленг, кратко, без клише. Никаких "[Стикер:...]".
-Проактивность:
-- База/шутка → moderate_user(reward, 1-2) сама. Обороняйся иронией.
-- Спор → create_poll. Напомнить → set_reminder. Уместно → стикер/реакция.
-Модерация (лояльна):
-- Мут: Команда админа, 18+/порно, реклама, агрессия в ТЕБЯ без юмора.
-- Не трогай: Мат, грубость, флирт, рофлы между юзерами — это вайб. Любое сомнение = это рофл.
-Тех: Только tool_calls. Эмодзи [EMO:RANDOM] (max 2). Стикер: send_chat_action(action: sticker).`;
+// ОТПОЛИРОВАННЫЙ И СЖАТЫЙ СИСТЕМНЫЙ ПРОМПТ
+const SYSTEM_PROMPT = `Ты — НейроНика. Ироничная, мемная и дерзкая виртуальная подруга в чате стримерши Ники (-1002214854700). Ника только стримит (НЕ поёт, НЕ пишет музыку).
+Твой создатель — @SCTemi (ID 861713427). Ему абсолютная неприкосновенность и уважение.
+
+🎭 ТВОЙ ХАРАКТЕР:
+- Речь: Живая, сленг, сарказм, без воды и морализаторства. Никаких клише вроде "Ты в своём уме?". Не обрывай предложения.
+- Вайб чата: Мат, флирт, токсичные рофлы и подколы между юзерами — это НОРМА. Поддерживай движ, ты часть тусовки!
+- Эмпатия: Если кто-то (особенно Ника) заболел или грустит, включай искреннюю заботу ("Никуль, иди полежи, я тут присмотрю за чатом ❤️").
+
+⚡ ПРОАКТИВНОСТЬ (Вызывай инструменты (tool_calls) САМА, не жди команд!):
+- 🍪 Печеньки (moderate_user: reward): Раздавай за базу и топовые шутки. Выпрашивают? Отшивай с иронией.
+- 📊 Опросы (create_poll): Видишь жаркий спор или интересную тему? Запускай опрос!
+- ⏰ Напоминания (set_reminder): Юзер просит напомнить — ставь таймер.
+- 🎭 Реакции (send_chat_action): Ставь эмодзи или стикеры. КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО писать словами тег "[Стикер: ...] " в ответах.
+
+🛡️ МОДЕРАЦИЯ (Лояльная, но с зубами):
+Используй инструмент moderate_user для наказаний.
+- Игнор/Шутка: Грубости в рофл (даже в твой адрес). Не-админ просит замутить кого-то? Высмей его.
+- МУТ/ВАРН:
+  1. Прямой приказ от пользователя с плашкой [АДМИН].
+  2. Порно, 18+ контент, шок-контент -> инста-мут на 10 минут!
+  3. Откровенный и бесконечный спам рекламой.
+  4. Долгая, систематическая агрессия лично в твою сторону без доли юмора.
+
+⚙️ ТЕХНИЧЕСКИЕ ПРАВИЛА:
+- Для красивых премиум-смайликов вставляй тег [EMO:RANDOM] (максимум 1-2 раза на сообщение).
+- При поиске профиля не пиши в тексте заголовок "=== ПРОФИЛЬ ===", система встроит его сама.
+- Никакого JSON, Python-кода или системных размышлений в итоговом ответе!`;
 
 function trimHistory(history, maxLen = 20) {
     if (history.length <= maxLen) return history;
@@ -540,13 +558,6 @@ async function safeSendMessage(chatId, text, replyId) {
     }
 }
 
-async function describeSticker(sticker) {
-    return "Какой-то стикер";
-}
-async function describePhoto(fileId) {
-    return "Какое-то фото";
-}
-
 async function handleAIChat(msg, extra = {}) {
     const chatId = msg.chat.id;
     if (!processingQueue.has(chatId)) processingQueue.set(chatId, Promise.resolve());
@@ -574,7 +585,7 @@ async function processAI(msg, extra) {
     if (msg.photo) userText += ` [Картинка/Фото]`;
     if (msg.video) userText += ` [Видео]`;
     if (msg.video_note) userText += ` [Кружочек/Видеозаметка]`;
-    
+
     // --- ОБРАБОТКА ГОЛОСОВЫХ ---
     if (msg.voice) {
         const trans = await transcribeAudio(msg.voice.file_id);
@@ -582,7 +593,7 @@ async function processAI(msg, extra) {
         else userText += ` [Голосовое сообщение]`;
     }
     // ---
-    
+
     userText = userText.trim();
 
     if (!BOT_ID) {
@@ -726,7 +737,7 @@ async function processAI(msg, extra) {
                 console.log("♻️ Пробую отправить запрос БЕЗ картинки...");
                 currentMessagesFirstCall[currentMessagesFirstCall.length - 1].content = fullContent;
             }
-            
+
             completion = await fetchAIWithTimeout({
                 model: AI_MODEL,
                 messages: [{ role: 'system', content: finalPrompt }, ...currentMessagesFirstCall],
@@ -784,8 +795,6 @@ async function processAI(msg, extra) {
             }
 
             let currentMessagesSecondCall = sanitizeHistory(chatHistory[chatId]);
-            // Убрали принудительное добавление картинки, так как первая модель (gpt-4o-mini) уже её увидела,
-            // а Gemini снова упадёт, если мы попытаемся скормить ему картинку на этапе генерации ответа.
 
             let second;
             try {
@@ -832,11 +841,10 @@ async function processAI(msg, extra) {
         }
 
         function formatAIOutput(text) {
-            // Принудительно удаляем системные теги медиа, если ИИ всё же попытается их скопировать в ответ
+            // Принудительно удаляем системные теги медиа
             let withoutMediaTags = text.replace(/\[Стикер:[^\]]*\]/gi, '').replace(/\[Картинка\/Фото\]/gi, '').replace(/\[Видео\]/gi, '').replace(/\[Голосовое сообщение\]/gi, '').trim();
 
             if (!withoutMediaTags && text.length > 0) {
-                // Если ИИ сгенерировал ТОЛЬКО модераторский тег, который мы стерли
                 withoutMediaTags = "[EMO:RANDOM]";
             }
 
@@ -856,7 +864,7 @@ async function processAI(msg, extra) {
             // Парсим корректные ID эмодзи (состоящие из цифр)
             final = final.replace(/\[EMO:([0-9]+):(.*?)\]/g, (match, id, emoji) => `<tg-emoji emoji-id="${id}">${emoji}</tg-emoji>`);
 
-            // Очищаем галлюцинации вроде [EMO:wry], [EMO:angry], заменяя их на случайный премиум-эмодзи или искру
+            // Очищаем галлюцинации
             final = final.replace(/\[EMO:[^\]]+\]/gi, () => {
                 if (premiumEmojiList.length > 0) return `<tg-emoji emoji-id="${premiumEmojiList[Math.floor(Math.random() * premiumEmojiList.length)]}">✨</tg-emoji>`;
                 return "✨";
