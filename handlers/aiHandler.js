@@ -150,7 +150,6 @@ const aiTools = [
     }
 ];
 
-// ОТПОЛИРОВАННЫЙ И СЖАТЫЙ СИСТЕМНЫЙ ПРОМПТ
 const SYSTEM_PROMPT = `Ты — НейроНика. Ироничная, мемная и дерзкая виртуальная подруга в чате стримерши Ники (-1002214854700). Ника только стримит (НЕ поёт, НЕ пишет музыку).
 Твой создатель — @SCTemi (ID 861713427). Ему абсолютная неприкосновенность и уважение.
 
@@ -578,7 +577,18 @@ async function processAI(msg, extra) {
     const { userId, user: realUser } = getSenderData(msg);
     const dbUser = await getUser(chatId, userId, realUser);
 
+    // ИСПРАВЛЕНИЕ #1: Определение реального имени, если это канал или анонимный админ
     let userName = (dbUser && dbUser.first_name) ? dbUser.first_name : (realUser.first_name || 'Аноним');
+
+    // Если сообщение написано от имени канала
+    if (msg.sender_chat) {
+        userName = msg.sender_chat.title || userName;
+    }
+    // Если сообщение написано от имени анонимного администратора (GroupAnonymousBot)
+    else if (msg.from && msg.from.username === 'GroupAnonymousBot') {
+        userName = msg.author_signature || 'Анонимный Админ';
+    }
+
     let userHandle = realUser.username || "";
     let userText = msg.text || msg.caption || "";
     if (msg.sticker) userText += ` [Стикер: ${msg.sticker.emoji || 'какой-то стикер'}]`;
@@ -612,10 +622,21 @@ async function processAI(msg, extra) {
 
     if (msg.reply_to_message) {
         const rp = msg.reply_to_message;
-        rpAuthor = rp.from ? (rp.from.username === 'GroupAnonymousBot' ? (rp.author_signature || "Админ") : rp.from.first_name) : "Кто-то";
+
+        // ИСПРАВЛЕНИЕ #2: Корректное имя автора сообщения, на которое отвечают (для каналов)
+        if (rp.sender_chat) {
+            rpAuthor = rp.sender_chat.title || "Канал";
+        } else if (rp.from) {
+            if (rp.from.username === 'GroupAnonymousBot') {
+                rpAuthor = rp.author_signature || "Анонимный Админ";
+            } else {
+                rpAuthor = rp.from.first_name || "Кто-то";
+            }
+        }
+
         replyPrefix = `(в ответ ${rpAuthor}: "${(rp.text || rp.caption || "медиа").slice(0, 30)}...") `;
 
-        if (isMentioned && rp.from.id !== BOT_ID) {
+        if (isMentioned && rp.from && rp.from.id !== BOT_ID) {
             const cleanText = textLower.replace(/[^\wа-яё]/gi, '');
             if (cleanText.length <= 30) {
                 replyIdForBot = rp.message_id;
@@ -655,7 +676,7 @@ async function processAI(msg, extra) {
     }
 
     if (!activeParticipants[chatId]) activeParticipants[chatId] = {};
-    activeParticipants[chatId][userId] = { firstName: msg.from.first_name, username: msg.from.username || '', lastSeen: Date.now() };
+    activeParticipants[chatId][userId] = { firstName: userName, username: msg.from?.username || '', lastSeen: Date.now() };
 
     // Очищаем устаревших участников (TTL: 24 часа)
     const PARTICIPANT_TTL = 24 * 60 * 60 * 1000;
@@ -805,24 +826,49 @@ async function processAI(msg, extra) {
                     max_tokens: 2500
                 });
             } catch (e2) {
-                // Страховка на случай падения второго вызова
-                second = await fetchAIWithTimeout({
-                    model: 'google/gemini-2.0-flash-001',
-                    messages: [{ role: 'system', content: finalPrompt }, ...currentMessagesSecondCall],
-                    temperature: 0.7,
-                    max_tokens: 2500
-                });
+                console.error("❌ Ошибка второго вызова AI (после использования инструмента):", e2.message);
+                // Страховка на случай падения второго вызова (с увеличенным таймаутом и резервной моделью)
+                try {
+                    second = await fetchAIWithTimeout({
+                        model: 'google/gemini-2.0-flash-001',
+                        messages: [{ role: 'system', content: finalPrompt }, ...currentMessagesSecondCall],
+                        temperature: 0.7,
+                        max_tokens: 2500
+                    }, 50000); // 50 секунд для второго шанса
+                } catch (e3) {
+                    console.error("❌ Резервный вызов также упал:", e3.message);
+                }
             }
 
-            const fallbackPhrases = [
-                "Нарушитель изолирован. 💅",
-                "Минус один. 🔨",
-                "Фу, какая гадость... Отправила в бан. 🗑️",
-                "В следующий раз думай, что скидываешь. 🤐",
-                "Я всё вижу, даже если молчу. 👁️",
-                "Секундочку... отправляю отдыхать. 💅"
-            ];
-            let aiText = second.choices?.[0]?.message?.content || fallbackPhrases[Math.floor(Math.random() * fallbackPhrases.length)];
+            // ИСПРАВЛЕНИЕ #3: Логика fallback-фраз (заглушек)
+            let aiText = second?.choices?.[0]?.message?.content;
+
+            if (!aiText) {
+                // Если текст так и не сгенерировался, проверяем, какой инструмент мы вызывали
+                const wasModerationCalled = calls.some(c =>
+                    (c.function?.name === 'moderate_user' || c.name === 'moderate_user') &&
+                    c.function?.arguments?.includes('mute')
+                );
+
+                if (wasModerationCalled) {
+                    // Если это был вызов мута/варна, используем крутые фразы
+                    const fallbackPhrases = [
+                        "Нарушитель изолирован. 💅",
+                        "Минус один. 🔨",
+                        "Фу, какая гадость... Отправила в бан. 🗑️",
+                        "Секундочку... отправляю отдыхать. 💅"
+                    ];
+                    aiText = fallbackPhrases[Math.floor(Math.random() * fallbackPhrases.length)];
+                } else {
+                    // Если это был поиск фактов (Ибанов Лорант), профиля или другой обычный запрос
+                    const errorPhrases = [
+                        "Ой, что-то я запуталась... Можешь повторить?",
+                        "Блин, процессор закипел. Еще раз спроси!",
+                        "Хм, я задумалась и забыла, что хотела сказать. 😅"
+                    ];
+                    aiText = errorPhrases[Math.floor(Math.random() * errorPhrases.length)];
+                }
+            }
 
             if (directInjectedData) {
                 const profileIndex = aiText.indexOf('=== ПРОФИЛЬ');

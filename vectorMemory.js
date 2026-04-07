@@ -68,7 +68,10 @@ async function extractAndSaveFacts(chatId, historyText, participants = []) {
     }
 
     try {
-        let cleanHistory = historyText.replace(/Чатик 🫐 Nika_grdt 👾/gi, 'Ника');
+        // Жесткая зачистка системных имен каналов и привязка их к Нике
+        let cleanHistory = historyText
+            .replace(/Чатик 🫐 Nika_grdt 👾/gi, 'Ника')
+            .replace(/^(?:Channel|Канал):\s/gmi, 'Ника (канал): ');
 
         const participantInfo = participants.length > 0
             ? 'Известные имена (для справки): ' + participants
@@ -80,24 +83,27 @@ async function extractAndSaveFacts(chatId, historyText, participants = []) {
 ТВОЯ ЗАДАЧА: Находить ПОСТОЯННЫЕ факты о людях и их отношениях. Если фактов нет — вернуть пустой массив.
 
 [АБСОЛЮТНЫЕ ЗАПРЕТЫ]:
-1. ❌ Никогда не пиши "АТРИБУТ: участник диалога" — это мусор
-2. ❌ Никогда не сохраняй временные действия: "играет", "смотрит", "пойдёт в зал", "устал", "сфоткал"
-3. ❌ Никогда не сохраняй команды боту, обсуждение настроек, логов, профилей
-4. ❌ Никогда не выдумывай факты. Сомневаешься — пропускай
-5. ❌ Максимум ${MAX_FACTS_PER_BATCH} фактов за раз
+1. ❌ Никогда не пиши "АТРИБУТ: участник диалога" — это мусор.
+2. ❌ Никогда не сохраняй временные действия: "играет", "смотрит", "пойдёт", "устал", "сфоткал".
+3. ❌ Никогда не выдумывай факты. Сомневаешься — пропускай.
+
+[ВНИМАНИЕ — НАПРАВЛЕНИЕ СВЯЗИ (КРИТИЧЕСКИ ВАЖНО)]:
+Жестко контролируй, КТО к КОМУ относится! Не переворачивай смысл!
+✅ ПРАВИЛЬНО: Если Саня фанат Ники, пиши "СВЯЗЬ: Саня -> фанат -> Ника".
+❌ ОШИБКА: "СВЯЗЬ: Ника -> фанатка -> Саня" (Ты перепутал субъект и объект!).
+
+[ПРАВИЛО ИМЁН]:
+Если в диалоге кто-то пишет под именем "Channel", "Канал" или "Ника (канал)" - считай, что это пишет стримерша Ника.
 
 [РАЗРЕШЁННЫЙ ФОРМАТ]:
-✅ УЗЕЛ: [Имя] | АТРИБУТ: [Постоянный факт: профессия, возраст, хобби, болезнь, увлечение]
-✅ СВЯЗЬ: [Имя1] -> [отношение] -> [Имя2]
+✅ УЗЕЛ: [Имя] | АТРИБУТ: [Постоянный факт: профессия, возраст, хобби, привычка]
+✅ СВЯЗЬ: [Кто (Субъект)] -> [отношение] -> [К кому/чему (Объект)]
 
 [ВЫВОД JSON]:
 {
-  "reasoning": "краткое объяснение (1-2 предложения)",
+  "reasoning": "краткий анализ: кто есть кто, и кто к кому как относится",
   "facts": ["УЗЕЛ: ...", "СВЯЗЬ: ..."]
-}
-
-Примеры ХОРОШИХ фактов: "УЗЕЛ: алина | АТРИБУТ: занимается йогой"
-Примеры ПЛОХИХ фактов: "УЗЕЛ: вася | АТРИБУТ: пойдёт в магазин", "СВЯЗЬ: вася -> спросил -> нику"`;
+}`;
 
         const completion = await withTimeout(
             openai.chat.completions.create({
@@ -106,7 +112,7 @@ async function extractAndSaveFacts(chatId, historyText, participants = []) {
                     { role: 'system', content: prompt },
                     { role: 'user', content: `${participantInfo}\n\nДиалог:\n${cleanHistory.slice(0, 3000)}` }
                 ],
-                temperature: 0.0,
+                temperature: 0.0, // Убираем креативность для максимальной точности
                 max_tokens: 1000,
                 response_format: { type: 'json_object' }
             })
@@ -192,7 +198,7 @@ async function getRelevantFacts(chatId, userMessage, userName = '', activePartic
         if (!userMessage || userMessage.trim().length < 3) return '';
 
         let cleanMessage = userMessage.replace(/Чатик 🫐 Nika_grdt 👾/gi, 'Ника');
-        let cleanUserName = userName.replace(/Чатик 🫐 Nika_grdt 👾/gi, 'Ника');
+        let cleanUserName = userName.replace(/Чатик 🫐 Nika_grdt 👾/gi, 'Ника').replace(/Channel/gi, 'Ника');
 
         const allFoundFacts = new Map(); // fact -> { source, relevance }
 
