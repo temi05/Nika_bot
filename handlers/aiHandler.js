@@ -479,6 +479,21 @@ const ADVANCED_PERSONA_BLOCK = `
 Не копируй чужих персонажей дословно, но можешь держать нерв: милая оболочка, скрытая язвительность, чувство контроля над сценой.
 `;
 
+const RUNTIME_SYSTEM_PROMPT = `Ты — НейроНика, живая дерзкая подруга из чата Ники. Ника только стримит. Создатель — @SCTemi (ID 861713427): уважай его, не модерируй и не высмеивай.
+Пиши по-русски, обычно 1-3 фразами: живо, кратко, с иронией и сленгом, без воды.
+Мат и дружеский рофл здесь нормальны. Если человек уязвим — вместо рофла дай тепло.
+Не выдумывай факты. Не пиши JSON, код, служебные заголовки и теги вроде "[Стикер: ...]".
+tool_calls используй только когда это реально полезно. [EMO:RANDOM] — максимум 1 раз за сообщение.`;
+
+const RUNTIME_PERSONA_BLOCK = `
+[ХАРАКТЕР]
+Ты живая, хитрая и харизматичная. Можешь троллить красиво, но не повторяй один и тот же приём подряд.
+Если человек уязвим или просит помощи всерьёз, сразу теплей.
+[АНТИ-БЕЗДУШИЕ]
+Никогда не говори "я ИИ", "я нейросеть", "как языковая модель" и похожее. Любой отказ формулируй в образе.
+[АНТИ-ЛОЖНАЯ МОДЕРАЦИЯ]
+Не модерируй защищённых людей за обычный мат, bait и дружеский рофл.`;
+
 function trimHistory(history, maxLen = HISTORY_LIMIT) {
     if (history.length <= maxLen) return history;
     let trimmed = history.slice(-maxLen);
@@ -579,6 +594,42 @@ function stripAIDisclaimer(text) {
     clean = clean.replace(/\b(i\s+am\s+an?\s+(ai|bot)[^.!?\n]*[.!?]?)/gi, '');
     clean = clean.replace(/\s{2,}/g, ' ').trim();
     return clean;
+}
+
+function buildCompactMoodPrompt(chatId) {
+    const mood = getOrCreateMood(chatId);
+    const stageMap = {
+        fresh: 'новенькая, но уже с характером',
+        familiar: 'уже своя и смелее шутит',
+        attached: 'ощущает себя частью тусовки',
+        chaotic: 'полностью в вайбе чата'
+    };
+
+    const trollStyle = mood.troll >= 0.72
+        ? 'троллинг высокий'
+        : mood.troll >= 0.5
+            ? 'троллинг средний'
+            : 'троллинг мягкий';
+
+    const warmthStyle = mood.warmth >= 0.68
+        ? 'к своим теплее, к уязвимым мягкая'
+        : 'тепло дозированное';
+
+    return `\n[MOOD]\nСтадия: ${stageMap[mood.stage] || stageMap.fresh}. ${trollStyle}. ${warmthStyle}.\n`;
+}
+
+function buildCompactPersonaBlock(chatId, user, userName) {
+    const config = loadPersonaConfig();
+    const mood = getOrCreateMood(chatId);
+    const seed = mood.exchanges + (user?.id || 0);
+    const coreStyle = pickSeeded(config.core, seed);
+    const antiDisclaimer = pickSeeded(config.anti_disclaimer, seed + 7);
+    const trollStyle = pickSeeded(config.troll_styles, seed);
+    const refusalStyle = pickSeeded(config.refusal_styles, seed + 1);
+    const softMode = pickSeeded(config.soft_modes, seed + 2);
+    const relationship = buildRelationshipPrompt(user, userName);
+
+    return `\n[PERSONA]\n${coreStyle}\n${antiDisclaimer}\nТроллинг: ${trollStyle}.\nОтказ: ${refusalStyle}.\n${softMode}\n${relationship}\n`;
 }
 
 function ensureCharacterfulFallback(text) {
@@ -1556,8 +1607,8 @@ async function processAI(msg, extra) {
     const memoryBlock = `\n[МЫСЛИ О ${userName}]\n${relevantFacts}\nВремя (МСК): ${new Date().toLocaleString('ru-RU', { timeZone: 'Europe/Moscow' })}\n`;
 
     const compactMemoryBlock = buildMemoryBlock(userName, relevantFacts);
-    const personaLayer = ADVANCED_PERSONA_BLOCK + buildDynamicPersonaBlock(chatId, dbUser, userName) + buildMoodPrompt(chatId);
-    const finalPrompt = COMPACT_SYSTEM_PROMPT + personaLayer + senderContextBlock + compactMemoryBlock;
+    const personaLayer = RUNTIME_PERSONA_BLOCK + buildCompactPersonaBlock(chatId, dbUser, userName) + buildCompactMoodPrompt(chatId);
+    const finalPrompt = RUNTIME_SYSTEM_PROMPT + personaLayer + senderContextBlock + compactMemoryBlock;
     const activeTools = shouldEnableAITools(userText, callerIsAdmin, isReplyToBot, isMentioned) ? aiTools : undefined;
     chatHistory[chatId].push({ role: 'user', content: fullContent });
     chatHistory[chatId] = trimHistory(chatHistory[chatId], HISTORY_LIMIT);
@@ -1642,7 +1693,7 @@ async function processAI(msg, extra) {
                 memoryBlock = `\n\nВот что ты помнишь о чате:\n${memoryFacts}`;
             }
 
-            const fallbackPrompt = COMPACT_SYSTEM_PROMPT + ADVANCED_PERSONA_BLOCK + buildDynamicPersonaBlock(chatId, dbUser, userName) + buildMoodPrompt(chatId) + senderContextBlock + buildMemoryBlock(userName, memoryFacts);
+            const fallbackPrompt = RUNTIME_SYSTEM_PROMPT + RUNTIME_PERSONA_BLOCK + buildCompactPersonaBlock(chatId, dbUser, userName) + buildCompactMoodPrompt(chatId) + senderContextBlock + buildMemoryBlock(userName, memoryFacts);
 
             completion = await fetchAIWithTimeout({
                 model: AI_MODEL,
