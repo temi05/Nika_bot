@@ -810,7 +810,7 @@ async function processAI(msg, extra) {
                     chatHistory[chatId].push({ role: 'function', name: fnName, content: String(res) });
                 }
 
-                if (['get_user_profile', 'find_users_by_criteria', 'give_cookies', 'mute_user', 'warn_user', 'create_poll', 'set_reminder'].includes(fnName)) {
+                if (['user_lookup', 'moderate_user', 'create_poll', 'set_reminder', 'manage_memory', 'manage_user_profile'].includes(fnName)) {
                     if (!directInjectedData.includes(res)) directInjectedData += `\n\n${res}`;
                 }
             }
