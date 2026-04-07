@@ -15,7 +15,7 @@ console.log('✅ [VECTOR MEMORY] Модуль улучшенной памяти 
 
 const POLZA_API_KEY = process.env.POLZA_API_KEY || 'pza_Ut5ahRtIFZSzj_jKezwdRvQMMebqZ1BI';
 const EXTRACTOR_MODEL = process.env.MEMORY_EXTRACTOR_MODEL || 'gpt-4.1-mini';
-const EMBEDDING_MODEL = 'text-embedding-3-small';
+const EMBEDDING_MODEL = process.env.EMBEDDING_MODEL || 'text-embedding-3-small';
 
 const MIN_HISTORY_LENGTH = 140;
 const MAX_FACTS_PER_BATCH = 5;
@@ -23,6 +23,9 @@ const MAX_FACTS_IN_CONTEXT = 6;
 const MAX_KEYWORDS = 4;
 const MAX_SUMMARIES_IN_CONTEXT = 2;
 const AI_TIMEOUT_MS = 30000;
+const EMBEDDING_LOG_COOLDOWN_MS = 5 * 60 * 1000;
+
+let lastEmbeddingWarningAt = 0;
 
 const openai = new OpenAI({
     apiKey: POLZA_API_KEY,
@@ -34,6 +37,23 @@ async function withTimeout(promise, ms = AI_TIMEOUT_MS) {
         setTimeout(() => reject(new Error('AI_TIMEOUT')), ms);
     });
     return Promise.race([promise, timeout]);
+}
+
+function logEmbeddingWarning(message, extra = '') {
+    const now = Date.now();
+    if (now - lastEmbeddingWarningAt < EMBEDDING_LOG_COOLDOWN_MS) return;
+    lastEmbeddingWarningAt = now;
+    console.error(`[VECTOR] ${message}${extra ? `: ${extra}` : ''}`);
+}
+
+function extractEmbeddingVector(response) {
+    if (!response) return null;
+    if (Array.isArray(response?.data) && Array.isArray(response.data[0]?.embedding)) return response.data[0].embedding;
+    if (Array.isArray(response?.embedding)) return response.embedding;
+    if (Array.isArray(response?.data?.embedding)) return response.data.embedding;
+    if (Array.isArray(response?.embeddings?.[0]?.embedding)) return response.embeddings[0].embedding;
+    if (Array.isArray(response?.result?.data?.[0]?.embedding)) return response.result.data[0].embedding;
+    return null;
 }
 
 function normalizeName(value) {
@@ -72,6 +92,38 @@ function buildFactText(item) {
         return `СВЯЗЬ: ${item.subject} -> ${item.relation} -> ${item.object}`;
     }
     return `УЗЕЛ: ${item.subject} | ${item.attribute}: ${item.value}`;
+}
+
+function isSexualMemoryContent(text) {
+    const normalized = normalizeText(text).toLowerCase();
+    if (!normalized) return false;
+
+    const blockedPatterns = [
+        'бдсм', 'bdsm', 'кинк', 'kink', 'секс', 'sex', 'эрот', 'фетиш', 'fetish',
+        'roleplay 18', 'ролевые игры', '50 оттен', 'грубости', 'доминир', 'сабмис',
+        'nsfw', 'порно', 'porn', 'хентай', 'nudes', 'нюдс', 'флиртует', 'испытывает симпатию'
+    ];
+
+    return blockedPatterns.some(pattern => normalized.includes(pattern));
+}
+
+function shouldKeepMemoryFact(fact) {
+    if (!fact) return false;
+
+    if (typeof fact.fact === 'string') {
+        return !isSexualMemoryContent(fact.fact);
+    }
+
+    const mergedText = [
+        fact.subject,
+        fact.attribute,
+        fact.value,
+        fact.relation,
+        fact.object,
+        fact.meta?.evidence
+    ].filter(Boolean).join(' ');
+
+    return !isSexualMemoryContent(mergedText);
 }
 
 function convertExtractedFact(rawFact) {
@@ -185,7 +237,11 @@ async function createEmbedding(text) {
         const res = await withTimeout(
             openai.embeddings.create({ model: EMBEDDING_MODEL, input: text.slice(0, 512) })
         );
-        return res.data[0].embedding;
+        const embedding = extractEmbeddingVector(res);
+        if (embedding) return embedding;
+        const responseKeys = Object.keys(res || {}).slice(0, 8).join(', ');
+        logEmbeddingWarning('Ошибка эмбеддинга', `неожиданный формат ответа у модели ${EMBEDDING_MODEL}${responseKeys ? ` | keys: ${responseKeys}` : ''}`);
+        return null;
     } catch (e) {
         if (e.message !== 'AI_TIMEOUT') {
             console.error('[VECTOR] Ошибка эмбеддинга:', e.message);
@@ -269,11 +325,11 @@ async function extractAndSaveFacts(chatId, historyText, participants = []) {
         }
 
         const extractedFacts = Array.isArray(parsed.facts)
-            ? parsed.facts.map(convertExtractedFact).filter(Boolean).slice(0, MAX_FACTS_PER_BATCH)
+            ? parsed.facts.map(convertExtractedFact).filter(Boolean).filter(shouldKeepMemoryFact).slice(0, MAX_FACTS_PER_BATCH)
             : [];
 
         if (extractedFacts.length === 0) {
-            const fallbackFacts = fallbackFactsFromText(rawContent).slice(0, MAX_FACTS_PER_BATCH);
+            const fallbackFacts = fallbackFactsFromText(rawContent).filter(shouldKeepMemoryFact).slice(0, MAX_FACTS_PER_BATCH);
             for (const fact of fallbackFacts) {
                 const exists = await checkFactExists(chatId, fact);
                 if (exists) continue;

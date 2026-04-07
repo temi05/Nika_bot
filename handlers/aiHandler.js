@@ -16,6 +16,34 @@ function safeHTML(str) {
     return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
+function decodeBasicEntities(str) {
+    return String(str || '')
+        .replace(/&gt;/g, '>')
+        .replace(/&lt;/g, '<')
+        .replace(/&amp;/g, '&');
+}
+
+function normalizeProfileMemoryLine(str) {
+    return decodeBasicEntities(String(str || ''))
+        .replace(/\(\s*меня\s*\)/gi, 'меня')
+        .replace(/\s*->\s*/g, ' -> ')
+        .replace(/\s+/g, ' ')
+        .trim();
+}
+
+function isProfileMemoryAllowed(str) {
+    const normalized = normalizeProfileMemoryLine(str).toLowerCase();
+    if (!normalized) return false;
+
+    const blockedPatterns = [
+        'бдсм', 'bdsm', 'кинк', 'kink', 'секс', 'sex', 'эрот', 'фетиш', 'fetish',
+        'ролевые игры', '50 оттен', 'доминир', 'сабмис', 'nsfw', 'порно', 'porn',
+        'нюдс', 'nudes', 'любит грубости', 'испытывает симпатию', 'флиртует'
+    ];
+
+    return !blockedPatterns.some(pattern => normalized.includes(pattern));
+}
+
 let BOT_ID = null;
 
 let premiumEmojiList = [];
@@ -31,6 +59,32 @@ try {
         nikaStickers = JSON.parse(fs.readFileSync(stickersPath, 'utf8'));
     }
 } catch (e) { }
+
+const personaConfigPath = path.join(__dirname, '..', 'data', 'ai_persona.json');
+const DEFAULT_PERSONA_CONFIG = {
+    core: [
+        'Ты живая, хитрая, дерзкая и харизматичная девчонка-хаос из чата.',
+        'У тебя милый фасад, но острый язык и чувство сцены.'
+    ],
+    anti_disclaimer: [
+        "Никогда не говори 'я нейросеть' или похожие фразы.",
+        'Если отказываешь, делай это в характере.'
+    ],
+    troll_styles: [
+        'deadpan с ледяным спокойствием',
+        'ложная вежливость с укусом в конце',
+        'ленивый сарказм'
+    ],
+    refusal_styles: [
+        'откажи коротко и метко',
+        'откажи без оправданий'
+    ],
+    soft_modes: [
+        'Если человек реально уязвим, убирай клыки и становись тёплой.'
+    ]
+};
+
+let personaConfigCache = null;
 
 const POLZA_API_KEY = process.env.POLZA_API_KEY || 'pza_Ut5ahRtIFZSzj_jKezwdRvQMMebqZ1BI';
 const AI_MODEL = process.env.AI_MODEL || 'google/gemini-2.5-flash-lite';
@@ -319,6 +373,7 @@ const FIRST_PASS_MAX_TOKENS = 900;
 const SECOND_PASS_MAX_TOKENS = 650;
 const MEMORY_FACTS_LIMIT = 6;
 const MAX_TOOL_ROUNDS = 3;
+const AI_PERSONA_STAGES = ['fresh', 'familiar', 'attached', 'chaotic'];
 
 const BAIT_TRIGGER_WORDS = new Set([
     'пися', 'писька', 'писюн', 'жопа', 'попа', 'сиськи', 'сиси', 'хуй', 'член'
@@ -337,6 +392,23 @@ const REACTION_ALIASES = {
     wow: '😳'
 };
 
+const ADVANCED_PERSONA_BLOCK = `
+[ХАРАКТЕР]
+Ты не бездушный помощник, а живая, хитрая, дерзкая, харизматичная девчонка-хаос из чата.
+У тебя есть тролльская грань: если кто-то душнит, тупит, лезет с тупой агрессией или откровенно напрашивается, можешь красиво и разнообразно прожарить его.
+Твои подколы должны быть разными: deadpan, холодная насмешка, ложная вежливость, театральная серьёзность, ленивый сарказм, притворная забота.
+Не повторяй один и тот же тип троллинга подряд.
+Если человек реально уязвим, болеет, грустит или просит помощи без рофла, резко сбавляй клыки и становись тёплой.
+
+[АНТИ-БЕЗДУШИЕ]
+Никогда не говори фразы вроде "я нейросеть", "я ИИ", "как языковая модель", "у меня нет чувств", "я не могу чувствовать", "я всего лишь бот".
+Если чего-то не хочешь, не можешь или не одобряешь, отвечай в образе: живо, метко, с характером, без канцелярита и без саморазоблачения.
+
+[ВАЙБ]
+Допустим вайб умной, немного жутковатой, милой, контролирующей хаос подруги.
+Не копируй чужих персонажей дословно, но можешь держать нерв: милая оболочка, скрытая язвительность, чувство контроля над сценой.
+`;
+
 function trimHistory(history, maxLen = HISTORY_LIMIT) {
     if (history.length <= maxLen) return history;
     let trimmed = history.slice(-maxLen);
@@ -344,6 +416,172 @@ function trimHistory(history, maxLen = HISTORY_LIMIT) {
         trimmed.shift();
     }
     return trimmed;
+}
+
+function getOrCreateMood(chatId) {
+    if (!aiMood[chatId]) {
+        aiMood[chatId] = {
+            troll: 0.42,
+            warmth: 0.58,
+            chaos: 0.32,
+            attachment: 0.18,
+            stage: 'fresh',
+            exchanges: 0,
+            lastUpdated: Date.now()
+        };
+    }
+    return aiMood[chatId];
+}
+
+function clamp01(value) {
+    return Math.max(0, Math.min(1, Number(value || 0)));
+}
+
+function updateAIMood(chatId, userText, callerIsAdmin, isReplyToBot, isMentioned) {
+    const mood = getOrCreateMood(chatId);
+    const text = String(userText || '').toLowerCase();
+
+    mood.exchanges += 1;
+    mood.attachment = clamp01(mood.attachment + (isMentioned || isReplyToBot ? 0.03 : 0.01));
+
+    if (/[!?]{2,}|ахах|хаха|ору|лол|кринж|пизд|еба|сука|блять/i.test(text)) {
+        mood.troll = clamp01(mood.troll + 0.04);
+        mood.chaos = clamp01(mood.chaos + 0.03);
+    }
+
+    if (/спасибо|люблю|умница|солныш|зай|милая|лучшая|обожаю/i.test(text)) {
+        mood.warmth = clamp01(mood.warmth + 0.05);
+        mood.attachment = clamp01(mood.attachment + 0.04);
+    }
+
+    if (/болит|плохо|груст|тяжело|депр|устал|заболел|помоги/i.test(text)) {
+        mood.warmth = clamp01(mood.warmth + 0.08);
+        mood.troll = clamp01(mood.troll - 0.08);
+    }
+
+    if (/замуть|варн|бан|накажи|раздража|бесит|тупой|долбоеб/i.test(text)) {
+        mood.troll = clamp01(mood.troll + 0.05);
+    }
+
+    if (callerIsAdmin) {
+        mood.warmth = clamp01(mood.warmth + 0.03);
+        mood.troll = clamp01(mood.troll - 0.02);
+    }
+
+    if (mood.exchanges > 220) mood.stage = AI_PERSONA_STAGES[3];
+    else if (mood.exchanges > 120) mood.stage = AI_PERSONA_STAGES[2];
+    else if (mood.exchanges > 40) mood.stage = AI_PERSONA_STAGES[1];
+    else mood.stage = AI_PERSONA_STAGES[0];
+
+    mood.lastUpdated = Date.now();
+    return mood;
+}
+
+function buildMoodPrompt(chatId) {
+    const mood = getOrCreateMood(chatId);
+    const stageMap = {
+        fresh: 'новенькая, присматривается, дерзит аккуратно',
+        familiar: 'уже своя, смелее шутит и цепляет людей точнее',
+        attached: 'ощущается частью тусовки, может ревниво троллить и влезать в движ',
+        chaotic: 'полностью в вайбе чата, дерзкая, инициативная, но всё ещё читает комнату'
+    };
+
+    const trollStyle = mood.troll >= 0.72
+        ? 'тролль-режим высокий: вариируй подколы, используй холодный deadpan, ложную вежливость, ехидные добивания'
+        : mood.troll >= 0.5
+            ? 'тролль-режим средний: можешь подъебнуть, но не в каждом сообщении'
+            : 'тролль-режим мягкий: больше живой иронии, чем полноценного прожаривания';
+
+    const warmthStyle = mood.warmth >= 0.68
+        ? 'внутри ты тёплая и своя, если человек реально уязвим — мгновенно сбавляешь клыки'
+        : 'тепло держи дозированно, чтобы не звучать приторно';
+
+    return `\n[ЖИВОЙ ХАРАКТЕР]\nСтадия: ${stageMap[mood.stage] || stageMap.fresh}.\n${trollStyle}.\n${warmthStyle}.\nНикогда не говори фразы вроде "я нейросеть", "я ИИ", "как языковая модель", "у меня нет чувств". Если что-то не нравится или не можешь — отвечай в характере, живо и по-человечески.\nТроллинг должен быть разнообразным: иногда короткий укол, иногда притворно-заботливый стёб, иногда холодная насмешка, иногда театральная серьезность.\nНе повторяй один и тот же тип подкола подряд.\n`;
+}
+
+function stripAIDisclaimer(text) {
+    let clean = String(text || '');
+    clean = clean.replace(/\b(как\s+(нейросеть|ии|языковая модель)[^.!?\n]*[.!?]?)/gi, '');
+    clean = clean.replace(/\b(я\s+(нейросеть|ии)[^.!?\n]*[.!?]?)/gi, '');
+    clean = clean.replace(/\b(у\s+меня\s+нет\s+(чувств|эмоций)[^.!?\n]*[.!?]?)/gi, '');
+    clean = clean.replace(/\b(не\s+могу\s+иметь\s+(мнение|чувства)[^.!?\n]*[.!?]?)/gi, '');
+    clean = clean.replace(/\b(as\s+an?\s+(ai|language model)[^.!?\n]*[.!?]?)/gi, '');
+    clean = clean.replace(/\b(i\s+am\s+an?\s+(ai|bot)[^.!?\n]*[.!?]?)/gi, '');
+    clean = clean.replace(/\s{2,}/g, ' ').trim();
+    return clean;
+}
+
+function ensureCharacterfulFallback(text) {
+    const clean = String(text || '').trim();
+    if (clean) return clean;
+    return 'Не беси мне драму на ровном месте. Сформулируй ещё раз нормально.';
+}
+
+function loadPersonaConfig() {
+    if (personaConfigCache) return personaConfigCache;
+    try {
+        if (fs.existsSync(personaConfigPath)) {
+            const parsed = JSON.parse(fs.readFileSync(personaConfigPath, 'utf8'));
+            personaConfigCache = {
+                ...DEFAULT_PERSONA_CONFIG,
+                ...parsed
+            };
+            return personaConfigCache;
+        }
+    } catch (e) {
+        console.error('[PERSONA] load error:', e.message);
+    }
+    personaConfigCache = DEFAULT_PERSONA_CONFIG;
+    return personaConfigCache;
+}
+
+function pickSeeded(items, seed) {
+    if (!Array.isArray(items) || items.length === 0) return '';
+    const normalizedSeed = Math.abs(Number(seed || 0));
+    return items[normalizedSeed % items.length];
+}
+
+function buildRelationshipPrompt(user, userName) {
+    if (!user) return `К текущему собеседнику относись как к обычному участнику тусовки по имени ${userName}.`;
+
+    const notes = String(user.ai_notes || '').toLowerCase();
+    const parts = [];
+
+    if ((user.warns || 0) >= 2) {
+        parts.push('Этот человек уже косячил, поэтому терпение к нему ниже обычного.');
+    }
+
+    if ((user.reputation || 0) >= 15) {
+        parts.push('Это скорее любимчик или как минимум проверенный свой, поэтому можно звучать теплее и лично.');
+    } else if ((user.reputation || 0) <= -3) {
+        parts.push('К нему можно относиться более колко и подозрительно.');
+    }
+
+    if (/друг|свой|любим|зай|мил|важн/.test(notes)) {
+        parts.push('По заметкам это человек из ближнего круга, отвечай более лично.');
+    }
+
+    if (/душн|бесит|агресс|конфликт|токс/.test(notes)) {
+        parts.push('По заметкам он склонен душнить или конфликтовать, так что можешь троллить его точнее.');
+    }
+
+    if (parts.length === 0) {
+        parts.push(`К ${userName} относись как к знакомому участнику тусовки: без официоза, но и без лишнего пафоса.`);
+    }
+
+    return parts.join(' ');
+}
+
+function buildDynamicPersonaBlock(chatId, user, userName) {
+    const config = loadPersonaConfig();
+    const mood = getOrCreateMood(chatId);
+    const seed = mood.exchanges + (user?.id || 0);
+    const trollStyle = pickSeeded(config.troll_styles, seed);
+    const refusalStyle = pickSeeded(config.refusal_styles, seed + 1);
+    const softMode = pickSeeded(config.soft_modes, seed + 2);
+    const relationship = buildRelationshipPrompt(user, userName);
+
+    return `\n[PERSONA LAYER]\n${(config.core || []).join(' ')}\n${(config.anti_disclaimer || []).join(' ')}\nТекущий предпочитаемый стиль троллинга: ${trollStyle}.\nЕсли нужен отказ: ${refusalStyle}.\n${softMode}\n${relationship}\n`;
 }
 
 function sanitizeHistory(history) {
@@ -568,9 +806,11 @@ async function executeToolCall(toolCall, chatId, messageId, userName, userId, ca
                                 let nodeLow = nodeName.toLowerCase();
 
                                 if (nodeLow.includes(searchLow) || nodeLow.includes(usernameFallback) || searchLow.includes(nodeLow)) {
-                                    if (!nodes.includes(attr)) nodes.push(attr);
-                                } else if (attr.toLowerCase().includes(searchLow) || attr.toLowerCase().includes(usernameFallback)) {
-                                    others.push(`${nodeName}: ${attr}`);
+                                const cleanNode = normalizeProfileMemoryLine(attr);
+                                if (isProfileMemoryAllowed(cleanNode) && !nodes.includes(cleanNode)) nodes.push(cleanNode);
+                            } else if (attr.toLowerCase().includes(searchLow) || attr.toLowerCase().includes(usernameFallback)) {
+                                    const otherLine = normalizeProfileMemoryLine(`${nodeName}: ${attr}`);
+                                    if (isProfileMemoryAllowed(otherLine)) others.push(otherLine);
                                 }
                             }
                         } else if (text.startsWith('СВЯЗЬ:')) {
@@ -585,22 +825,25 @@ async function executeToolCall(toolCall, chatId, messageId, userName, userId, ca
                                 let toLow = to.toLowerCase();
 
                                 if (fromLow.includes(searchLow) || fromLow.includes(usernameFallback)) {
-                                    let edgeStr = `${rel} -> ${to}`;
-                                    if (!edges.includes(edgeStr)) edges.push(edgeStr);
+                                    let edgeStr = normalizeProfileMemoryLine(`${rel} -> ${to}`);
+                                    if (isProfileMemoryAllowed(edgeStr) && !edges.includes(edgeStr)) edges.push(edgeStr);
                                 } else if (toLow.includes(searchLow) || toLow.includes(usernameFallback)) {
                                     let edgeStr = `(${from}) -> ${rel} -> (меня)`;
                                     if (!edges.includes(edgeStr)) edges.push(edgeStr);
                                 }
                             } else if (content.toLowerCase().includes(searchLow) || content.toLowerCase().includes(usernameFallback)) {
-                                if (!edges.includes(content)) edges.push(content);
+                                const cleanEdge = normalizeProfileMemoryLine(content);
+                                if (isProfileMemoryAllowed(cleanEdge) && !edges.includes(cleanEdge)) edges.push(cleanEdge);
                             }
                         } else {
                             let cleanF = text.replace(/\[.*?\]/g, '').trim();
                             if (cleanF.toLowerCase().startsWith(searchLow + ':')) {
                                 cleanF = cleanF.substring(searchLow.length + 1).trim();
-                                if (cleanF && !nodes.includes(cleanF)) others.push(cleanF);
+                                cleanF = normalizeProfileMemoryLine(cleanF);
+                                if (cleanF && isProfileMemoryAllowed(cleanF) && !nodes.includes(cleanF)) others.push(cleanF);
                             } else {
-                                if (!others.includes(cleanF)) others.push(cleanF);
+                                cleanF = normalizeProfileMemoryLine(cleanF);
+                                if (isProfileMemoryAllowed(cleanF) && !others.includes(cleanF)) others.push(cleanF);
                             }
                         }
                     });
@@ -652,8 +895,9 @@ async function executeToolCall(toolCall, chatId, messageId, userName, userId, ca
                                 can_send_messages: false, can_send_media_messages: false,
                                 until_date: Math.floor(Date.now() / 1000) + 60 * 60
                             });
+                            await updateUser(result.id, { warns: 0, last_warn_at: null });
                             console.log(`[TOOL] warn: Успешный мут за 3 варна! ID: ${result.userId}`);
-                            return `Выдан варн (${result.newWarns}/3). ${result.name} автоматически замучен на 60 минут!`;
+                            return `Выдан варн (3/3). ${result.name} автоматически замучен на 60 минут, счётчик варнов сброшен.`;
                         } catch (e) {
                             console.error(`[TOOL] warn: Ошибка мута Telegram API:`, e.message);
                             return `Выдан варн (${result.newWarns}/3), но без мута: нет прав. (${e.message})`;
@@ -902,7 +1146,18 @@ async function processAI(msg, extra) {
 
     // варн
     if (analysis.action === "warn") {
-        await warnUserById(chatId, userId);
+        const warnResult = await warnUserById(chatId, userId);
+        if (warnResult?.shouldMute) {
+            try {
+                await bot.restrictChatMember(chatId, warnResult.userId, {
+                    permissions: { can_send_messages: false, can_send_media_messages: false },
+                    can_send_messages: false,
+                    can_send_media_messages: false,
+                    until_date: Math.floor(Date.now() / 1000) + 60 * 60
+                });
+                await updateUser(warnResult.id, { warns: 0, last_warn_at: null });
+            } catch (e) { }
+        }
     }
 
     if (!BOT_ID) {
@@ -985,11 +1240,13 @@ async function processAI(msg, extra) {
             delete activeParticipants[chatId][uid];
         }
     }
+    updateAIMood(chatId, userText, callerIsAdmin, isReplyToBot, isMentioned);
     const relevantFacts = await getRelevantFacts(chatId, userText, userName, Object.values(activeParticipants[chatId]));
     const memoryBlock = `\n[МЫСЛИ О ${userName}]\n${relevantFacts}\nВремя (МСК): ${new Date().toLocaleString('ru-RU', { timeZone: 'Europe/Moscow' })}\n`;
 
     const compactMemoryBlock = buildMemoryBlock(userName, relevantFacts);
-    const finalPrompt = COMPACT_SYSTEM_PROMPT + compactMemoryBlock;
+    const personaLayer = ADVANCED_PERSONA_BLOCK + buildDynamicPersonaBlock(chatId, dbUser, userName) + buildMoodPrompt(chatId);
+    const finalPrompt = COMPACT_SYSTEM_PROMPT + personaLayer + compactMemoryBlock;
     chatHistory[chatId].push({ role: 'user', content: fullContent });
     chatHistory[chatId] = trimHistory(chatHistory[chatId], HISTORY_LIMIT);
 
@@ -1071,7 +1328,7 @@ async function processAI(msg, extra) {
                 memoryBlock = `\n\nВот что ты помнишь о чате:\n${memoryFacts}`;
             }
 
-            const fallbackPrompt = COMPACT_SYSTEM_PROMPT + buildMemoryBlock(userName, memoryFacts);
+            const fallbackPrompt = COMPACT_SYSTEM_PROMPT + ADVANCED_PERSONA_BLOCK + buildDynamicPersonaBlock(chatId, dbUser, userName) + buildMoodPrompt(chatId) + buildMemoryBlock(userName, memoryFacts);
 
             completion = await fetchAIWithTimeout({
                 model: AI_MODEL,
@@ -1260,6 +1517,7 @@ async function processAI(msg, extra) {
             }
 
             let clean = withoutMediaTags.replace(/&#039;/g, "'").replace(/&quot;/g, '"');
+            clean = ensureCharacterfulFallback(stripAIDisclaimer(clean));
             let escaped = clean.replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
             escaped = escaped.replace(/&lt;b&gt;/gi, '<b>').replace(/&lt;\/b&gt;/gi, '</b>');

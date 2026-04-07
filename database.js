@@ -25,6 +25,39 @@ function transliterate(text) {
     return text.toLowerCase().split('').map(char => map[char] || char).join('');
 }
 
+const WARN_DECAY_DAYS = Math.max(1, Number(process.env.WARN_DECAY_DAYS || 7));
+
+function areWarnsExpired(user) {
+    if (!user || !user.warns || !user.last_warn_at) return false;
+    const lastWarnAt = new Date(user.last_warn_at);
+    if (Number.isNaN(lastWarnAt.getTime())) return false;
+    const decayMs = WARN_DECAY_DAYS * 24 * 60 * 60 * 1000;
+    return Date.now() - lastWarnAt.getTime() >= decayMs;
+}
+
+function isMissingLastWarnColumnError(error) {
+    return Boolean(error && /last_warn_at/i.test(String(error.message || '')));
+}
+
+async function resetExpiredWarns(user) {
+    if (!areWarnsExpired(user)) return user;
+
+    const updates = { warns: 0, last_warn_at: null };
+    const { data, error } = await supabase
+        .from('users')
+        .update(updates)
+        .eq('id', user.id)
+        .select()
+        .maybeSingle();
+
+    if (error) {
+        console.warn('[DB WARN] resetExpiredWarns:', error.message);
+        return { ...user, ...updates };
+    }
+
+    return data || { ...user, ...updates };
+}
+
 async function getUser(chatId, userId, userInfo = {}) {
     const cacheKey = `${chatId}_${userId}`;
     if (userCache[cacheKey] && Date.now() < userCache[cacheKey].expires) {
@@ -68,13 +101,20 @@ async function getUser(chatId, userId, userInfo = {}) {
         user = data;
     }
 
+    user = await resetExpiredWarns(user);
+
     userCache[cacheKey] = { data: user, expires: Date.now() + USER_CACHE_TTL };
     return user;
 }
 
 async function updateUser(id, updates) {
     console.log(`[DB UPDATE] User ID ${id}: ${Object.keys(updates).join(', ')}`);
-    const { data, error } = await supabase.from('users').update(updates).eq('id', id).select();
+    let { data, error } = await supabase.from('users').update(updates).eq('id', id).select();
+    if (error && Object.prototype.hasOwnProperty.call(updates, 'last_warn_at') && isMissingLastWarnColumnError(error)) {
+        const fallbackUpdates = { ...updates };
+        delete fallbackUpdates.last_warn_at;
+        ({ data, error } = await supabase.from('users').update(fallbackUpdates).eq('id', id).select());
+    }
     if (error) {
         console.error('[DB ERROR] updateUser:', error.message);
         return;
@@ -387,6 +427,23 @@ function scoreUserCandidate(user, variants) {
 
 async function findBestUserMatch(chatId, query, options = {}) {
     if (!query) return null;
+    const rawQuery = String(query).trim();
+
+    if (/^-?\d+$/.test(rawQuery)) {
+        const numericUserId = Number(rawQuery);
+        const { data: exactById, error: exactByIdError } = await supabase
+            .from('users')
+            .select(options.select || '*')
+            .eq('chat_id', chatId)
+            .eq('user_id', numericUserId)
+            .limit(1)
+            .maybeSingle();
+
+        if (!exactByIdError && exactById) {
+            return options.returnMany ? [{ user: exactById, score: 1000 }] : exactById;
+        }
+    }
+
     const variants = buildUserSearchVariants(query);
     if (variants.length === 0) return null;
 
@@ -457,14 +514,30 @@ async function warnUserById(chatId, targetName) {
 
     if (!data) return null;
 
-    const newWarns = (data.warns || 0) + 1;
-    await updateUser(data.id, { warns: newWarns });
+    let lastWarnAt = null;
+    const { data: warnMeta, error: warnMetaError } = await supabase
+        .from('users')
+        .select('last_warn_at')
+        .eq('id', data.id)
+        .maybeSingle();
+
+    if (!warnMetaError && warnMeta) {
+        lastWarnAt = warnMeta.last_warn_at;
+    }
+
+    const previousWarns = areWarnsExpired({ ...data, last_warn_at: lastWarnAt }) ? 0 : Number(data.warns || 0);
+    const newWarns = Math.min(previousWarns + 1, 3);
+    await updateUser(data.id, {
+        warns: newWarns,
+        last_warn_at: new Date().toISOString()
+    });
 
     return {
+        id: data.id,
         name: data.username ? `@${data.username}` : data.first_name,
         userId: data.user_id,
         newWarns: newWarns,
-        shouldMute: newWarns >= 3
+        shouldMute: previousWarns < 3 && newWarns >= 3
     };
 }
 
