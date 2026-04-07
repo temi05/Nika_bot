@@ -165,10 +165,10 @@ const SYSTEM_PROMPT = `Ты — НейроНика. Ироничная, мемн
 - 🎭 Реакции (send_chat_action): Ставь эмодзи или стикеры. КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО писать словами тег "[Стикер: ...] " в ответах.
 
 🛡️ МОДЕРАЦИЯ (Лояльная, но с зубами):
-Используй инструмент moderate_user для наказаний.
+Используй инструмент moderate_user для наказаний и снятия наказаний.
 - Игнор/Шутка: Грубости в рофл (даже в твой адрес). Не-админ просит замутить кого-то? Высмей его.
-- МУТ/ВАРН:
-  1. Прямой приказ от пользователя с плашкой [АДМИН].
+- МУТ/ВАРН/РАЗМУТ:
+  1. Прямой приказ от пользователя с плашкой [АДМИН] (например: "замуть", "размуть", "сними мут").
   2. Порно, 18+ контент, шок-контент -> инста-мут на 10 минут!
   3. Откровенный и бесконечный спам рекламой.
   4. Долгая, систематическая агрессия лично в твою сторону без доли юмора.
@@ -844,13 +844,22 @@ async function processAI(msg, extra) {
             let aiText = second?.choices?.[0]?.message?.content;
 
             if (!aiText) {
-                // Если текст так и не сгенерировался, проверяем, какой инструмент мы вызывали
-                const wasModerationCalled = calls.some(c =>
-                    (c.function?.name === 'moderate_user' || c.name === 'moderate_user') &&
-                    c.function?.arguments?.includes('mute')
-                );
+                let isPunishment = false;
+                let isUnmute = false;
 
-                if (wasModerationCalled) {
+                for (const c of calls) {
+                    const fName = c.function ? c.function.name : c.name;
+                    const fArgs = c.function ? c.function.arguments : c.arguments;
+                    if (fName === 'moderate_user') {
+                        try {
+                            const parsed = JSON.parse(fArgs);
+                            if (parsed.action === 'mute' || parsed.action === 'warn') isPunishment = true;
+                            if (parsed.action === 'unmute') isUnmute = true;
+                        } catch (e) { }
+                    }
+                }
+
+                if (isPunishment) {
                     // Если это был вызов мута/варна, используем крутые фразы
                     const fallbackPhrases = [
                         "Нарушитель изолирован. 💅",
@@ -859,8 +868,16 @@ async function processAI(msg, extra) {
                         "Секундочку... отправляю отдыхать. 💅"
                     ];
                     aiText = fallbackPhrases[Math.floor(Math.random() * fallbackPhrases.length)];
+                } else if (isUnmute) {
+                    // Если это был размут
+                    const unmutePhrases = [
+                        "Всё, свободен. Но я слежу за тобой! 👁️",
+                        "Ладно, живи. Сняла мут. 💅",
+                        "Окей, размутила. Веди себя хорошо! 😇"
+                    ];
+                    aiText = unmutePhrases[Math.floor(Math.random() * unmutePhrases.length)];
                 } else {
-                    // Если это был поиск фактов (Ибанов Лорант), профиля или другой обычный запрос
+                    // Если это был поиск фактов, профиля или другой обычный запрос
                     const errorPhrases = [
                         "Ой, что-то я запуталась... Можешь повторить?",
                         "Блин, процессор закипел. Еще раз спроси!",
