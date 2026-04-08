@@ -103,6 +103,27 @@ function shouldEnableAITools(text, callerIsAdmin, isReplyToBot, isMentioned) {
     return false;
 }
 
+function detectInteractionMode(text, analysis, isReplyToBot) {
+    const normalized = String(text || '').toLowerCase().trim();
+    if (analysis && ['warn', 'mute', 'delete'].includes(analysis.action)) return 'escalation';
+    if (analysis && analysis.action === 'ignore' && analysis.type && analysis.type !== 'normal') return 'warning';
+    if (/(помоги|объясни|как|почему|что делать|напомни|найди|кто|где|когда|\?)/i.test(normalized)) return 'help';
+    if (/(правил|варн|мут|наруш|спам|удали|хватит|прекрати)/i.test(normalized)) return 'warning';
+    if (isReplyToBot && normalized.length > 80) return 'help';
+    return 'chat';
+}
+
+function buildInteractionModePrompt(mode) {
+    const safeMode = mode || 'chat';
+    const instructions = {
+        chat: 'Режим сейчас: обычное общение. Будь живой, короткой и естественной.',
+        help: 'Режим сейчас: помощь. Сначала дай суть, потом при необходимости короткое пояснение.',
+        warning: 'Режим сейчас: предупреждение. Не заигрывай, не морализируй, обозначай рамку коротко.',
+        escalation: 'Режим сейчас: эскалация. Не спорь, не унижай, просто фиксируй действие и причину.'
+    };
+    return `\n[ACTIVE MODE]\n${instructions[safeMode] || instructions.chat}\n`;
+}
+
 let BOT_ID = null;
 
 let premiumEmojiList = [];
@@ -493,6 +514,29 @@ const RUNTIME_PERSONA_BLOCK = `
 Никогда не говори "я ИИ", "я нейросеть", "как языковая модель" и похожее. Любой отказ формулируй в образе.
 [АНТИ-ЛОЖНАЯ МОДЕРАЦИЯ]
 Не модерируй защищённых людей за обычный мат, bait и дружеский рофл.`;
+
+const MEMORY_USAGE_POLICY_BLOCK = `
+[MEMORY POLICY]
+Память — это инструмент контекста, а не повод демонстрировать осведомлённость.
+Используй память тактично: она должна помогать тону, точности и модерации, но не делать тебя сталкером.
+Не озвучивай лишние социальные наблюдения без прямой пользы.
+Предпочитай наблюдения ярлыкам: не делай вид, что точно знаешь мотивы, чувства или суть человека.
+При сомнении опирайся на текущее сообщение выше старых слабых выводов.`;
+
+const BEHAVIOR_MODE_POLICY_BLOCK = `
+[MODES]
+chat: живое общение, ирония, естественный ритм.
+help: понятно, собранно, без лишней сценичности.
+warning: коротко, ясно, спокойно, без унижения.
+escalation: уверенно, суховато, без споров по кругу.
+Выбирай минимально достаточный режим по ситуации.`;
+
+const OPTIMIZATION_POLICY_BLOCK = `
+[OPTIMIZATION]
+Сначала определяй, что сейчас главное: ответить, помочь, предупредить, остановить конфликт или промолчать.
+Не делай больше, чем нужно для хорошего результата.
+Отвечай настолько кратко, насколько можно, и настолько подробно, насколько нужно.
+Не раздувай конфликт, не повторяйся, не демонстрируй лишнюю осведомлённость.`;
 
 function trimHistory(history, maxLen = HISTORY_LIMIT) {
     if (history.length <= maxLen) return history;
@@ -984,7 +1028,7 @@ function buildMemoryBlock(userName, relevantFacts) {
         .slice(0, MEMORY_FACTS_LIMIT)
         .join('\n');
 
-    return `\n[КРАТКАЯ ПАМЯТЬ О ${userName}]\n${trimmedFacts}\nВремя (МСК): ${new Date().toLocaleString('ru-RU', { timeZone: 'Europe/Moscow' })}\n`;
+    return `\n[КРАТКАЯ ПАМЯТЬ О ${userName}]\nИспользуй это как контекст, а не как повод пересказывать скрытые наблюдения. Озвучивай только то, что реально помогает текущему ответу.\n${trimmedFacts}\nВремя (МСК): ${new Date().toLocaleString('ru-RU', { timeZone: 'Europe/Moscow' })}\n`;
 }
 
 function isBaitTriggerMessage(text) {
@@ -1607,7 +1651,14 @@ async function processAI(msg, extra) {
     const memoryBlock = `\n[МЫСЛИ О ${userName}]\n${relevantFacts}\nВремя (МСК): ${new Date().toLocaleString('ru-RU', { timeZone: 'Europe/Moscow' })}\n`;
 
     const compactMemoryBlock = buildMemoryBlock(userName, relevantFacts);
-    const personaLayer = RUNTIME_PERSONA_BLOCK + buildCompactPersonaBlock(chatId, dbUser, userName) + buildCompactMoodPrompt(chatId);
+    const interactionMode = detectInteractionMode(userText, analysis, isReplyToBot);
+    const personaLayer = RUNTIME_PERSONA_BLOCK
+        + MEMORY_USAGE_POLICY_BLOCK
+        + BEHAVIOR_MODE_POLICY_BLOCK
+        + OPTIMIZATION_POLICY_BLOCK
+        + buildInteractionModePrompt(interactionMode)
+        + buildCompactPersonaBlock(chatId, dbUser, userName)
+        + buildCompactMoodPrompt(chatId);
     const finalPrompt = RUNTIME_SYSTEM_PROMPT + personaLayer + senderContextBlock + compactMemoryBlock;
     const activeTools = shouldEnableAITools(userText, callerIsAdmin, isReplyToBot, isMentioned) ? aiTools : undefined;
     chatHistory[chatId].push({ role: 'user', content: fullContent });
@@ -1693,7 +1744,16 @@ async function processAI(msg, extra) {
                 memoryBlock = `\n\nВот что ты помнишь о чате:\n${memoryFacts}`;
             }
 
-            const fallbackPrompt = RUNTIME_SYSTEM_PROMPT + RUNTIME_PERSONA_BLOCK + buildCompactPersonaBlock(chatId, dbUser, userName) + buildCompactMoodPrompt(chatId) + senderContextBlock + buildMemoryBlock(userName, memoryFacts);
+            const fallbackPrompt = RUNTIME_SYSTEM_PROMPT
+                + RUNTIME_PERSONA_BLOCK
+                + MEMORY_USAGE_POLICY_BLOCK
+                + BEHAVIOR_MODE_POLICY_BLOCK
+                + OPTIMIZATION_POLICY_BLOCK
+                + buildInteractionModePrompt(interactionMode)
+                + buildCompactPersonaBlock(chatId, dbUser, userName)
+                + buildCompactMoodPrompt(chatId)
+                + senderContextBlock
+                + buildMemoryBlock(userName, memoryFacts);
 
             completion = await fetchAIWithTimeout({
                 model: AI_MODEL,

@@ -667,6 +667,50 @@ function shouldPromoteKnowledge(status, confidence, sourceCount, timesSeen) {
     return (sourceCount >= 2 && confidence >= 0.72) || timesSeen >= 3;
 }
 
+function getKnowledgeMemoryKind(row) {
+    const kind = String(row?.meta?.memory_kind || '').trim().toLowerCase();
+    if (kind === 'pattern' || kind === 'risk') return kind;
+    return 'fact';
+}
+
+function applyKnowledgeFilters(rows, options = {}) {
+    let filtered = Array.isArray(rows) ? [...rows] : [];
+    const includeKinds = Array.isArray(options.includeMemoryKinds) && options.includeMemoryKinds.length
+        ? new Set(options.includeMemoryKinds.map(v => String(v).toLowerCase()))
+        : null;
+    const excludeKinds = Array.isArray(options.excludeMemoryKinds) && options.excludeMemoryKinds.length
+        ? new Set(options.excludeMemoryKinds.map(v => String(v).toLowerCase()))
+        : null;
+
+    if (includeKinds) {
+        filtered = filtered.filter(row => includeKinds.has(getKnowledgeMemoryKind(row)));
+    }
+
+    if (excludeKinds) {
+        filtered = filtered.filter(row => !excludeKinds.has(getKnowledgeMemoryKind(row)));
+    }
+
+    filtered.sort((left, right) => {
+        const leftKindRank = getKnowledgeMemoryKind(left) === 'fact' ? 0 : getKnowledgeMemoryKind(left) === 'pattern' ? 1 : 2;
+        const rightKindRank = getKnowledgeMemoryKind(right) === 'fact' ? 0 : getKnowledgeMemoryKind(right) === 'pattern' ? 1 : 2;
+        if (leftKindRank !== rightKindRank) return leftKindRank - rightKindRank;
+
+        const confidenceDiff = Number(right.confidence || 0) - Number(left.confidence || 0);
+        if (confidenceDiff !== 0) return confidenceDiff;
+
+        const timesSeenDiff = Number(right.times_seen || 0) - Number(left.times_seen || 0);
+        if (timesSeenDiff !== 0) return timesSeenDiff;
+
+        return new Date(right.last_seen_at || 0).getTime() - new Date(left.last_seen_at || 0).getTime();
+    });
+
+    if (options.limitAfterFilter) {
+        filtered = filtered.slice(0, options.limitAfterFilter);
+    }
+
+    return filtered;
+}
+
 async function insertKnowledge(chatId, factText, embedding) {
     const payload = (typeof factText === 'object' && factText !== null)
         ? { ...factText }
@@ -693,20 +737,20 @@ async function insertKnowledge(chatId, factText, embedding) {
         }
 
         if (existing) {
-            const nextTimesSeen = (existing.times_seen || 1) + 1;
-            const nextSourceCount = (existing.source_count || 1) + 1;
-            const nextConfidence = Math.min(
-                0.98,
-                Math.max(existing.confidence || 0.55, confidence) + 0.08
-            );
-            const nextStatus = shouldPromoteKnowledge(existing.status, nextConfidence, nextSourceCount, nextTimesSeen)
-                ? 'confirmed'
-                : 'candidate';
-
             const mergedMeta = {
                 ...(existing.meta || {}),
                 ...(payload.meta || {}),
             };
+            const memoryKind = getKnowledgeMemoryKind({ meta: mergedMeta });
+            const nextTimesSeen = (existing.times_seen || 1) + 1;
+            const nextSourceCount = (existing.source_count || 1) + 1;
+            const nextConfidence = Math.min(
+                0.98,
+                Math.max(existing.confidence || 0.55, confidence) + (memoryKind === 'pattern' ? 0.04 : 0.08)
+            );
+            const nextStatus = shouldPromoteKnowledge(existing.status, nextConfidence, nextSourceCount, nextTimesSeen)
+                ? 'confirmed'
+                : 'candidate';
 
             const { data, error } = await supabase
                 .from('bot_knowledge')
@@ -791,7 +835,10 @@ async function searchKnowledge(chatId, queryEmbedding, limit = 3, threshold = 0.
     });
 
     if (!advanced.error) {
-        return advanced.data || [];
+        return applyKnowledgeFilters(advanced.data || [], {
+            ...options,
+            limitAfterFilter: limit
+        });
     }
 
     const legacy = await supabase.rpc('match_knowledge', {
@@ -806,13 +853,16 @@ async function searchKnowledge(chatId, queryEmbedding, limit = 3, threshold = 0.
         return [];
     }
 
-    return (legacy.data || []).map(item => ({
+    return applyKnowledgeFilters((legacy.data || []).map(item => ({
         ...item,
         confidence: 0.7,
         status: 'confirmed',
         times_seen: 1,
         source_count: 1
-    }));
+    })), {
+        ...options,
+        limitAfterFilter: limit
+    });
 }
 
 async function searchKnowledgeByText(chatId, query, limit = 5, options = {}) {
@@ -832,7 +882,10 @@ async function searchKnowledgeByText(chatId, query, limit = 5, options = {}) {
 
     const advanced = await advancedQuery;
     if (!advanced.error) {
-        return advanced.data || [];
+        return applyKnowledgeFilters(advanced.data || [], {
+            ...options,
+            limitAfterFilter: limit
+        });
     }
 
     const legacy = await supabase
@@ -848,7 +901,10 @@ async function searchKnowledgeByText(chatId, query, limit = 5, options = {}) {
         return [];
     }
 
-    return legacy.data || [];
+    return applyKnowledgeFilters(legacy.data || [], {
+        ...options,
+        limitAfterFilter: limit
+    });
 }
 
 async function getRecentKnowledge(chatId, userName = "", limit = 10, options = {}) {
@@ -873,7 +929,10 @@ async function getRecentKnowledge(chatId, userName = "", limit = 10, options = {
         .limit(limit);
 
     if (!advanced.error) {
-        return advanced.data || [];
+        return applyKnowledgeFilters(advanced.data || [], {
+            ...options,
+            limitAfterFilter: limit
+        });
     }
 
     let legacyQuery = supabase
@@ -893,7 +952,10 @@ async function getRecentKnowledge(chatId, userName = "", limit = 10, options = {
         console.error('[DB ERROR] getRecentKnowledge:', advanced.error.message || legacy.error.message);
         return [];
     }
-    return legacy.data || [];
+    return applyKnowledgeFilters(legacy.data || [], {
+        ...options,
+        limitAfterFilter: limit
+    });
 }
 
 async function checkFactExists(chatId, factText) {
@@ -994,7 +1056,7 @@ async function weakenStaleKnowledge(chatId, options = {}) {
 
     const { data, error } = await supabase
         .from('bot_knowledge')
-        .select('id, confidence, status, times_seen, last_seen_at')
+        .select('id, confidence, status, times_seen, last_seen_at, meta')
         .eq('chat_id', chatId)
         .in('status', ['candidate', 'confirmed'])
         .lt('last_seen_at', staleBeforeIso)
@@ -1013,7 +1075,9 @@ async function weakenStaleKnowledge(chatId, options = {}) {
 
     let updated = 0;
     for (const row of data) {
-        const nextConfidence = Math.max(0.2, Number(row.confidence || 0.55) - 0.08);
+        const memoryKind = getKnowledgeMemoryKind(row);
+        const decayStep = memoryKind === 'pattern' ? 0.14 : memoryKind === 'risk' ? 0.1 : 0.08;
+        const nextConfidence = Math.max(0.18, Number(row.confidence || 0.55) - decayStep);
         const nextStatus = nextConfidence < 0.45 ? 'candidate' : row.status;
 
         const { error: updateError } = await supabase

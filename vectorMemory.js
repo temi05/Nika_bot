@@ -127,6 +127,35 @@ function shouldKeepMemoryFact(fact) {
     return !isSexualMemoryContent(mergedText);
 }
 
+function isSpeculativeOrCreepyMemory(text) {
+    const normalized = normalizeText(text).toLowerCase();
+    if (!normalized) return false;
+
+    const blockedPatterns = [
+        'манипул', 'токсичн', 'сталкер', 'одержим', 'ревн', 'завиду', 'одинок',
+        'любит внимание', 'цепляется за', 'скрытая группа', 'заговор', 'ведом',
+        'опасный человек', 'плохой человек', 'по сути человек', 'на самом деле',
+        'приходит только из за', 'ходит за', 'следит за', 'влюблен', 'влюблена',
+        'пара', 'отношениях с', 'хочет внимания', 'обижен на', 'обижена на',
+        'манипулятор', 'абьюз', 'абьюзер'
+    ];
+
+    return blockedPatterns.some(pattern => normalized.includes(pattern));
+}
+
+function isLowValueEphemeralMemory(text) {
+    const normalized = normalizeText(text).toLowerCase();
+    if (!normalized) return false;
+
+    const blockedPatterns = [
+        'пошел спать', 'иду спать', 'щас спать', 'сейчас спать', 'ем', 'кушаю',
+        'пошел в душ', 'пойду в душ', 'устал', 'ору', 'лол', 'ахах', 'хаха',
+        'сегодня хочу', 'сегодня буду', 'потом зайду', 'ща', 'щас', 'ладно'
+    ];
+
+    return blockedPatterns.some(pattern => normalized.includes(pattern));
+}
+
 function convertExtractedFact(rawFact) {
     if (!rawFact || typeof rawFact !== 'object') return null;
 
@@ -169,6 +198,67 @@ function convertExtractedFact(rawFact) {
         meta: {
             evidence: normalizeText(rawFact.evidence || ''),
             extractor: 'memory_v2',
+        }
+    };
+}
+
+function normalizeStoredFactShape(fact) {
+    if (!fact) return null;
+    if (fact.fact) {
+        const text = normalizeText(fact.fact);
+        return text ? { ...fact, fact: text } : null;
+    }
+
+    if (fact.kind === 'relation') {
+        const subject = normalizeName(fact.subject);
+        const relation = normalizeText(fact.relation);
+        const object = normalizeName(fact.object);
+        if (!subject || !relation || !object) return null;
+        return { ...fact, subject, relation, object };
+    }
+
+    const subject = normalizeName(fact.subject);
+    const attribute = normalizeText(fact.attribute);
+    const value = normalizeText(fact.value);
+    if (!subject || !attribute || !value) return null;
+    return { ...fact, subject, attribute, value };
+}
+
+function classifyMemoryRecord(fact) {
+    const factText = fact?.fact || buildFactText(fact);
+    const normalized = normalizeText(factText).toLowerCase();
+
+    if (isSpeculativeOrCreepyMemory(normalized) || isLowValueEphemeralMemory(normalized)) {
+        return 'discard';
+    }
+
+    if (/\b(часто|обычно|регулярно|редко)\b/i.test(normalized)) {
+        return 'pattern';
+    }
+
+    return 'fact';
+}
+
+function finalizeMemoryRecord(fact) {
+    const normalizedFact = normalizeStoredFactShape(fact);
+    if (!normalizedFact) return null;
+
+    const classification = classifyMemoryRecord(normalizedFact);
+    if (classification === 'discard') return null;
+
+    const nextConfidence = classification === 'pattern'
+        ? Math.min(Number(normalizedFact.confidence || 0.58), 0.74)
+        : Number(normalizedFact.confidence || 0.58);
+
+    return {
+        ...normalizedFact,
+        confidence: nextConfidence,
+        status: classification === 'pattern'
+            ? 'candidate'
+            : (normalizedFact.status || 'candidate'),
+        meta: {
+            ...(normalizedFact.meta || {}),
+            memory_kind: classification
         }
     };
 }
@@ -303,11 +393,20 @@ async function extractAndSaveFacts(chatId, historyText, participants = []) {
   ]
 }`;
 
+        const hardenedPrompt = `${prompt}
+
+Дополнительные правила:
+- Не делай психологических диагнозов и ярлыков о человеке.
+- Не утверждай романтические связи, ревность, одержимость, манипуляции и скрытые мотивы как факт.
+- Если можно сформулировать как наблюдение или паттерн, выбирай наблюдение или паттерн.
+- Не сохраняй лишнюю социальную слежку, которая не помогает модерации, контексту или персонализации.
+`;
+
         const completion = await withTimeout(
             openai.chat.completions.create({
                 model: EXTRACTOR_MODEL,
                 messages: [
-                    { role: 'system', content: prompt },
+                    { role: 'system', content: hardenedPrompt },
                     { role: 'user', content: `${participantInfo}\n\nДиалог:\n${cleanHistory.slice(0, 3200)}` }
                 ],
                 temperature: 0,
@@ -326,11 +425,20 @@ async function extractAndSaveFacts(chatId, historyText, participants = []) {
         }
 
         const extractedFacts = Array.isArray(parsed.facts)
-            ? parsed.facts.map(convertExtractedFact).filter(Boolean).filter(shouldKeepMemoryFact).slice(0, MAX_FACTS_PER_BATCH)
+            ? parsed.facts
+                .map(convertExtractedFact)
+                .map(finalizeMemoryRecord)
+                .filter(Boolean)
+                .filter(shouldKeepMemoryFact)
+                .slice(0, MAX_FACTS_PER_BATCH)
             : [];
 
         if (extractedFacts.length === 0) {
-            const fallbackFacts = fallbackFactsFromText(rawContent).filter(shouldKeepMemoryFact).slice(0, MAX_FACTS_PER_BATCH);
+            const fallbackFacts = fallbackFactsFromText(rawContent)
+                .map(finalizeMemoryRecord)
+                .filter(Boolean)
+                .filter(shouldKeepMemoryFact)
+                .slice(0, MAX_FACTS_PER_BATCH);
             for (const fact of fallbackFacts) {
                 const exists = await checkFactExists(chatId, fact);
                 if (exists) continue;
@@ -410,13 +518,16 @@ async function getRelevantFacts(chatId, userMessage, userName = '', activePartic
 
         const addFact = (fact, source, relevance = 0.5, extra = {}) => {
             if (!fact) return;
+            if (isSpeculativeOrCreepyMemory(fact) || isLowValueEphemeralMemory(fact)) return;
+            const memoryKind = extra?.meta?.memory_kind || 'fact';
             const existing = allFoundFacts.get(fact);
             const score = {
                 source,
                 relevance,
                 confidence: extra.confidence ?? 0.6,
                 timesSeen: extra.timesSeen ?? 1,
-                status: extra.status || 'confirmed'
+                status: extra.status || 'confirmed',
+                memoryKind
             };
 
             if (!existing || existing.relevance < relevance) {
@@ -491,6 +602,9 @@ async function getRelevantFacts(chatId, userMessage, userName = '', activePartic
         const priorityOrder = { semantic: 0, recent: 1, subject: 2, keyword: 3 };
         const ranked = Array.from(allFoundFacts.entries())
             .sort(([, left], [, right]) => {
+                const kindDiff = (left.memoryKind === 'fact' ? 0 : 1) - (right.memoryKind === 'fact' ? 0 : 1);
+                if (kindDiff !== 0) return kindDiff;
+
                 const priorityDiff = priorityOrder[left.source] - priorityOrder[right.source];
                 if (priorityDiff !== 0) return priorityDiff;
 
@@ -507,7 +621,9 @@ async function getRelevantFacts(chatId, userMessage, userName = '', activePartic
             .filter(([fact]) => fact.length <= 220)
             .slice(0, MAX_FACTS_IN_CONTEXT)
             .map(([fact, meta]) => {
-                const marker = meta.status === 'candidate' ? '~- ' : '- ';
+                const marker = meta.memoryKind === 'pattern'
+                    ? '≈ '
+                    : (meta.status === 'candidate' ? '~- ' : '- ');
                 return `${marker}${fact}`;
             })
             .join('\n');
