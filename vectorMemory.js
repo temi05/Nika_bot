@@ -490,7 +490,10 @@ async function extractAndSaveFacts(chatId, historyText, participants = []) {
                         updated++;
                         saved++;
                     }
-                    else failed++;
+                    else {
+                        failed++;
+                        console.warn(`[MEMORY] failed to persist: ${normalizeText(factText).slice(0, 160)}`);
+                    }
                     continue;
                 }
             }
@@ -508,7 +511,10 @@ async function extractAndSaveFacts(chatId, historyText, participants = []) {
                 updated++;
                 saved++;
             }
-            else failed++;
+            else {
+                failed++;
+                console.warn(`[MEMORY] failed to persist: ${normalizeText(factText).slice(0, 160)}`);
+            }
         }
 
         if (created > 0 || updated > 0 || failed > 0) {

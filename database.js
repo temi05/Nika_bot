@@ -816,7 +816,12 @@ async function insertKnowledge(chatId, factText, embedding) {
             .maybeSingle();
 
         if (fallback.error) {
-            console.error('[DB ERROR] insertKnowledge:', fallback.error.message || error.message);
+            console.error('[DB ERROR] insertKnowledge:', {
+                primary: error?.message || String(error),
+                fallback: fallback.error.message || String(fallback.error),
+                fact,
+                chatId
+            });
             return null;
         }
         if (fallback.data) fallback.data._memoryAction = 'fallback_created';
