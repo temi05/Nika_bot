@@ -443,11 +443,19 @@ async function extractAndSaveFacts(chatId, historyText, participants = []) {
                 const exists = await checkFactExists(chatId, fact);
                 if (exists) continue;
                 const embedding = await createEmbedding(fact.fact);
-                await insertKnowledge(chatId, fact, embedding);
+                const result = await insertKnowledge(chatId, fact, embedding);
+                if (result?._memoryAction) {
+                    console.log(`[MEMORY] fallback ${result._memoryAction}: ${normalizeText(fact.fact || buildFactText(fact)).slice(0, 120)}`);
+                } else {
+                    console.warn(`[MEMORY] fallback failed: ${normalizeText(fact.fact || buildFactText(fact)).slice(0, 120)}`);
+                }
             }
             return;
         }
 
+        let created = 0;
+        let updated = 0;
+        let failed = 0;
         let saved = 0;
 
         for (const fact of extractedFacts) {
@@ -465,19 +473,40 @@ async function extractAndSaveFacts(chatId, historyText, participants = []) {
                     : [];
 
                 if (duplicates.length > 0) {
-                    await insertKnowledge(chatId, fact, embedding);
-                    saved++;
+                    const result = await insertKnowledge(chatId, fact, embedding);
+                    if (result?._memoryAction === 'created' || result?._memoryAction === 'fallback_created') {
+                        created++;
+                        saved++;
+                    }
+                    else if (result?._memoryAction === 'updated') {
+                        updated++;
+                        saved++;
+                    }
+                    else failed++;
                     continue;
                 }
             }
 
             const embedding = await createEmbedding(factText);
-            await insertKnowledge(chatId, fact, embedding);
-            saved++;
+            const result = await insertKnowledge(chatId, fact, embedding);
+            if (result?._memoryAction === 'created' || result?._memoryAction === 'fallback_created') {
+                created++;
+                saved++;
+            }
+            else if (result?._memoryAction === 'updated') {
+                updated++;
+                saved++;
+            }
+            else failed++;
         }
 
-        if (saved > 0) {
+        if (created > 0 || updated > 0 || failed > 0) {
             console.log(`[MEMORY] Сохранено ${saved}/${extractedFacts.length} фактов`);
+        }
+
+        if (created > 0 || updated > 0 || failed > 0) {
+            saved = created + updated;
+            console.log(`[MEMORY DETAIL] created=${created} updated=${updated} failed=${failed} total=${extractedFacts.length}`);
         }
 
         const summary = await summarizeDialogue(cleanHistory, participants);

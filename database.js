@@ -774,6 +774,7 @@ async function insertKnowledge(chatId, factText, embedding) {
                 .maybeSingle();
 
             if (error) throw error;
+            if (data) data._memoryAction = 'updated';
             return data;
         }
 
@@ -805,6 +806,7 @@ async function insertKnowledge(chatId, factText, embedding) {
             .maybeSingle();
 
         if (error) throw error;
+        if (data) data._memoryAction = 'created';
         return data;
     } catch (error) {
         const fallback = await supabase
@@ -817,6 +819,7 @@ async function insertKnowledge(chatId, factText, embedding) {
             console.error('[DB ERROR] insertKnowledge:', fallback.error.message || error.message);
             return null;
         }
+        if (fallback.data) fallback.data._memoryAction = 'fallback_created';
         return fallback.data;
     }
 }
