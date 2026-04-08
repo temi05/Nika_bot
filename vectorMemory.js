@@ -424,6 +424,7 @@ async function extractAndSaveFacts(chatId, historyText, participants = []) {
             parsed = { facts: fallbackFactsFromText(rawContent) };
         }
 
+        const rawFactsCount = Array.isArray(parsed.facts) ? parsed.facts.length : 0;
         const extractedFacts = Array.isArray(parsed.facts)
             ? parsed.facts
                 .map(convertExtractedFact)
@@ -439,9 +440,15 @@ async function extractAndSaveFacts(chatId, historyText, participants = []) {
                 .filter(Boolean)
                 .filter(shouldKeepMemoryFact)
                 .slice(0, MAX_FACTS_PER_BATCH);
+            if (fallbackFacts.length === 0) {
+                console.log(`[MEMORY] Нет пригодных фактов: raw=${rawFactsCount} parsed=0 fallback=0`);
+            }
             for (const fact of fallbackFacts) {
                 const exists = await checkFactExists(chatId, fact);
-                if (exists) continue;
+                if (exists) {
+                    console.log(`[MEMORY] fallback skipped existing: ${normalizeText(fact.fact || buildFactText(fact)).slice(0, 120)}`);
+                    continue;
+                }
                 const embedding = await createEmbedding(fact.fact);
                 const result = await insertKnowledge(chatId, fact, embedding);
                 if (result?._memoryAction) {
@@ -457,6 +464,7 @@ async function extractAndSaveFacts(chatId, historyText, participants = []) {
         let updated = 0;
         let failed = 0;
         let saved = 0;
+        let skippedExisting = 0;
 
         for (const fact of extractedFacts) {
             const factText = buildFactText(fact);
@@ -486,6 +494,9 @@ async function extractAndSaveFacts(chatId, historyText, participants = []) {
                     continue;
                 }
             }
+            else {
+                skippedExisting++;
+            }
 
             const embedding = await createEmbedding(factText);
             const result = await insertKnowledge(chatId, fact, embedding);
@@ -507,6 +518,12 @@ async function extractAndSaveFacts(chatId, historyText, participants = []) {
         if (created > 0 || updated > 0 || failed > 0) {
             saved = created + updated;
             console.log(`[MEMORY DETAIL] created=${created} updated=${updated} failed=${failed} total=${extractedFacts.length}`);
+        }
+        else if (skippedExisting > 0) {
+            console.log(`[MEMORY] Все факты уже известны: skipped_existing=${skippedExisting} total=${extractedFacts.length}`);
+        }
+        else {
+            console.log(`[MEMORY] Факты извлечены, но не записаны: parsed=${extractedFacts.length} failed=${failed}`);
         }
 
         const summary = await summarizeDialogue(cleanHistory, participants);
