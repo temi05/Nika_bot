@@ -114,6 +114,87 @@ function detectInteractionMode(text, analysis, isReplyToBot) {
     return 'chat';
 }
 
+function normalizeReplyHeuristicsText(text) {
+    return String(text || '')
+        .toLowerCase()
+        .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+}
+
+function isCorrectionCue(text) {
+    const normalized = normalizeReplyHeuristicsText(text);
+    if (!normalized) return false;
+
+    return /(^|\s)(нет|неа|не то|не так|не совсем|не угадал|не угадала|мимо|наоборот|почти|нетушки)(\s|$)/.test(normalized);
+}
+
+function isShortReplyTurn(text) {
+    const normalized = normalizeReplyHeuristicsText(text);
+    if (!normalized) return false;
+    const parts = normalized.split(' ').filter(Boolean);
+    return normalized.length <= 40 || parts.length <= 6;
+}
+
+function getReplyPreview(replyMessage) {
+    return String(
+        replyMessage?.text
+        || replyMessage?.caption
+        || replyMessage?.poll?.question
+        || 'медиа'
+    ).trim();
+}
+
+function buildReplyFocusBlock({ replyMessage, replyAuthor, userText, isReplyToBot, isMentioned }) {
+    if (!replyMessage) return '';
+
+    const replyPreview = getReplyPreview(replyMessage).slice(0, 160);
+    const correctionTurn = isCorrectionCue(userText);
+    const shortReplyTurn = isShortReplyTurn(userText);
+    const focusReplyToHuman = !isReplyToBot && isMentioned;
+
+    const rules = [
+        `Сейчас это ответ на реплику ${replyAuthor}: "${replyPreview}".`,
+        'Сначала опирайся на текущую реплику и на сообщение, на которое отвечают. Старый контекст вторичен.'
+    ];
+
+    if (focusReplyToHuman) {
+        rules.push(`Отвечай так, будто адресат прямо сейчас ${replyAuthor}, а не абстрактный чат.`);
+    }
+
+    if (shortReplyTurn) {
+        rules.push('Короткий ответ не даёт права придумывать большой скрытый смысл или разворачивать новую теорию без опоры в тексте.');
+    }
+
+    if (correctionTurn) {
+        rules.push('Текущая реплика похожа на поправку. Немедленно отбрось прошлую догадку, не продолжай её как факт и не спорь с пользователем.');
+    }
+
+    rules.push('Не приписывай романтический, сексуальный или другой острый подтекст, если он не выражен явно в текущем сообщении или в цитируемой реплике.');
+    rules.push('Если уверенности мало, лучше коротко уточни или ответь осторожно без самоуверенных выводов.');
+
+    return `\n[REPLY FOCUS]\n${rules.join('\n')}\n`;
+}
+
+function selectPromptHistory(history, { hasReply = false, isReplyToBot = false, correctionTurn = false, shortReplyTurn = false } = {}) {
+    const baseHistory = trimHistory(history || [], HISTORY_LIMIT);
+
+    if (!hasReply) {
+        return sanitizeHistory(baseHistory);
+    }
+
+    let maxLen = HISTORY_LIMIT;
+    if (correctionTurn) {
+        maxLen = 4;
+    } else if (shortReplyTurn && !isReplyToBot) {
+        maxLen = 6;
+    } else if (!isReplyToBot) {
+        maxLen = 10;
+    }
+
+    return sanitizeHistory(trimHistory(baseHistory, maxLen));
+}
+
 function buildInteractionModePrompt(mode) {
     const safeMode = mode || 'chat';
     const instructions = {
@@ -1618,6 +1699,7 @@ async function processAI(msg, extra) {
     let replyIdForBot = msg.message_id;
     let replyPrefix = "";
     let rpAuthor = "Кто-то";
+    let replyMessage = null;
 
     const nameTriggered = textLower.includes('нейроника') || textLower.includes('нейронику') || textLower.includes('нейронике') || textLower.includes('neironika');
     const isReplyToBot = msg.reply_to_message && BOT_ID && msg.reply_to_message.from.id === BOT_ID;
@@ -1625,6 +1707,7 @@ async function processAI(msg, extra) {
 
     if (msg.reply_to_message) {
         const rp = msg.reply_to_message;
+        replyMessage = rp;
 
         // ИСПРАВЛЕНИЕ #2: Корректное имя автора сообщения, на которое отвечают (для каналов)
         if (rp.sender_chat) {
@@ -1647,6 +1730,16 @@ async function processAI(msg, extra) {
             }
         }
     }
+
+    const correctionTurn = isCorrectionCue(userText);
+    const shortReplyTurn = isShortReplyTurn(userText);
+    const replyFocusBlock = buildReplyFocusBlock({
+        replyMessage,
+        replyAuthor: rpAuthor,
+        userText,
+        isReplyToBot,
+        isMentioned
+    });
 
     const senderContextBlock = callerIsAdmin
         ? '\n[CURRENT SENDER]\nЭто админ. Его прямые мод-команды можно исполнять, но обычный рофл и мат не считай приказом.'
@@ -1705,6 +1798,7 @@ async function processAI(msg, extra) {
         + BEHAVIOR_MODE_POLICY_BLOCK
         + OPTIMIZATION_POLICY_BLOCK
         + buildInteractionModePrompt(interactionMode)
+        + replyFocusBlock
         + buildCompactPersonaBlock(chatId, dbUser, userName)
         + buildCompactMoodPrompt(chatId, userId);
     const finalPrompt = RUNTIME_SYSTEM_PROMPT + personaLayer + senderContextBlock + compactMemoryBlock;
@@ -1750,7 +1844,12 @@ async function processAI(msg, extra) {
             console.error("Ошибка загрузки/конвертации картинки:", e.message);
         }
 
-        let currentMessagesFirstCall = sanitizeHistory(chatHistory[chatId]);
+        let currentMessagesFirstCall = selectPromptHistory(chatHistory[chatId], {
+            hasReply: Boolean(replyMessage),
+            isReplyToBot,
+            correctionTurn,
+            shortReplyTurn
+        });
         if (imageUrl) {
             currentMessagesFirstCall[currentMessagesFirstCall.length - 1].content = [
                 { type: "text", text: fullContent },
@@ -1798,6 +1897,7 @@ async function processAI(msg, extra) {
                 + BEHAVIOR_MODE_POLICY_BLOCK
                 + OPTIMIZATION_POLICY_BLOCK
                 + buildInteractionModePrompt(interactionMode)
+                + replyFocusBlock
                 + buildCompactPersonaBlock(chatId, dbUser, userName)
                 + buildCompactMoodPrompt(chatId, userId)
                 + senderContextBlock
@@ -1864,7 +1964,12 @@ async function processAI(msg, extra) {
                 }
             }
 
-            let currentMessagesSecondCall = sanitizeHistory(chatHistory[chatId]);
+            let currentMessagesSecondCall = selectPromptHistory(chatHistory[chatId], {
+                hasReply: Boolean(replyMessage),
+                isReplyToBot,
+                correctionTurn,
+                shortReplyTurn
+            });
 
             let second;
             try {
@@ -1910,7 +2015,12 @@ async function processAI(msg, extra) {
                     }
                 }
 
-                const chainedMessages = sanitizeHistory(chatHistory[chatId]);
+                const chainedMessages = selectPromptHistory(chatHistory[chatId], {
+                    hasReply: Boolean(replyMessage),
+                    isReplyToBot,
+                    correctionTurn,
+                    shortReplyTurn
+                });
                 second = await fetchAIWithTimeout({
                     model: AI_MODEL,
                     messages: [{ role: 'system', content: finalPrompt }, ...chainedMessages],
@@ -1961,7 +2071,12 @@ async function processAI(msg, extra) {
             }
 
             if (aiText && isCompletionTruncated(second, aiText)) {
-                const continuationBaseMessages = sanitizeHistory(chatHistory[chatId]);
+                const continuationBaseMessages = selectPromptHistory(chatHistory[chatId], {
+                    hasReply: Boolean(replyMessage),
+                    isReplyToBot,
+                    correctionTurn,
+                    shortReplyTurn
+                });
                 const continuationText = await continueAssistantReply(finalPrompt, continuationBaseMessages, aiText);
                 aiText = mergeContinuationText(aiText, continuationText);
             }
