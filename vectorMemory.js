@@ -24,7 +24,10 @@ const MAX_FACTS_IN_CONTEXT = 6;
 const MAX_KEYWORDS = 4;
 const MAX_SUMMARIES_IN_CONTEXT = 2;
 const AI_TIMEOUT_MS = 30000;
+const MEMORY_EXTRACT_TIMEOUT_MS = Number(process.env.MEMORY_EXTRACT_TIMEOUT_MS || 22000);
 const EMBEDDING_LOG_COOLDOWN_MS = 5 * 60 * 1000;
+const MEMORY_EXTRACT_INPUT_LIMIT = Number(process.env.MEMORY_EXTRACT_INPUT_LIMIT || 2200);
+const MEMORY_EXTRACT_MAX_TOKENS = Number(process.env.MEMORY_EXTRACT_MAX_TOKENS || 320);
 const EXPECTED_EMBEDDING_DIMENSION = 1536;
 
 let lastEmbeddingWarningAt = 0;
@@ -323,7 +326,8 @@ async function summarizeDialogue(historyText, participants = []) {
                 ],
                 temperature: 0,
                 max_tokens: 180
-            })
+            }),
+            MEMORY_EXTRACT_TIMEOUT_MS
         );
 
         return normalizeText(completion.choices[0]?.message?.content || '').slice(0, 500);
@@ -365,6 +369,7 @@ async function extractAndSaveFacts(chatId, historyText, participants = []) {
             .replace(/Чатик 🫐 Nika_grdt 👾/gi, 'Ника')
             .replace(/^(?:Channel|Канал):\s/gmi, 'Ника: ');
 
+        const compactHistory = cleanHistory.slice(0, MEMORY_EXTRACT_INPUT_LIMIT);
         const participantInfo = participants.length > 0
             ? 'Известные имена: ' + participants.map(normalizeName).filter(Boolean).join(', ')
             : '';
@@ -423,9 +428,10 @@ async function extractAndSaveFacts(chatId, historyText, participants = []) {
                     { role: 'user', content: `${participantInfo}\n\nДиалог:\n${cleanHistory.slice(0, 3200)}` }
                 ],
                 temperature: 0,
-                max_tokens: 500,
+                max_tokens: MEMORY_EXTRACT_MAX_TOKENS,
                 response_format: { type: 'json_object' }
-            })
+            }),
+            MEMORY_EXTRACT_TIMEOUT_MS
         );
 
         const rawContent = completion.choices[0]?.message?.content || '{}';
