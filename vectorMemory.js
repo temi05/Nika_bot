@@ -14,7 +14,7 @@ const {
 console.log('✅ [VECTOR MEMORY] Модуль улучшенной памяти подключён');
 
 const POLZA_API_KEY = process.env.POLZA_API_KEY || 'pza_Ut5ahRtIFZSzj_jKezwdRvQMMebqZ1BI';
-const EXTRACTOR_MODEL = process.env.MEMORY_EXTRACTOR_MODEL || 'gpt-4.1-mini';
+const EXTRACTOR_MODEL = process.env.MEMORY_EXTRACTOR_MODEL || process.env.AI_MODEL || 'google/gemini-2.5-flash-lite';
 const EMBEDDING_MODEL = process.env.EMBEDDING_MODEL || 'text-embedding-3-small';
 const AI_BASE_URL = process.env.AI_BASE_URL || process.env.OPENAI_BASE_URL || 'https://polza.ai/api/v1';
 

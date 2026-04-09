@@ -8,6 +8,7 @@ const {
 } = require('../database');
 const { extractAndSaveFacts, getRelevantFacts, forgetFact } = require('../vectorMemory');
 const { ANONYMOUS_ADMIN_ID, SUPER_ADMIN_ID, SUPER_ADMIN_USERNAME } = require('../config');
+const { getPersonaState, upsertPersonaState, normalizePersonaState } = require('../personaState');
 const fs = require('fs');
 const path = require('path');
 
@@ -311,6 +312,8 @@ const chatHistory = {};
 const messageCount = {};
 const activeParticipants = {};
 const aiMood = {};
+const personaStateLoaded = new Set();
+const personaStateSaveQueue = new Map();
 const processingQueue = new Map();
 const extractionBuffer = {};
 const rollingHistory = {};
@@ -547,27 +550,54 @@ function trimHistory(history, maxLen = HISTORY_LIMIT) {
     return trimmed;
 }
 
-function getOrCreateMood(chatId) {
-    if (!aiMood[chatId]) {
-        aiMood[chatId] = {
-            troll: 0.42,
-            warmth: 0.58,
-            chaos: 0.32,
-            attachment: 0.18,
-            stage: 'fresh',
-            exchanges: 0,
-            lastUpdated: Date.now()
-        };
+function getMoodKey(chatId, userId = 'chat') {
+    return `${chatId}:${userId}`;
+}
+
+function getOrCreateMood(chatId, userId = 'chat') {
+    const key = getMoodKey(chatId, userId);
+    if (!aiMood[key]) {
+        aiMood[key] = normalizePersonaState({});
     }
-    return aiMood[chatId];
+    return aiMood[key];
 }
 
 function clamp01(value) {
     return Math.max(0, Math.min(1, Number(value || 0)));
 }
 
-function updateAIMood(chatId, userText, callerIsAdmin, isReplyToBot, isMentioned) {
-    const mood = getOrCreateMood(chatId);
+async function ensurePersonaMoodLoaded(chatId, userId) {
+    const key = getMoodKey(chatId, userId);
+    if (personaStateLoaded.has(key)) return getOrCreateMood(chatId, userId);
+
+    personaStateLoaded.add(key);
+    const stored = await getPersonaState(chatId, userId);
+    if (stored) {
+        aiMood[key] = normalizePersonaState(stored);
+    }
+    return getOrCreateMood(chatId, userId);
+}
+
+function queuePersonaMoodSave(chatId, userId) {
+    const key = getMoodKey(chatId, userId);
+    if (personaStateSaveQueue.has(key)) {
+        clearTimeout(personaStateSaveQueue.get(key));
+    }
+
+    const timeoutId = setTimeout(async () => {
+        personaStateSaveQueue.delete(key);
+        try {
+            await upsertPersonaState(chatId, userId, getOrCreateMood(chatId, userId));
+        } catch (e) {
+            console.warn('[AI MOOD] save failed:', e.message);
+        }
+    }, 1200);
+
+    personaStateSaveQueue.set(key, timeoutId);
+}
+
+function updateAIMood(chatId, userId, userText, callerIsAdmin, isReplyToBot, isMentioned) {
+    const mood = getOrCreateMood(chatId, userId);
     const text = String(userText || '').toLowerCase();
 
     mood.exchanges += 1;
@@ -603,11 +633,12 @@ function updateAIMood(chatId, userText, callerIsAdmin, isReplyToBot, isMentioned
     else mood.stage = AI_PERSONA_STAGES[0];
 
     mood.lastUpdated = Date.now();
+    queuePersonaMoodSave(chatId, userId);
     return mood;
 }
 
-function buildMoodPrompt(chatId) {
-    const mood = getOrCreateMood(chatId);
+function buildMoodPrompt(chatId, userId = 'chat') {
+    const mood = getOrCreateMood(chatId, userId);
     const stageMap = {
         fresh: 'новенькая, присматривается, дерзит аккуратно',
         familiar: 'уже своя, смелее шутит и цепляет людей точнее',
@@ -640,8 +671,24 @@ function stripAIDisclaimer(text) {
     return clean;
 }
 
-function buildCompactMoodPrompt(chatId) {
-    const mood = getOrCreateMood(chatId);
+function stripInternalPromptLeak(text) {
+    let clean = String(text || '');
+    const answerMatch = clean.match(/\[(?:ОТВЕТ|РћРўР’Р•Рў)\]\s*([\s\S]+)/i);
+    if (answerMatch && answerMatch[1]) {
+        clean = answerMatch[1].trim();
+    }
+    clean = clean.replace(/\[(?:ОТНОШЕНИЯ С ПОЛЬЗОВАТЕЛЕМ|РЕЖИМ|ОТВЕТ)\][\s\S]*$/i, '');
+    clean = clean.replace(/(?:^|\n)\[(?:ОТНОШЕНИЯ С ПОЛЬЗОВАТЕЛЕМ|РЕЖИМ|ОТВЕТ)\][^\n]*(?:\n|$)/gi, '\n');
+    clean = clean.replace(/\[(?:ХАРАКТЕРИСТИКА|ХАРАКТЕР|PERSONA|MEMORY POLICY|MODES|OPTIMIZATION|MOOD|RELATIONSHIP|ANTI-[^\]]+)\][\s\S]*$/i, '');
+    clean = clean.replace(/(?:^|\n)\[(?:ХАРАКТЕРИСТИКА|ХАРАКТЕР|PERSONA|MEMORY POLICY|MODES|OPTIMIZATION|MOOD|RELATIONSHIP|ANTI-[^\]]+)\][^\n]*(?:\n|$)/gi, '\n');
+    clean = clean.replace(/(?:^|\n)(?:Живая,\s*хитрая,\s*дерзкая,\s*харизматичная[^\n]*)(?:\n|$)/gi, '\n');
+    clean = clean.replace(/(?:^|\n)(?:Троллинг:|Отказ:|Стадия:|Режим:)[^\n]*(?:\n|$)/gi, '\n');
+    clean = clean.replace(/\n{3,}/g, '\n\n').trim();
+    return clean;
+}
+
+function buildCompactMoodPrompt(chatId, userId = 'chat') {
+    const mood = getOrCreateMood(chatId, userId);
     const stageMap = {
         fresh: 'новенькая, но уже с характером',
         familiar: 'уже своя и смелее шутит',
@@ -664,7 +711,7 @@ function buildCompactMoodPrompt(chatId) {
 
 function buildCompactPersonaBlock(chatId, user, userName) {
     const config = loadPersonaConfig();
-    const mood = getOrCreateMood(chatId);
+    const mood = getOrCreateMood(chatId, user?.user_id || 'chat');
     const seed = mood.exchanges + (user?.id || 0);
     const coreStyle = pickSeeded(config.core, seed);
     const antiDisclaimer = pickSeeded(config.anti_disclaimer, seed + 7);
@@ -824,7 +871,7 @@ function buildRelationshipPrompt(user, userName) {
 
 function buildDynamicPersonaBlock(chatId, user, userName) {
     const config = loadPersonaConfig();
-    const mood = getOrCreateMood(chatId);
+    const mood = getOrCreateMood(chatId, user?.user_id || 'chat');
     const seed = mood.exchanges + (user?.id || 0);
     const trollStyle = pickSeeded(config.troll_styles, seed);
     const refusalStyle = pickSeeded(config.refusal_styles, seed + 1);
@@ -1458,6 +1505,7 @@ async function processAI(msg, extra) {
     if (!chatHistory[chatId]) chatHistory[chatId] = [];
     const { userId, user: realUser } = getSenderData(msg);
     const dbUser = await getUser(chatId, userId, realUser);
+    await ensurePersonaMoodLoaded(chatId, userId);
 
     // ИСПРАВЛЕНИЕ #1: Определение реального имени, если это канал или анонимный админ
     let userName = (dbUser && dbUser.first_name) ? dbUser.first_name : (realUser.first_name || 'Аноним');
@@ -1643,7 +1691,7 @@ async function processAI(msg, extra) {
             delete activeParticipants[chatId][uid];
         }
     }
-    updateAIMood(chatId, userText, callerIsAdmin, isReplyToBot, isMentioned);
+    updateAIMood(chatId, userId, userText, callerIsAdmin, isReplyToBot, isMentioned);
     const shouldLoadMemory = shouldUseMemoryContext(userText, isReplyToBot, isMentioned);
     const relevantFacts = shouldLoadMemory
         ? await getRelevantFacts(chatId, userText, userName, Object.values(activeParticipants[chatId]))
@@ -1658,7 +1706,7 @@ async function processAI(msg, extra) {
         + OPTIMIZATION_POLICY_BLOCK
         + buildInteractionModePrompt(interactionMode)
         + buildCompactPersonaBlock(chatId, dbUser, userName)
-        + buildCompactMoodPrompt(chatId);
+        + buildCompactMoodPrompt(chatId, userId);
     const finalPrompt = RUNTIME_SYSTEM_PROMPT + personaLayer + senderContextBlock + compactMemoryBlock;
     const activeTools = shouldEnableAITools(userText, callerIsAdmin, isReplyToBot, isMentioned) ? aiTools : undefined;
     chatHistory[chatId].push({ role: 'user', content: fullContent });
@@ -1751,7 +1799,7 @@ async function processAI(msg, extra) {
                 + OPTIMIZATION_POLICY_BLOCK
                 + buildInteractionModePrompt(interactionMode)
                 + buildCompactPersonaBlock(chatId, dbUser, userName)
-                + buildCompactMoodPrompt(chatId)
+                + buildCompactMoodPrompt(chatId, userId)
                 + senderContextBlock
                 + buildMemoryBlock(userName, memoryFacts);
 
@@ -1953,7 +2001,7 @@ async function processAI(msg, extra) {
             clean = rewriteProviderRefusal(clean, chatId, userText);
             clean = clean.replace(/\s*\[АДМИН\]/gi, '');
             clean = clean.replace(/\[СИСТЕМНО:[^\]]*\]/gi, '');
-            clean = ensureCharacterfulFallback(stripAIDisclaimer(clean));
+            clean = ensureCharacterfulFallback(stripAIDisclaimer(stripInternalPromptLeak(clean)));
             let escaped = clean.replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
             escaped = escaped.replace(/&lt;b&gt;/gi, '<b>').replace(/&lt;\/b&gt;/gi, '</b>');
