@@ -662,6 +662,10 @@ function buildKnowledgeFingerprint(payload) {
     return `fact|${normalizeMemoryText(buildKnowledgeFactText(payload))}`;
 }
 
+function sanitizeKnowledgeEmbedding(embedding) {
+    return Array.isArray(embedding) && embedding.length === 1536 ? embedding : null;
+}
+
 function shouldPromoteKnowledge(status, confidence, sourceCount, timesSeen) {
     if (status === 'confirmed') return true;
     return (sourceCount >= 2 && confidence >= 0.72) || timesSeen >= 3;
@@ -722,6 +726,7 @@ async function insertKnowledge(chatId, factText, embedding) {
     const fingerprint = buildKnowledgeFingerprint({ ...payload, fact });
     const confidence = Math.max(0.3, Math.min(0.98, Number(payload.confidence || 0.55)));
     const nowIso = new Date().toISOString();
+    const safeEmbedding = sanitizeKnowledgeEmbedding(embedding);
 
     try {
         const { data: existing, error: existingError } = await supabase
@@ -756,7 +761,7 @@ async function insertKnowledge(chatId, factText, embedding) {
                 .from('bot_knowledge')
                 .update({
                     fact,
-                    embedding: embedding || existing.embedding,
+                    embedding: safeEmbedding || existing.embedding,
                     fact_type: payload.factType || existing.fact_type || 'fact',
                     subject_name: payload.subjectName || existing.subject_name || null,
                     relation_type: payload.relationType || existing.relation_type || null,
@@ -785,7 +790,7 @@ async function insertKnowledge(chatId, factText, embedding) {
         const row = {
             chat_id: chatId,
             fact,
-            embedding: embedding || null,
+            embedding: safeEmbedding,
             fact_type: payload.factType || 'fact',
             subject_name: payload.subjectName || null,
             relation_type: payload.relationType || null,
@@ -811,7 +816,7 @@ async function insertKnowledge(chatId, factText, embedding) {
     } catch (error) {
         const fallback = await supabase
             .from('bot_knowledge')
-            .insert([{ chat_id: chatId, fact, embedding: embedding || null }])
+            .insert([{ chat_id: chatId, fact, embedding: null }])
             .select()
             .maybeSingle();
 

@@ -25,6 +25,7 @@ const MAX_KEYWORDS = 4;
 const MAX_SUMMARIES_IN_CONTEXT = 2;
 const AI_TIMEOUT_MS = 30000;
 const EMBEDDING_LOG_COOLDOWN_MS = 5 * 60 * 1000;
+const EXPECTED_EMBEDDING_DIMENSION = 1536;
 
 let lastEmbeddingWarningAt = 0;
 
@@ -55,6 +56,18 @@ function extractEmbeddingVector(response) {
     if (Array.isArray(response?.embeddings?.[0]?.embedding)) return response.embeddings[0].embedding;
     if (Array.isArray(response?.result?.data?.[0]?.embedding)) return response.result.data[0].embedding;
     return null;
+}
+
+function sanitizeEmbeddingVector(embedding, sourceLabel = EMBEDDING_MODEL) {
+    if (!Array.isArray(embedding)) return null;
+    if (embedding.length !== EXPECTED_EMBEDDING_DIMENSION) {
+        logEmbeddingWarning(
+            'Пропускаю embedding',
+            `ожидал ${EXPECTED_EMBEDDING_DIMENSION}, получил ${embedding.length} у модели ${sourceLabel}`
+        );
+        return null;
+    }
+    return embedding;
 }
 
 function normalizeName(value) {
@@ -328,7 +341,7 @@ async function createEmbedding(text) {
         const res = await withTimeout(
             openai.embeddings.create({ model: EMBEDDING_MODEL, input: text.slice(0, 512) })
         );
-        const embedding = extractEmbeddingVector(res);
+        const embedding = sanitizeEmbeddingVector(extractEmbeddingVector(res));
         if (embedding) return embedding;
         const responseKeys = Object.keys(res || {}).slice(0, 8).join(', ');
         logEmbeddingWarning('Ошибка эмбеддинга', `неожиданный формат ответа у модели ${EMBEDDING_MODEL}${responseKeys ? ` | keys: ${responseKeys}` : ''}`);
