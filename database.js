@@ -634,32 +634,54 @@ function normalizeMemoryText(value) {
         .trim();
 }
 
-function buildKnowledgeFactText(payload) {
-    if (payload.fact) return String(payload.fact).trim();
+function normalizeKnowledgePayload(payload) {
+    const base = (payload && typeof payload === 'object') ? { ...payload } : { fact: payload };
 
-    if (payload.factType === 'relation' && payload.subjectName && payload.relationType && payload.objectName) {
-        return `СВЯЗЬ: ${payload.subjectName} -> ${payload.relationType} -> ${payload.objectName}`;
+    const factType = base.factType
+        || (base.kind === 'relation' ? 'relation' : base.kind === 'attribute' ? 'attribute' : undefined)
+        || (base.relation && base.object ? 'relation' : undefined)
+        || (base.attribute && base.value ? 'attribute' : undefined)
+        || 'fact';
+
+    return {
+        ...base,
+        factType,
+        subjectName: base.subjectName || base.subject || null,
+        relationType: base.relationType || base.relation || null,
+        objectName: base.objectName || base.object || null,
+        attribute: base.attribute || null,
+        value: base.value || null,
+    };
+}
+
+function buildKnowledgeFactText(payload) {
+    const normalized = normalizeKnowledgePayload(payload);
+    if (normalized.fact) return String(normalized.fact).trim();
+
+    if (normalized.factType === 'relation' && normalized.subjectName && normalized.relationType && normalized.objectName) {
+        return `СВЯЗЬ: ${normalized.subjectName} -> ${normalized.relationType} -> ${normalized.objectName}`;
     }
 
-    if (payload.subjectName && payload.attribute && payload.value) {
-        return `УЗЕЛ: ${payload.subjectName} | ${payload.attribute}: ${payload.value}`;
+    if (normalized.subjectName && normalized.attribute && normalized.value) {
+        return `УЗЕЛ: ${normalized.subjectName} | ${normalized.attribute}: ${normalized.value}`;
     }
 
     return '';
 }
 
 function buildKnowledgeFingerprint(payload) {
-    if (payload.fingerprint) return normalizeMemoryText(payload.fingerprint);
+    const normalized = normalizeKnowledgePayload(payload);
+    if (normalized.fingerprint) return normalizeMemoryText(normalized.fingerprint);
 
-    if (payload.factType === 'relation') {
-        return `relation|${normalizeMemoryText(payload.subjectName)}|${normalizeMemoryText(payload.relationType)}|${normalizeMemoryText(payload.objectName)}`;
+    if (normalized.factType === 'relation') {
+        return `relation|${normalizeMemoryText(normalized.subjectName)}|${normalizeMemoryText(normalized.relationType)}|${normalizeMemoryText(normalized.objectName)}`;
     }
 
-    if (payload.subjectName && payload.attribute && payload.value) {
-        return `attribute|${normalizeMemoryText(payload.subjectName)}|${normalizeMemoryText(payload.attribute)}|${normalizeMemoryText(payload.value)}`;
+    if (normalized.subjectName && normalized.attribute && normalized.value) {
+        return `attribute|${normalizeMemoryText(normalized.subjectName)}|${normalizeMemoryText(normalized.attribute)}|${normalizeMemoryText(normalized.value)}`;
     }
 
-    return `fact|${normalizeMemoryText(buildKnowledgeFactText(payload))}`;
+    return `fact|${normalizeMemoryText(buildKnowledgeFactText(normalized))}`;
 }
 
 function sanitizeKnowledgeEmbedding(embedding) {
@@ -716,9 +738,7 @@ function applyKnowledgeFilters(rows, options = {}) {
 }
 
 async function insertKnowledge(chatId, factText, embedding) {
-    const payload = (typeof factText === 'object' && factText !== null)
-        ? { ...factText }
-        : { fact: factText };
+    const payload = normalizeKnowledgePayload(factText);
 
     const fact = buildKnowledgeFactText(payload);
     if (!fact) return null;
@@ -972,9 +992,7 @@ async function getRecentKnowledge(chatId, userName = "", limit = 10, options = {
 }
 
 async function checkFactExists(chatId, factText) {
-    const payload = (typeof factText === 'object' && factText !== null)
-        ? { ...factText }
-        : { fact: factText };
+    const payload = normalizeKnowledgePayload(factText);
 
     const fact = buildKnowledgeFactText(payload);
     const fingerprint = buildKnowledgeFingerprint({ ...payload, fact });
