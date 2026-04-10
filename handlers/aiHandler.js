@@ -2323,6 +2323,7 @@ async function processAI(msg, extra) {
             clean = rewriteProviderRefusal(clean, chatId, userText);
             clean = clean.replace(/\s*\[АДМИН\]/gi, '');
             clean = clean.replace(/\[СИСТЕМНО:[^\]]*\]/gi, '');
+            clean = clean.replace(/^\s*\[[^\]\n]*vibe[^\]\n]*\]\s*/gim, '');
             clean = ensureCharacterfulFallback(stripAIDisclaimer(stripInternalPromptLeak(clean)));
             let escaped = clean.replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
