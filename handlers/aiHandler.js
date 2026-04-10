@@ -1624,6 +1624,9 @@ async function processAI(msg, extra) {
     const { userId, user: realUser } = getSenderData(msg);
     const dbUser = await getUser(chatId, userId, realUser);
     await ensurePersonaMoodLoaded(chatId, userId);
+    if (!BOT_ID) {
+        try { const me = await bot.getMe(); BOT_ID = me.id; } catch (e) { }
+    }
     // ИСПРАВЛЕНИЕ #1: Определение реального имени, если это канал или анонимный админ
     let userName = (dbUser && dbUser.first_name) ? dbUser.first_name : (realUser.first_name || 'Аноним');
 
@@ -1731,6 +1734,10 @@ async function processAI(msg, extra) {
                 await updateUser(warnResult.id, { warns: 0, last_warn_at: null });
             } catch (e) { }
         }
+    }
+
+    if (!BOT_ID) {
+        try { const me = await bot.getMe(); BOT_ID = me.id; } catch (e) { }
     }
 
     let replyIdForBot = msg.message_id;
