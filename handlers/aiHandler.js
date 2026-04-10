@@ -396,8 +396,45 @@ const aiMood = {};
 const personaStateLoaded = new Set();
 const personaStateSaveQueue = new Map();
 const processingQueue = new Map();
+const lastVoiceTranscribeAt = new Map();
+const VOICE_TRANSCRIBE_MODE = String(process.env.VOICE_TRANSCRIBE_MODE || 'smart').toLowerCase();
+const VOICE_TRANSCRIBE_MIN_DURATION_SEC = Math.max(1, Number(process.env.VOICE_TRANSCRIBE_MIN_DURATION_SEC || 8));
+const VOICE_TRANSCRIBE_COOLDOWN_SEC = Math.max(0, Number(process.env.VOICE_TRANSCRIBE_COOLDOWN_SEC || 90));
 const extractionBuffer = {};
 const rollingHistory = {};
+
+function getVoiceTranscribeKey(chatId, userId) {
+    return `${chatId}:${userId}`;
+}
+
+function shouldTranscribeVoiceMessage({ msg, chatId, userId }) {
+    const mode = VOICE_TRANSCRIBE_MODE;
+    if (!msg?.voice) return false;
+    if (mode === 'off' || mode === '0' || mode === 'false') return false;
+    if (mode === 'always') return true;
+
+    const rawTextLower = String(msg.text || msg.caption || '').toLowerCase();
+    const aiNameLower = String(AI_NAME || '').toLowerCase();
+    const isReplyToBot = Boolean(msg.reply_to_message && BOT_ID && msg.reply_to_message.from && msg.reply_to_message.from.id === BOT_ID);
+    const isMentioned = isReplyToBot
+        || (aiNameLower && rawTextLower.includes(aiNameLower))
+        || rawTextLower.includes('neironika')
+        || rawTextLower.includes('нейроник');
+    const isPrivate = msg?.chat?.type === 'private';
+    if (isPrivate || isReplyToBot || isMentioned) return true;
+
+    const durationSec = Number(msg.voice.duration || 0);
+    if (durationSec < VOICE_TRANSCRIBE_MIN_DURATION_SEC) return false;
+
+    if (VOICE_TRANSCRIBE_COOLDOWN_SEC > 0) {
+        const key = getVoiceTranscribeKey(chatId, userId);
+        const lastAt = lastVoiceTranscribeAt.get(key) || 0;
+        const now = Date.now();
+        if (now - lastAt < VOICE_TRANSCRIBE_COOLDOWN_SEC * 1000) return false;
+    }
+
+    return true;
+}
 
 const aiTools = [
     {
@@ -1587,7 +1624,6 @@ async function processAI(msg, extra) {
     const { userId, user: realUser } = getSenderData(msg);
     const dbUser = await getUser(chatId, userId, realUser);
     await ensurePersonaMoodLoaded(chatId, userId);
-
     // ИСПРАВЛЕНИЕ #1: Определение реального имени, если это канал или анонимный админ
     let userName = (dbUser && dbUser.first_name) ? dbUser.first_name : (realUser.first_name || 'Аноним');
 
@@ -1608,10 +1644,15 @@ async function processAI(msg, extra) {
     if (msg.video_note) userText += ` [Кружочек/Видеозаметка]`;
 
     // --- ОБРАБОТКА ГОЛОСОВЫХ ---
-    if (msg.voice) {
+    const shouldTranscribeVoice = msg.voice && shouldTranscribeVoiceMessage({ msg, chatId, userId });
+    if (shouldTranscribeVoice) {
+        lastVoiceTranscribeAt.set(getVoiceTranscribeKey(chatId, userId), Date.now());
         const trans = await transcribeAudio(msg.voice.file_id);
         if (trans) userText += ` [Транскрипция голосового: "${trans}"]`;
         else userText += ` [Голосовое сообщение]`;
+    }
+    if (msg.voice && !shouldTranscribeVoice) {
+        userText += ` [Голосовое сообщение без расшифровки]`;
     }
     // ---
 
@@ -1690,10 +1731,6 @@ async function processAI(msg, extra) {
                 await updateUser(warnResult.id, { warns: 0, last_warn_at: null });
             } catch (e) { }
         }
-    }
-
-    if (!BOT_ID) {
-        try { const me = await bot.getMe(); BOT_ID = me.id; } catch (e) { }
     }
 
     let replyIdForBot = msg.message_id;
