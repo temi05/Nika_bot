@@ -6,6 +6,8 @@ let lastBirthdayCheck = {}; // { chatId: dateString }
 const LOG_MESSAGE_EVENTS = process.env.LOG_MESSAGE_EVENTS === '1';
 const LOG_XP_EVENTS = process.env.LOG_XP_EVENTS === '1';
 const LOG_PASSIVE_MEMORY_PREVIEW = process.env.LOG_PASSIVE_MEMORY_PREVIEW === '1';
+const MODERATION_PROFILE = String(process.env.MODERATION_PROFILE || process.env.AI_BEHAVIOR_PROFILE || 'legacy_chaos').trim().toLowerCase();
+const LEGACY_MODERATION_PROFILE = MODERATION_PROFILE === 'legacy' || MODERATION_PROFILE === 'legacy_chaos';
 
 // Буфер последних сообщений для пассивного наблюдения ИИ (только RAM, не в БД)
 const chatBuffer = {}; // { chatId: [{name, text, time}] }
@@ -64,12 +66,13 @@ function registerMessageHandlers() {
                 }
             }
 
-            // ПРИОРИТЕТ ИИ: Если в сообщении есть "НейроНика" или это реплай на ИИ — пропускаем фильтр мата
-            // СТРИМЕРША (Ника) при этом остается под защитой
+            // В balanced-профиле даем поблажку для реплик в сторону ИИ.
+            // В legacy-профиле поблажку выключаем: фильтр работает даже в реплаях к ИИ.
             const isAiMention = text.includes('нейроника');
             const isReplyToAi = msg.reply_to_message && msg.reply_to_message.from.is_bot;
+            const skipFilterForAiContext = !LEGACY_MODERATION_PROFILE && (isAiMention || isReplyToAi);
 
-            if ((foundBadWord || isPromoBlocked) && !isAiMention && !isReplyToAi) {
+            if ((foundBadWord || isPromoBlocked) && !skipFilterForAiContext) {
                 bot.deleteMessage(chatId, msg.message_id).catch(() => { });
                 const newWarns = dbUser.warns + 1;
                 await updateUser(dbUser.id, { warns: newWarns });

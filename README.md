@@ -34,3 +34,29 @@
 
 *   Бот сохраняет данные о пользователях в файл `database.json`.
 *   Бот должен быть администратором в группе, чтобы читать все сообщения (или отключите "Group Privacy" в настройках бота через @BotFather, но лучше просто добавить его).
+
+## AI Профили (новое)
+
+Бот поддерживает профили поведения и пресеты модели через `.env`.
+
+Пример:
+
+```env
+AI_BEHAVIOR_PROFILE=legacy_chaos
+MODERATION_PROFILE=legacy_chaos
+
+# Можно явно задать модель:
+AI_MODEL=mistralai/mistral-small-3.1-24b-instruct
+
+# Или выбрать пресет:
+# AI_MODEL_PRESET=balanced_budget
+# AI_MODEL_PRESET=speed_budget
+# AI_MODEL_PRESET=low_censor_budget
+# AI_MODEL_PRESET=low_censor_pro
+# AI_MODEL_PRESET=low_censor_alt
+
+AI_FAILSAFE_MODEL=google/gemini-2.5-flash-lite
+AI_TEMPERATURE_MAIN=0.72
+AI_TEMPERATURE_TOOL=0.60
+AI_TEMPERATURE_CONTINUATION=0.55
+```

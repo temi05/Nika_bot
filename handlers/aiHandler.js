@@ -66,7 +66,8 @@ function isSimpleProfanityBait(text) {
     return parts.every(part => baitWords.has(part));
 }
 
-function shouldRunModerationAI(text) {
+function shouldRunModerationAI(text, options = {}) {
+    const { isMentioned = false, isReplyToBot = false } = options;
     const normalized = String(text || '').toLowerCase().trim();
     if (!normalized) return false;
 
@@ -75,7 +76,52 @@ function shouldRunModerationAI(text) {
     if (/(spam|спам|реклама|casino|казино|ставки|беттинг)/i.test(normalized)) return true;
     if (/([!?.,])\1{5,}/.test(normalized)) return true;
     if (normalized.length > 180 && /(иди нах|пошел нах|сдохни|мразь|шлюх|пидор|педик|уеб)/i.test(normalized)) return true;
+
+    if (LEGACY_MODERATION_MODE && (isMentioned || isReplyToBot)) {
+        if (/(сдохни|иди\s*нах|пош[её]л\s*нах|нахуй|уеб|мраз|чмо|твар|пидор|шлюх|долбоеб|ебан)/i.test(normalized)) return true;
+    }
+
+    if (LEGACY_MODERATION_MODE && normalized.length >= 14 && /(уеб|мраз|чмо|пидор|шлюх|долбоеб|ебан|твар)/i.test(normalized)) return true;
     return false;
+}
+
+function getLegacyModerationOverride(text, options = {}) {
+    if (!LEGACY_MODERATION_MODE) return null;
+
+    const { isMentioned = false, isReplyToBot = false, callerIsAdmin = false } = options;
+    if (callerIsAdmin) return null;
+
+    const normalized = String(text || '').toLowerCase().replace(/\s+/g, ' ').trim();
+    if (!normalized) return null;
+
+    const botTargeted = isReplyToBot || isMentioned || /\b(нейроник|неироник|бот|ии|ai)\b/.test(normalized);
+    if (!botTargeted) return null;
+
+    const severePattern = /(убью|kill yourself|сдохни|ебан(ую|ая|ый)|пош[её]л\s*нах|иди\s*нах|нахуй|тварь|шлюха|мразь)/i;
+    if (severePattern.test(normalized)) {
+        return {
+            type: 'toxic',
+            severity: 0.95,
+            action: 'mute',
+            is_banter: false,
+            reason: 'Прямое агрессивное оскорбление бота',
+            suggested_mute_minutes: 120
+        };
+    }
+
+    const toxicPattern = /(уеб|долбоеб|мраз|чмо|пидор|сука|шлюх|кончен|туп(ая|ой)\s*бот)/i;
+    if (toxicPattern.test(normalized)) {
+        return {
+            type: 'toxic',
+            severity: 0.75,
+            action: 'warn',
+            is_banter: false,
+            reason: 'Прямое оскорбление бота',
+            suggested_mute_minutes: 0
+        };
+    }
+
+    return null;
 }
 
 function shouldUseMemoryContext(text, isReplyToBot, isMentioned) {
@@ -206,6 +252,17 @@ function buildInteractionModePrompt(mode) {
     return `\n[ACTIVE MODE]\n${instructions[safeMode] || instructions.chat}\n`;
 }
 
+function buildBehaviorProfilePrompt() {
+    if (!LEGACY_BEHAVIOR_MODE && !LEGACY_MODERATION_MODE) {
+        return `\n[PROFILE]\nПрофиль balanced: живой дерзкий вайб без лишней жести, приоритет — точность и стабильность.\n`;
+    }
+
+    return `\n[PROFILE]\nПрофиль legacy_chaos активен:
+- можно говорить грубее и местами с матом, если это уместно по вайбу;
+- на прямые оскорбления бота и явный токсик реагируй жестко, коротко и без сюсюканья;
+- если человек реально уязвим, болеет или просит помощи всерьез — сразу смягчайся.\n`;
+}
+
 let BOT_ID = null;
 
 let premiumEmojiList = [];
@@ -248,14 +305,55 @@ const DEFAULT_PERSONA_CONFIG = {
 
 let personaConfigCache = null;
 
+const MODEL_PRESETS = Object.freeze({
+    balanced_budget: 'google/gemini-2.5-flash-lite',
+    speed_budget: 'google/gemini-2.5-flash-lite',
+    low_censor_budget: 'qwen/qwen2.5-32b-instruct',
+    low_censor_pro: 'qwen/qwen2.5-72b-instruct',
+    low_censor_alt: 'mistralai/mistral-small-3.1-24b-instruct'
+});
+
+function resolveModelFromEnv(explicitModel, presetName, fallbackModel) {
+    const explicit = String(explicitModel || '').trim();
+    if (explicit) return explicit;
+
+    const preset = String(presetName || '').trim().toLowerCase();
+    if (preset && MODEL_PRESETS[preset]) return MODEL_PRESETS[preset];
+
+    return fallbackModel;
+}
+
+function isLegacyProfileValue(value) {
+    const normalized = String(value || '').trim().toLowerCase();
+    return normalized === 'legacy' || normalized === 'legacy_chaos';
+}
+
+function parseTemperatureValue(value, fallback) {
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed)) return fallback;
+    return Math.max(0, Math.min(1.2, parsed));
+}
+
 const POLZA_API_KEY = process.env.POLZA_API_KEY || 'pza_Ut5ahRtIFZSzj_jKezwdRvQMMebqZ1BI';
-const AI_MODEL = process.env.AI_MODEL || 'google/gemini-2.5-flash-lite';
-const MODERATION_MODEL = process.env.MODERATION_MODEL || AI_MODEL;
+const AI_MODEL = resolveModelFromEnv(process.env.AI_MODEL, process.env.AI_MODEL_PRESET || 'low_censor_alt', MODEL_PRESETS.low_censor_alt);
+const MODERATION_MODEL = resolveModelFromEnv(process.env.MODERATION_MODEL, process.env.MODERATION_MODEL_PRESET, AI_MODEL);
+const AI_VISION_MODEL = process.env.AI_VISION_MODEL || 'google/gemini-2.5-flash-lite';
+const AI_FAILSAFE_MODEL = process.env.AI_FAILSAFE_MODEL || AI_VISION_MODEL;
 const AI_BASE_URL = process.env.AI_BASE_URL || process.env.OPENAI_BASE_URL || 'https://polza.ai/api/v1';
 const AI_PROVIDER_ORDER = String(process.env.AI_PROVIDER_ORDER || '').split(',').map(item => item.trim()).filter(Boolean);
 const AI_ALLOW_PROVIDER_FALLBACKS = String(process.env.AI_ALLOW_PROVIDER_FALLBACKS || 'true').toLowerCase() !== 'false';
+const AI_BEHAVIOR_PROFILE = String(process.env.AI_BEHAVIOR_PROFILE || 'legacy_chaos').trim().toLowerCase();
+const MODERATION_PROFILE = String(process.env.MODERATION_PROFILE || AI_BEHAVIOR_PROFILE).trim().toLowerCase();
+const LEGACY_BEHAVIOR_MODE = isLegacyProfileValue(AI_BEHAVIOR_PROFILE);
+const LEGACY_MODERATION_MODE = isLegacyProfileValue(MODERATION_PROFILE);
+const AI_TEMPERATURE_MAIN = parseTemperatureValue(process.env.AI_TEMPERATURE_MAIN, LEGACY_BEHAVIOR_MODE ? 0.72 : 0.55);
+const AI_TEMPERATURE_TOOL = parseTemperatureValue(process.env.AI_TEMPERATURE_TOOL, LEGACY_BEHAVIOR_MODE ? 0.6 : 0.5);
+const AI_TEMPERATURE_CONTINUATION = parseTemperatureValue(process.env.AI_TEMPERATURE_CONTINUATION, LEGACY_BEHAVIOR_MODE ? 0.55 : 0.45);
 
 const AI_NAME = process.env.AI_NAME || 'НейроНика';
+const MODERATION_PROFILE_HINT = LEGACY_MODERATION_MODE
+    ? `\nДоп. режим legacy_chaos:\n- если есть прямое оскорбление бота/ИИ (особенно в реплае или по имени) — не считай это harmless banter;\n- за явный токсик к боту предпочитай warn или mute, а не ignore;\n- шуточный мат между своими без адресной травли всё ещё можно игнорировать.`
+    : `\nДоп. режим balanced:\n- сохраняй мягкую модерацию и старайся не эскалировать дружеский рофл.`;
 
 const openai = new OpenAI({
     apiKey: POLZA_API_KEY,
@@ -303,6 +401,7 @@ async function analyzeMessage(text) {
 - 1440 минут: крайние случаи
 
 Никогда не наказывай просто за мат, сарказм или шутливую грубость между знакомыми участниками.
+${MODERATION_PROFILE_HINT}
 `
                 },
                 { role: "user", content: text }
@@ -1036,9 +1135,24 @@ function shouldExposeToolResultToChat(fnName, resultText) {
 }
 
 async function fetchAIWithTimeout(payload, timeoutMs = 40000) {
-    const apiCall = openai.chat.completions.create(withProviderRouting(payload));
-    const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error('TIMEOUT')), timeoutMs));
-    return Promise.race([apiCall, timeout]);
+    const runRequest = async (requestPayload) => {
+        const apiCall = openai.chat.completions.create(withProviderRouting(requestPayload));
+        const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error('TIMEOUT')), timeoutMs));
+        return Promise.race([apiCall, timeout]);
+    };
+
+    const isModelResolutionError = (error) => /(model|not found|unknown|unsupported|does not exist|invalid model|unavailable)/i.test(String(error?.message || ''));
+
+    try {
+        return await runRequest(payload);
+    } catch (error) {
+        const requestedModel = String(payload?.model || '').trim();
+        if (requestedModel && requestedModel !== AI_FAILSAFE_MODEL && isModelResolutionError(error)) {
+            console.warn(`[AI MODEL FALLBACK] ${requestedModel} недоступна, пробую ${AI_FAILSAFE_MODEL}`);
+            return runRequest({ ...payload, model: AI_FAILSAFE_MODEL });
+        }
+        throw error;
+    }
 }
 
 function isCompletionTruncated(completion, text = '') {
@@ -1090,7 +1204,7 @@ async function continueAssistantReply(systemPrompt, baseMessages, partialText, t
                 { role: 'assistant', content: partial },
                 { role: 'user', content: 'Продолжи свой последний ответ с того же места. Не повторяй уже написанное и закончи мысль естественно.' }
             ],
-            temperature: 0.45,
+            temperature: AI_TEMPERATURE_CONTINUATION,
             max_tokens: CONTINUATION_MAX_TOKENS
         }, timeoutMs);
 
@@ -1139,7 +1253,7 @@ async function continueToolChain(chatId, finalPrompt, toolContext, maxRounds = M
             model: AI_MODEL,
             messages: [{ role: 'system', content: finalPrompt }, ...currentMessages],
             tools: aiTools,
-            temperature: 0.5,
+            temperature: AI_TEMPERATURE_TOOL,
             max_tokens: SECOND_PASS_MAX_TOKENS
         }, 50000);
 
@@ -1667,7 +1781,10 @@ async function processAI(msg, extra) {
     const moderationNameTriggered = textLower.includes('нейроника') || textLower.includes('нейронику') || textLower.includes('нейронике') || textLower.includes('neironika');
     const moderationIsReplyToBot = msg.reply_to_message && BOT_ID && msg.reply_to_message.from.id === BOT_ID;
     const moderationIsMentioned = moderationNameTriggered || moderationIsReplyToBot || isBaitTriggerMessage(userText);
-    const moderationNeeded = shouldRunModerationAI(userText);
+    const moderationNeeded = shouldRunModerationAI(userText, {
+        isMentioned: moderationIsMentioned,
+        isReplyToBot: moderationIsReplyToBot
+    });
     // ======================
     // 🛡️ MODERATION CHECK
     // ======================
@@ -1681,9 +1798,18 @@ async function processAI(msg, extra) {
     }
 
     // AI анализ
-    const analysis = moderationNeeded
+    let analysis = moderationNeeded
         ? await analyzeMessage(userText)
         : { type: "normal", severity: 0, action: "ignore", is_banter: false, reason: "", suggested_mute_minutes: 0 };
+
+    const legacyOverride = getLegacyModerationOverride(userText, {
+        isMentioned: moderationIsMentioned,
+        isReplyToBot: moderationIsReplyToBot,
+        callerIsAdmin
+    });
+    if (legacyOverride) {
+        analysis = { ...analysis, ...legacyOverride };
+    }
 
     if (callerIsProtected && isSimpleProfanityBait(userText)) {
         analysis.action = 'ignore';
@@ -1852,6 +1978,7 @@ async function processAI(msg, extra) {
         + MEMORY_USAGE_POLICY_BLOCK
         + BEHAVIOR_MODE_POLICY_BLOCK
         + OPTIMIZATION_POLICY_BLOCK
+        + buildBehaviorProfilePrompt()
         + buildInteractionModePrompt(interactionMode)
         + replyFocusBlock
         + buildCompactPersonaBlock(chatId, dbUser, userName)
@@ -1915,14 +2042,14 @@ async function processAI(msg, extra) {
 
         let completion;
         try {
-            const targetModel = imageUrl ? 'google/gemini-2.0-flash-001' : AI_MODEL;
+            const targetModel = imageUrl ? AI_VISION_MODEL : AI_MODEL;
 
             completion = await fetchAIWithTimeout({
                 model: targetModel,
                 messages: [{ role: 'system', content: finalPrompt }, ...currentMessagesFirstCall],
                 tools: activeTools,
                 max_tokens: FIRST_PASS_MAX_TOKENS,
-                temperature: 0.55
+                temperature: AI_TEMPERATURE_MAIN
             });
         } catch (e) {
             console.error("❌ Модель не справилась:", e.message);
@@ -1951,6 +2078,7 @@ async function processAI(msg, extra) {
                 + MEMORY_USAGE_POLICY_BLOCK
                 + BEHAVIOR_MODE_POLICY_BLOCK
                 + OPTIMIZATION_POLICY_BLOCK
+                + buildBehaviorProfilePrompt()
                 + buildInteractionModePrompt(interactionMode)
                 + replyFocusBlock
                 + buildCompactPersonaBlock(chatId, dbUser, userName)
@@ -1966,7 +2094,7 @@ async function processAI(msg, extra) {
                 ],
                 tools: activeTools,
                 max_tokens: FIRST_PASS_MAX_TOKENS,
-                temperature: 0.55
+                temperature: AI_TEMPERATURE_MAIN
             });
         }
 
@@ -2032,7 +2160,7 @@ async function processAI(msg, extra) {
                     model: AI_MODEL,
                     messages: [{ role: 'system', content: finalPrompt }, ...currentMessagesSecondCall],
                     tools: activeTools,
-                    temperature: 0.5,
+                    temperature: AI_TEMPERATURE_TOOL,
                     max_tokens: SECOND_PASS_MAX_TOKENS
                 });
             } catch (e2) {
@@ -2040,10 +2168,10 @@ async function processAI(msg, extra) {
                 // Страховка на случай падения второго вызова (с увеличенным таймаутом и резервной моделью)
                 try {
                     second = await fetchAIWithTimeout({
-                        model: 'google/gemini-2.0-flash-001',
+                        model: AI_FAILSAFE_MODEL,
                         messages: [{ role: 'system', content: finalPrompt }, ...currentMessagesSecondCall],
                         tools: activeTools,
-                        temperature: 0.5,
+                        temperature: AI_TEMPERATURE_TOOL,
                         max_tokens: SECOND_PASS_MAX_TOKENS
                     }, 50000); // 50 секунд для второго шанса
                 } catch (e3) {
@@ -2080,7 +2208,7 @@ async function processAI(msg, extra) {
                     model: AI_MODEL,
                     messages: [{ role: 'system', content: finalPrompt }, ...chainedMessages],
                     tools: activeTools,
-                    temperature: 0.5,
+                    temperature: AI_TEMPERATURE_TOOL,
                     max_tokens: SECOND_PASS_MAX_TOKENS
                 }, 50000);
                 aiText = second?.choices?.[0]?.message?.content;
