@@ -1790,9 +1790,20 @@ async function processAI(msg, extra) {
         : '\n[CURRENT SENDER]\nЭто обычный пользователь.';
     const fullContent = `${userName} ${replyPrefix}: ${userText}`;
 
-    let memoryLine = `${userName}: ${userText}`;
+    let memoryText = String(userText || '');
+    if (isReplyToBot || nameTriggered) {
+        memoryText = memoryText
+            .replace(/нейро\s*ника/gi, 'Нейроника')
+            .replace(/нейроника/gi, 'Нейроника')
+            .replace(/neironika/gi, 'Нейроника');
+    }
+    if (isReplyToBot) {
+        memoryText = memoryText.replace(/\bника\b/gi, 'Нейроника');
+    }
+
+    let memoryLine = `${userName}: ${memoryText}`;
     if (msg.reply_to_message) {
-        memoryLine = `${userName} (в ответ ${rpAuthor}): ${userText}`;
+        memoryLine = `${userName} (в ответ ${rpAuthor}): ${memoryText}`;
     }
 
     console.log(`💬 [CHAT IN] ${userName}: ${userText.substring(0, 60)}${userText.length > 60 ? '...' : ''}`);

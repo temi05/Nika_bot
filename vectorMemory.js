@@ -78,10 +78,10 @@ function sanitizeEmbeddingVector(embedding, sourceLabel = EMBEDDING_MODEL) {
 
 function normalizeName(value) {
     return String(value || '')
-        .replace(/Чатик 🫐 Nika_grdt 👾/gi, 'Ника')
-        .replace(/^channel$/i, 'Ника')
-        .replace(/^канал$/i, 'Ника')
-        .replace(/^ника \(канал\)$/i, 'Ника')
+        .replace(/Чатик 🫐 Nika_grdt 👾/gi, 'Нейроника')
+        .replace(/^channel$/i, 'Ника (канал)')
+        .replace(/^канал$/i, 'Ника (канал)')
+        .replace(/^ника \(канал\)$/i, 'Ника (канал)')
         .trim();
 }
 
@@ -375,8 +375,8 @@ async function extractAndSaveFacts(chatId, historyText, participants = []) {
 
     try {
         const cleanHistory = historyText
-            .replace(/Чатик 🫐 Nika_grdt 👾/gi, 'Ника')
-            .replace(/^(?:Channel|Канал):\s/gmi, 'Ника: ');
+            .replace(/Чатик 🫐 Nika_grdt 👾/gi, 'Нейроника')
+            .replace(/^(?:Channel|Канал):\s/gmi, 'Ника (канал): ');
 
         const compactHistory = cleanHistory.slice(0, MEMORY_EXTRACT_INPUT_LIMIT);
         const participantInfo = participants.length > 0
@@ -395,8 +395,9 @@ async function extractAndSaveFacts(chatId, historyText, participants = []) {
 - мусор вроде "участник диалога";
 - сомнительные и неявные факты.
 
-Если в диалоге встречаются Channel, Канал или Ника (канал), это Ника.
-Следи за направлением связи: "Саня -> фанат -> Ника", а не наоборот.
+Если в диалоге встречаются Channel, Канал или Ника (канал), это Ника (канал), а не человек.
+Нейроника — это только явные упоминания "Нейроника"/"Neironika" и контекст обращения к боту.
+Следи за направлением связи и не инвертируй роли.
 
 Верни JSON:
 {
@@ -586,7 +587,7 @@ async function getRelevantFacts(chatId, userMessage, userName = '', activePartic
     try {
         if (!userMessage || userMessage.trim().length < 3) return '';
 
-        const cleanMessage = normalizeText(userMessage.replace(/Чатик 🫐 Nika_grdt 👾/gi, 'Ника'));
+        const cleanMessage = normalizeText(userMessage.replace(/Чатик 🫐 Nika_grdt 👾/gi, 'Нейроника'));
         const cleanUserName = normalizeName(userName);
         const allFoundFacts = new Map();
 
