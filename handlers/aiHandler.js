@@ -339,6 +339,7 @@ const AI_MODEL = resolveModelFromEnv(process.env.AI_MODEL, process.env.AI_MODEL_
 const MODERATION_MODEL = resolveModelFromEnv(process.env.MODERATION_MODEL, process.env.MODERATION_MODEL_PRESET, AI_MODEL);
 const AI_VISION_MODEL = process.env.AI_VISION_MODEL || 'google/gemini-2.5-flash-lite';
 const AI_FAILSAFE_MODEL = process.env.AI_FAILSAFE_MODEL || AI_VISION_MODEL;
+const AI_TOOL_MODEL = process.env.AI_TOOL_MODEL || AI_FAILSAFE_MODEL;
 const AI_BASE_URL = process.env.AI_BASE_URL || process.env.OPENAI_BASE_URL || 'https://polza.ai/api/v1';
 const AI_PROVIDER_ORDER = String(process.env.AI_PROVIDER_ORDER || '').split(',').map(item => item.trim()).filter(Boolean);
 const AI_ALLOW_PROVIDER_FALLBACKS = String(process.env.AI_ALLOW_PROVIDER_FALLBACKS || 'true').toLowerCase() !== 'false';
@@ -1142,16 +1143,38 @@ async function fetchAIWithTimeout(payload, timeoutMs = 40000) {
     };
 
     const isModelResolutionError = (error) => /(model|not found|unknown|unsupported|does not exist|invalid model|unavailable)/i.test(String(error?.message || ''));
+    const isToolUseUnsupportedError = (error) => /(no endpoints found that support tool use|support tool use|tool use)/i.test(String(error?.message || ''));
+    const stripToolsFromPayload = (requestPayload) => {
+        const next = { ...requestPayload };
+        delete next.tools;
+        delete next.tool_choice;
+        return next;
+    };
+
+    let attemptPayload = { ...payload };
+    let currentError = null;
 
     try {
-        return await runRequest(payload);
+        return await runRequest(attemptPayload);
     } catch (error) {
-        const requestedModel = String(payload?.model || '').trim();
+        currentError = error;
+        const requestedModel = String(attemptPayload?.model || '').trim();
         if (requestedModel && requestedModel !== AI_FAILSAFE_MODEL && isModelResolutionError(error)) {
             console.warn(`[AI MODEL FALLBACK] ${requestedModel} недоступна, пробую ${AI_FAILSAFE_MODEL}`);
-            return runRequest({ ...payload, model: AI_FAILSAFE_MODEL });
+            attemptPayload = { ...attemptPayload, model: AI_FAILSAFE_MODEL };
+            try {
+                return await runRequest(attemptPayload);
+            } catch (fallbackError) {
+                currentError = fallbackError;
+            }
         }
-        throw error;
+
+        if (attemptPayload?.tools && isToolUseUnsupportedError(currentError)) {
+            console.warn(`[AI TOOLS FALLBACK] Провайдер не поддерживает tool use для ${attemptPayload.model}, продолжаю без tools`);
+            return runRequest(stripToolsFromPayload(attemptPayload));
+        }
+
+        throw currentError;
     }
 }
 
@@ -1250,7 +1273,7 @@ async function continueToolChain(chatId, finalPrompt, toolContext, maxRounds = M
         rounds++;
         const currentMessages = sanitizeHistory(chatHistory[chatId]);
         const completion = await fetchAIWithTimeout({
-            model: AI_MODEL,
+            model: AI_TOOL_MODEL,
             messages: [{ role: 'system', content: finalPrompt }, ...currentMessages],
             tools: aiTools,
             temperature: AI_TEMPERATURE_TOOL,
@@ -2043,9 +2066,10 @@ async function processAI(msg, extra) {
         let completion;
         try {
             const targetModel = imageUrl ? AI_VISION_MODEL : AI_MODEL;
+            const callModel = activeTools ? AI_TOOL_MODEL : targetModel;
 
             completion = await fetchAIWithTimeout({
-                model: targetModel,
+                model: callModel,
                 messages: [{ role: 'system', content: finalPrompt }, ...currentMessagesFirstCall],
                 tools: activeTools,
                 max_tokens: FIRST_PASS_MAX_TOKENS,
@@ -2087,7 +2111,7 @@ async function processAI(msg, extra) {
                 + buildMemoryBlock(userName, memoryFacts);
 
             completion = await fetchAIWithTimeout({
-                model: AI_MODEL,
+                model: activeTools ? AI_TOOL_MODEL : AI_MODEL,
                 messages: [
                     { role: 'system', content: fallbackPrompt },
                     ...currentMessagesFirstCall
@@ -2157,7 +2181,7 @@ async function processAI(msg, extra) {
             let second;
             try {
                 second = await fetchAIWithTimeout({
-                    model: AI_MODEL,
+                    model: activeTools ? AI_TOOL_MODEL : AI_MODEL,
                     messages: [{ role: 'system', content: finalPrompt }, ...currentMessagesSecondCall],
                     tools: activeTools,
                     temperature: AI_TEMPERATURE_TOOL,
@@ -2205,7 +2229,7 @@ async function processAI(msg, extra) {
                     shortReplyTurn
                 });
                 second = await fetchAIWithTimeout({
-                    model: AI_MODEL,
+                    model: activeTools ? AI_TOOL_MODEL : AI_MODEL,
                     messages: [{ role: 'system', content: finalPrompt }, ...chainedMessages],
                     tools: activeTools,
                     temperature: AI_TEMPERATURE_TOOL,

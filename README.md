@@ -47,6 +47,8 @@ MODERATION_PROFILE=legacy_chaos
 
 # Можно явно задать модель:
 AI_MODEL=mistralai/mistral-small-3.1-24b-instruct
+# Отдельная модель для tool/function call (рекомендуется gemini flash-lite):
+AI_TOOL_MODEL=google/gemini-2.5-flash-lite
 
 # Или выбрать пресет:
 # AI_MODEL_PRESET=balanced_budget
