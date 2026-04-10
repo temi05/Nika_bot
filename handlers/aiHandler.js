@@ -339,7 +339,7 @@ const AI_MODEL = resolveModelFromEnv(process.env.AI_MODEL, process.env.AI_MODEL_
 const MODERATION_MODEL = resolveModelFromEnv(process.env.MODERATION_MODEL, process.env.MODERATION_MODEL_PRESET, AI_MODEL);
 const AI_VISION_MODEL = process.env.AI_VISION_MODEL || 'google/gemini-2.5-flash-lite';
 const AI_FAILSAFE_MODEL = process.env.AI_FAILSAFE_MODEL || AI_VISION_MODEL;
-const AI_TOOL_MODEL = process.env.AI_TOOL_MODEL || AI_FAILSAFE_MODEL;
+const AI_TOOL_MODEL = process.env.AI_TOOL_MODEL || AI_MODEL;
 const AI_BASE_URL = process.env.AI_BASE_URL || process.env.OPENAI_BASE_URL || 'https://polza.ai/api/v1';
 const AI_PROVIDER_ORDER = String(process.env.AI_PROVIDER_ORDER || '').split(',').map(item => item.trim()).filter(Boolean);
 const AI_ALLOW_PROVIDER_FALLBACKS = String(process.env.AI_ALLOW_PROVIDER_FALLBACKS || 'true').toLowerCase() !== 'false';
@@ -1170,8 +1170,17 @@ async function fetchAIWithTimeout(payload, timeoutMs = 40000) {
         }
 
         if (attemptPayload?.tools && isToolUseUnsupportedError(currentError)) {
+            if (attemptPayload.model !== AI_FAILSAFE_MODEL) {
+                console.warn(`[AI TOOLS FALLBACK] ${attemptPayload.model} не поддерживает tool use, пробую ${AI_FAILSAFE_MODEL} с tools`);
+                try {
+                    return await runRequest({ ...attemptPayload, model: AI_FAILSAFE_MODEL });
+                } catch (toolFallbackError) {
+                    currentError = toolFallbackError;
+                }
+            }
+
             console.warn(`[AI TOOLS FALLBACK] Провайдер не поддерживает tool use для ${attemptPayload.model}, продолжаю без tools`);
-            return runRequest(stripToolsFromPayload(attemptPayload));
+            return runRequest(stripToolsFromPayload({ ...attemptPayload, model: AI_FAILSAFE_MODEL }));
         }
 
         throw currentError;
@@ -1262,6 +1271,69 @@ function splitPlainText(text, limit = TELEGRAM_MESSAGE_LIMIT) {
 
     if (rest) chunks.push(rest);
     return chunks;
+}
+
+function normalizeForRepeatCheck(text) {
+    return String(text || '')
+        .toLowerCase()
+        .replace(/<[^>]*>/g, ' ')
+        .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+}
+
+function tokenOverlapScore(a, b) {
+    const aTokens = normalizeForRepeatCheck(a).split(' ').filter(Boolean);
+    const bTokens = normalizeForRepeatCheck(b).split(' ').filter(Boolean);
+    if (aTokens.length === 0 || bTokens.length === 0) return 0;
+
+    const aSet = new Set(aTokens);
+    const bSet = new Set(bTokens);
+    let intersection = 0;
+    for (const token of aSet) {
+        if (bSet.has(token)) intersection++;
+    }
+    return intersection / Math.max(1, Math.min(aSet.size, bSet.size));
+}
+
+function diversifyIfRepeated(chatId, text) {
+    const current = String(text || '').trim();
+    if (!current) return current;
+
+    const history = chatHistory[chatId] || [];
+    const lastAssistant = [...history].reverse().find((m) => m?.role === 'assistant' && m?.content);
+    if (!lastAssistant) return current;
+
+    const lastText = String(lastAssistant.content || '').trim();
+    if (!lastText) return current;
+
+    let candidate = current;
+    const currentFirst = candidate.split(/(?<=[.!?])\s+/)[0] || candidate;
+    const lastFirst = lastText.split(/(?<=[.!?])\s+/)[0] || lastText;
+    const sameFirstSentence = normalizeForRepeatCheck(currentFirst) && normalizeForRepeatCheck(currentFirst) === normalizeForRepeatCheck(lastFirst);
+
+    if (sameFirstSentence) {
+        const chunks = candidate.split(/(?<=[.!?])\s+/).filter(Boolean);
+        if (chunks.length > 1) {
+            chunks.shift();
+            candidate = chunks.join(' ').trim();
+        }
+    }
+
+    const exactDuplicate = normalizeForRepeatCheck(candidate) === normalizeForRepeatCheck(lastText);
+    const overlap = tokenOverlapScore(candidate, lastText);
+    if (exactDuplicate || overlap >= 0.9) {
+        const antiRepeatPrefixes = [
+            'Окей, перефразирую:',
+            'Ладно, скажу по-другому:',
+            'Без повтора, коротко:',
+            'Давай так:'
+        ];
+        const prefix = antiRepeatPrefixes[Math.floor(Math.random() * antiRepeatPrefixes.length)];
+        candidate = `${prefix} ${candidate}`.trim();
+    }
+
+    return candidate || current;
 }
 
 async function continueToolChain(chatId, finalPrompt, toolContext, maxRounds = MAX_TOOL_ROUNDS) {
@@ -2066,7 +2138,7 @@ async function processAI(msg, extra) {
         let completion;
         try {
             const targetModel = imageUrl ? AI_VISION_MODEL : AI_MODEL;
-            const callModel = activeTools ? AI_TOOL_MODEL : targetModel;
+            const callModel = imageUrl ? targetModel : (activeTools ? AI_TOOL_MODEL : targetModel);
 
             completion = await fetchAIWithTimeout({
                 model: callModel,
@@ -2325,6 +2397,7 @@ async function processAI(msg, extra) {
             clean = clean.replace(/\[СИСТЕМНО:[^\]]*\]/gi, '');
             clean = clean.replace(/^\s*\[[^\]\n]*vibe[^\]\n]*\]\s*/gim, '');
             clean = ensureCharacterfulFallback(stripAIDisclaimer(stripInternalPromptLeak(clean)));
+            clean = diversifyIfRepeated(chatId, clean);
             let escaped = clean.replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
             escaped = escaped.replace(/&lt;b&gt;/gi, '<b>').replace(/&lt;\/b&gt;/gi, '</b>');
