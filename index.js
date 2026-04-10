@@ -36,6 +36,9 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
 const RENDER_URL = process.env.RENDER_EXTERNAL_URL;
+const LOG_WEBHOOK_MESSAGES = process.env.LOG_WEBHOOK_MESSAGES === '1';
+const LOG_WEBHOOK_REACTIONS = process.env.LOG_WEBHOOK_REACTIONS === '1';
+const LOG_WEBHOOK_CALLBACKS = process.env.LOG_WEBHOOK_CALLBACKS !== '0';
 
 app.use('/miniapp', express.static(path.join(__dirname, 'miniapp')));
 app.use('/api', apiRouter);
@@ -76,15 +79,15 @@ app.post(`/bot${token}`, (req, res) => {
 
     // Логируем тип входящего события
     const body = req.body;
-    if (body.message) {
+    if (body.message && LOG_WEBHOOK_MESSAGES) {
         const m = body.message;
         const chatId = m.chat?.id;
         const userId = m.from?.id;
         const text = m.text || m.caption || '[медиа]';
         console.log(`📨 [WEBHOOK] msg | chat:${chatId} | user:${userId} | text: ${text.slice(0, 50)}`);
-    } else if (body.message_reaction) {
+    } else if (body.message_reaction && LOG_WEBHOOK_REACTIONS) {
         console.log(`👍 [WEBHOOK] reaction | chat:${body.message_reaction.chat?.id}`);
-    } else if (body.callback_query) {
+    } else if (body.callback_query && LOG_WEBHOOK_CALLBACKS) {
         console.log(`🔘 [WEBHOOK] callback | user:${body.callback_query.from?.id} | data:${body.callback_query.data}`);
     } else {
         const updateType = Object.keys(body).filter(k => k !== 'update_id')[0] || 'unknown';

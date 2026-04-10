@@ -3,6 +3,9 @@ const { getUser, updateUser, getBadWords, messageAuthors, reactionCooldowns, ANO
 const { handleAIChat } = require('./aiHandler');
 
 let lastBirthdayCheck = {}; // { chatId: dateString }
+const LOG_MESSAGE_EVENTS = process.env.LOG_MESSAGE_EVENTS === '1';
+const LOG_XP_EVENTS = process.env.LOG_XP_EVENTS === '1';
+const LOG_PASSIVE_MEMORY_PREVIEW = process.env.LOG_PASSIVE_MEMORY_PREVIEW === '1';
 
 // Буфер последних сообщений для пассивного наблюдения ИИ (только RAM, не в БД)
 const chatBuffer = {}; // { chatId: [{name, text, time}] }
@@ -16,8 +19,10 @@ function registerMessageHandlers() {
         const { userId, user } = getSenderData(msg);
 
         // [GLOBAL LOG] Видим всё, что прилетает от Telegram
-        if (msg.text) console.log(`[MSG] ID: ${msg.message_id} | Chat: ${chatId} | User: ${userId} | Text: ${msg.text.slice(0, 30)}...`);
-        else if (msg.sticker) console.log(`[STICKER] ID: ${msg.message_id} | Chat: ${chatId} | User: ${userId} | Sticker: ${msg.sticker.emoji || '?'}`);
+        if (LOG_MESSAGE_EVENTS) {
+            if (msg.text) console.log(`[MSG] ID: ${msg.message_id} | Chat: ${chatId} | User: ${userId} | Text: ${msg.text.slice(0, 30)}...`);
+            else if (msg.sticker) console.log(`[STICKER] ID: ${msg.message_id} | Chat: ${chatId} | User: ${userId} | Sticker: ${msg.sticker.emoji || '?'}`);
+        }
 
         if (pendingVerifications[userId]) return; // Пропускаем, пока не пройдет капчу
 
@@ -117,7 +122,9 @@ function registerMessageHandlers() {
             if (++passiveMessageCount[chatId] >= CHAT_BUFFER_SIZE) {
                 console.log(`[PASSIVE MEMORY] Собрано ${CHAT_BUFFER_SIZE} сообщений. Запускаю анализ...`);
                 const bufferText = chatBuffer[chatId].map(m => `${m.name}: ${m.text}`).join('\n');
-                console.log(`[PASSIVE MEMORY] Краткий обзор буфера: ${bufferText.substring(0, 100)}...`);
+                if (LOG_PASSIVE_MEMORY_PREVIEW) {
+                    console.log(`[PASSIVE MEMORY] Краткий обзор буфера: ${bufferText.substring(0, 100)}...`);
+                }
                 const { extractAndSaveFacts } = require('../vectorMemory');
                 extractAndSaveFacts(chatId, bufferText);
                 passiveMessageCount[chatId] = 0;
@@ -132,7 +139,9 @@ function registerMessageHandlers() {
                 const nextXp = getNextLevelXp(dbUser.level);
                 const newLevel = dbUser.xp + xpGain >= nextXp ? dbUser.level + 1 : dbUser.level;
                 await updateUser(dbUser.id, { xp: dbUser.xp + xpGain, level: newLevel, last_message_time: now });
-                console.log(`[XP] ${userTag}: +${xpGain} XP (Level: ${newLevel})`);
+                if (LOG_XP_EVENTS) {
+                    console.log(`[XP] ${userTag}: +${xpGain} XP (Level: ${newLevel})`);
+                }
 
                 if (newLevel > dbUser.level) {
                     // Повышение уровня!

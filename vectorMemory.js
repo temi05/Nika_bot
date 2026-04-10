@@ -163,13 +163,19 @@ function isLowValueEphemeralMemory(text) {
     const normalized = normalizeText(text).toLowerCase();
     if (!normalized) return false;
 
-    const blockedPatterns = [
-        'пошел спать', 'иду спать', 'щас спать', 'сейчас спать', 'ем', 'кушаю',
-        'пошел в душ', 'пойду в душ', 'устал', 'ору', 'лол', 'ахах', 'хаха',
-        'сегодня хочу', 'сегодня буду', 'потом зайду', 'ща', 'щас', 'ладно'
+    const stableSignal = /\b(часто|обычно|регулярно|всегда|постоянно|предпочита|любит|нравит|после смен|в выходн|кажд(ый|ое|ую) день|каждый раз)\b/i.test(normalized);
+    if (stableSignal) return false;
+
+    const blockedRegexes = [
+        /\b(пошел|иду|щас|сейчас)\s+спать\b/i,
+        /\b(пошел|пойду)\s+в\s+душ\b/i,
+        /\b(ору|лол|ахах|хаха|ржу)\b/i,
+        /\bсегодня\s+(хочу|буду)\b/i,
+        /\bпотом\s+зайду\b/i,
+        /^\s*(ща|щас|ладно)\s*$/i
     ];
 
-    return blockedPatterns.some(pattern => normalized.includes(pattern));
+    return blockedRegexes.some((re) => re.test(normalized));
 }
 
 function convertExtractedFact(rawFact) {
@@ -417,6 +423,7 @@ async function extractAndSaveFacts(chatId, historyText, participants = []) {
 - Не делай психологических диагнозов и ярлыков о человеке.
 - Не утверждай романтические связи, ревность, одержимость, манипуляции и скрытые мотивы как факт.
 - Если можно сформулировать как наблюдение или паттерн, выбирай наблюдение или паттерн.
+- Разрешено сохранять легкие бытовые привычки и предпочтения (сон, кофе, еда, игры), если это выглядит как повторяющийся паттерн.
 - Не сохраняй лишнюю социальную слежку, которая не помогает модерации, контексту или персонализации.
 `;
 
