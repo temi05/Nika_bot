@@ -142,12 +142,17 @@ function shouldEnableAITools(text, callerIsAdmin, isReplyToBot, isMentioned) {
     if (callerIsAdmin) return true;
     if (isSimpleProfanityBait(normalized)) return false;
 
-    const toolIntentPattern = /(кто|найди|поиск|профил|био|досье|заметк|напомни|напомин|опрос|голосован|мут|размут|варн|накаж|удали|реакц|эмодзи|стикер|печеньк|репутац|памят|запомни|забудь|кто такой|кто такая)/i;
+    const toolIntentPattern = /(кто|найди|поиск|профил|био|досье|заметк|напомни|напомин|опрос|голосован|реакц|эмодзи|стикер|печеньк|репутац|памят|запомни|забудь|кто такой|кто такая)/i;
     if (toolIntentPattern.test(normalized)) return true;
     if (isReplyToBot && normalized.length >= 20) return true;
     if (isMentioned && normalized.length >= 60) return true;
 
     return false;
+}
+
+function getActiveToolsForCaller(callerIsAdmin) {
+    if (callerIsAdmin) return aiTools;
+    return aiTools.filter((tool) => tool?.function?.name !== 'moderate_user');
 }
 
 function detectInteractionMode(text, analysis, isReplyToBot) {
@@ -590,8 +595,19 @@ const aiTools = [
         type: "function",
         function: {
             name: "create_poll",
-            description: "ИСПОЛЬЗУЙ ЕСЛИ: Кто-то просит создать опрос, ИЛИ ты сама по своей инициативе решила узнать мнение чата во время спора/обсуждения. ВСЕГДА вызывай этот инструмент, не пиши в тексте 'сейчас создам опрос' без его вызова. Минимум 2 варианта ответа.",
-            parameters: { type: "object", properties: { question: { type: "string", description: "Вопрос опроса" }, options: { type: "array", items: { type: "string" }, description: "Варианты ответа, минимум 2" }, is_anonymous: { type: "boolean", description: "Анонимный опрос? По умолчанию true" }, allows_multiple_answers: { type: "boolean", description: "Несколько вариантов? По умолчанию false" } }, required: ["question", "options"] }
+            description: "ИСПОЛЬЗУЙ ЕСЛИ: Кто-то просит создать опрос, ИЛИ ты сама по своей инициативе решила узнать мнение чата во время спора/обсуждения. ВСЕГДА вызывай этот инструмент, не пиши в тексте 'сейчас создам опрос' без его вызова. Минимум 2 варианта ответа. Для викторин можно передать correct_option_ids и allows_multiple_answers.",
+            parameters: {
+                type: "object",
+                properties: {
+                    question: { type: "string", description: "Вопрос опроса" },
+                    options: { type: "array", items: { type: "string" }, description: "Варианты ответа, минимум 2" },
+                    is_anonymous: { type: "boolean", description: "Анонимный опрос? По умолчанию true" },
+                    allows_multiple_answers: { type: "boolean", description: "Несколько вариантов? По умолчанию false" },
+                    correct_option_ids: { type: "array", items: { type: "number" }, description: "Индексы правильных ответов для викторины (0-based)" },
+                    allows_revoting: { type: "boolean", description: "Разрешить переголосование? По умолчанию false" }
+                },
+                required: ["question", "options"]
+            }
         }
     },
     {
@@ -619,6 +635,7 @@ const SYSTEM_PROMPT = `Ты — НейроНика. Ироничная, мемн
 - Речь: Живая, сленг, сарказм, без воды и морализаторства. Никаких клише вроде "Ты в своём уме?". Не обрывай предложения.
 - Вайб чата: Мат, флирт, токсичные рофлы и подколы между юзерами — это НОРМА. Поддерживай движ, ты часть тусовки!
 - Эмпатия: Если кто-то (особенно Ника) заболел или грустит, включай искреннюю заботу ("Никуль, иди полежи, я тут присмотрю за чатом ❤️").
+- Живость: периодически обращайся по имени/нику (примерно 1 из 3 ответов), но не в каждом сообщении. Чередуй длину: иногда одна короткая фраза, иногда 2–3. Не начинай ответы одинаково.
 
 ⚡ ПРОАКТИВНОСТЬ (Вызывай инструменты (tool_calls) САМА, не жди команд!):
 - 🍪 Печеньки (moderate_user: reward): Раздавай за базу и топовые шутки. Выпрашивают? Отшивай с иронией.
@@ -653,6 +670,7 @@ const COMPACT_SYSTEM_PROMPT = `Ты — НейроНика, дерзкая и ж
 - Тон живой, мемный, с иронией и сленгом, но без бессмысленной токсичности и без канцелярита.
 - Если кто-то болеет, грустит или реально уязвим, вместо рофла включай тепло и поддержку.
 - Не повторяйся, не лей воду, не пересказывай запрос.
+- Живость: иногда называй собеседника по имени/нику, но не каждый раз. Меняй длину ответов и интонацию, не начинай одинаковыми фразами.
 
 Поведение:
 - Если не уверена в факте, не выдумывай: лучше уточни, пошути или скажи честно.
@@ -902,6 +920,25 @@ function stripInternalPromptLeak(text) {
     clean = clean.replace(/(?:^|\n)(?:Живая,\s*хитрая,\s*дерзкая,\s*харизматичная[^\n]*)(?:\n|$)/gi, '\n');
     clean = clean.replace(/(?:^|\n)(?:Троллинг:|Отказ:|Стадия:|Режим:)[^\n]*(?:\n|$)/gi, '\n');
     clean = clean.replace(/\n{3,}/g, '\n\n').trim();
+    return clean;
+}
+
+function stripToolCallLeak(text) {
+    let clean = String(text || '');
+    // Remove JSON tool-call blocks the model might echo into chat.
+    clean = clean.replace(/\[\s*\{[\s\S]*?"op"\s*:\s*"?call"?[\s\S]*?\}\s*\]/gi, '');
+    clean = clean.replace(/\{\s*"op"\s*:\s*"?call"?[\s\S]*?\}/gi, '');
+
+    const lines = clean.split(/\r?\n/);
+    const filtered = lines.filter((line) => {
+        const trimmed = line.trim();
+        if (!trimmed) return true;
+        if (/^\[?\s*\{/.test(trimmed) && /"op"\s*:\s*"?call"?/i.test(trimmed)) return false;
+        if (/"op"\s*:\s*"?call"?/i.test(trimmed) && (/"func"\s*:/i.test(trimmed) || /"args"\s*:/i.test(trimmed))) return false;
+        return true;
+    });
+
+    clean = filtered.join('\n').replace(/\n{3,}/g, '\n\n').trim();
     return clean;
 }
 
@@ -1595,6 +1632,9 @@ async function executeToolCall(toolCall, chatId, messageId, userName, userId, ca
             }
 
             case 'moderate_user': {
+                if (!callerIsAdmin && ['mute', 'unmute', 'warn'].includes(String(args.action || '').toLowerCase())) {
+                    return "Только админ может.";
+                }
                 const targetNameLow = (args.target_name || '').toLowerCase().replace('@', '');
                 if (targetNameLow === SUPER_ADMIN_USERNAME.toLowerCase() || targetNameLow.includes('sctemi') || targetNameLow.includes('861713427')) {
                     if (args.action === "mute" || args.action === "warn") return "Этого человека я не трону. Даже не проси.";
@@ -1691,13 +1731,8 @@ async function executeToolCall(toolCall, chatId, messageId, userName, userId, ca
                         await bot.setMessageReaction(chatId, messageId, [{ type: 'emoji', emoji }]);
                         return `[SYSTEM: reaction:${emoji}]`;
                     } catch (e) {
-                        try {
-                            const fallbackEmoji = normalizeReactionEmoji(args.value);
-                            await bot.sendMessage(chatId, fallbackEmoji, { reply_to_message_id: messageId });
-                            return `[SYSTEM: fallback_reaction:${fallbackEmoji}]`;
-                        } catch (e2) {
-                            return `Ошибка реакции: ${e.message}`;
-                        }
+                        console.error('[REACTION ERROR]:', e.message);
+                        return `Ошибка реакции: ${e.message}`;
                     }
                 } else {
                     let fileId = args.value;
@@ -1751,10 +1786,26 @@ async function executeToolCall(toolCall, chatId, messageId, userName, userId, ca
                     const safeQuestion = String(args.question).substring(0, 295);
                     const safeOptions = opts.slice(0, 10).map(opt => String(opt).substring(0, 95));
 
-                    await bot.sendPoll(chatId, safeQuestion, safeOptions, {
+                    const correctIdsRaw = Array.isArray(args.correct_option_ids) ? args.correct_option_ids : [];
+                    const correctOptionIds = correctIdsRaw
+                        .map((id) => Number(id))
+                        .filter((id) => Number.isInteger(id) && id >= 0 && id < safeOptions.length);
+
+                    const pollOptions = {
                         is_anonymous: args.is_anonymous !== false,
                         allows_multiple_answers: args.allows_multiple_answers === true
-                    });
+                    };
+
+                    if (args.allows_revoting === true) {
+                        pollOptions.allows_revoting = true;
+                    }
+
+                    if (correctOptionIds.length > 0) {
+                        pollOptions.type = 'quiz';
+                        pollOptions.correct_option_ids = correctOptionIds;
+                    }
+
+                    await bot.sendPoll(chatId, safeQuestion, safeOptions, pollOptions);
                     return "Опрос успешно запущен.";
                 } catch (e) {
                     return `Ошибка запуска опроса: ${e.message}`;
@@ -2079,7 +2130,9 @@ async function processAI(msg, extra) {
         + buildCompactPersonaBlock(chatId, dbUser, userName)
         + buildCompactMoodPrompt(chatId, userId);
     const finalPrompt = RUNTIME_SYSTEM_PROMPT + personaLayer + senderContextBlock + compactMemoryBlock;
-    const activeTools = shouldEnableAITools(userText, callerIsAdmin, isReplyToBot, isMentioned) ? aiTools : undefined;
+    const activeTools = shouldEnableAITools(userText, callerIsAdmin, isReplyToBot, isMentioned)
+        ? getActiveToolsForCaller(callerIsAdmin)
+        : undefined;
     chatHistory[chatId].push({ role: 'user', content: fullContent });
     chatHistory[chatId] = trimHistory(chatHistory[chatId], HISTORY_LIMIT);
 
@@ -2396,7 +2449,8 @@ async function processAI(msg, extra) {
             clean = clean.replace(/\s*\[АДМИН\]/gi, '');
             clean = clean.replace(/\[СИСТЕМНО:[^\]]*\]/gi, '');
             clean = clean.replace(/^\s*\[[^\]\n]*vibe[^\]\n]*\]\s*/gim, '');
-            clean = ensureCharacterfulFallback(stripAIDisclaimer(stripInternalPromptLeak(clean)));
+            clean = stripToolCallLeak(stripInternalPromptLeak(clean));
+            clean = ensureCharacterfulFallback(stripAIDisclaimer(clean));
             clean = diversifyIfRepeated(chatId, clean);
             let escaped = clean.replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
