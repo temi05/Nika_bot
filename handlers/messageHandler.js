@@ -13,6 +13,32 @@ const LEGACY_MODERATION_PROFILE = MODERATION_PROFILE === 'legacy' || MODERATION_
 const chatBuffer = {}; // { chatId: [{name, text, time}] }
 const CHAT_BUFFER_SIZE = 25; // Увеличил размер буфера для лучшего контекста
 let passiveMessageCount = {}; // { chatId: count }
+const recentMessageIds = {}; // { chatId: { ids:Set, order: number[] } }
+const RECENT_MESSAGE_IDS_LIMIT = 80;
+const RECENT_MESSAGE_IDS_TTL_MS = 5 * 60 * 1000;
+
+function isDuplicateMessage(chatId, messageId) {
+    if (!recentMessageIds[chatId]) {
+        recentMessageIds[chatId] = { ids: new Set(), order: [] };
+    }
+    const bucket = recentMessageIds[chatId];
+    if (bucket.ids.has(messageId)) return true;
+
+    bucket.ids.add(messageId);
+    bucket.order.push({ id: messageId, at: Date.now() });
+
+    const now = Date.now();
+    while (bucket.order.length > RECENT_MESSAGE_IDS_LIMIT) {
+        const oldest = bucket.order.shift();
+        if (oldest) bucket.ids.delete(oldest.id);
+    }
+    while (bucket.order.length > 0 && now - bucket.order[0].at > RECENT_MESSAGE_IDS_TTL_MS) {
+        const stale = bucket.order.shift();
+        if (stale) bucket.ids.delete(stale.id);
+    }
+
+    return false;
+}
 
 function registerMessageHandlers() {
     bot.on('message', async (msg) => {
@@ -27,6 +53,28 @@ function registerMessageHandlers() {
         }
 
         if (pendingVerifications[userId]) return; // Пропускаем, пока не пройдет капчу
+
+        // Не реагируем на сообщения ботов, чтобы избежать циклов
+        if (msg.from?.is_bot) return;
+
+        // Не обрабатываем дубликаты апдейтов
+        if (isDuplicateMessage(chatId, msg.message_id)) return;
+
+        // Игнорируем сервисные события (закрепы, системные апдейты)
+        if (
+            msg.pinned_message
+            || msg.new_chat_members
+            || msg.left_chat_member
+            || msg.new_chat_title
+            || msg.delete_chat_photo
+            || msg.group_chat_created
+            || msg.supergroup_chat_created
+            || msg.channel_chat_created
+            || msg.migrate_to_chat_id
+            || msg.migrate_from_chat_id
+        ) {
+            return;
+        }
 
         // 1. Пропускаем другие обработчики (капча и т.д.) если нужно
         if (msg.text?.startsWith('/')) return;

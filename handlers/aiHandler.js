@@ -942,6 +942,22 @@ function stripToolCallLeak(text) {
     return clean;
 }
 
+function collapseRepeatPrefixes(text) {
+    let clean = String(text || '').trim();
+    if (!clean) return clean;
+
+    clean = clean.replace(/^(?:Давай так:\s*){2,}/i, 'Давай так: ');
+    clean = clean.replace(/^(?:Окей,\s*перефразирую:\s*){2,}/i, 'Окей, перефразирую: ');
+    clean = clean.replace(/^(?:Без повтора,\s*коротко:\s*){2,}/i, 'Без повтора, коротко: ');
+    clean = clean.replace(/^(?:Ладно,\s*скажу по-другому:\s*){2,}/i, 'Ладно, скажу по-другому: ');
+    clean = clean.replace(/\b(Давай так:\s*){2,}/gi, 'Давай так: ');
+    clean = clean.replace(/\b(Окей,\s*перефразирую:\s*){2,}/gi, 'Окей, перефразирую: ');
+    clean = clean.replace(/\b(Без повтора,\s*коротко:\s*){2,}/gi, 'Без повтора, коротко: ');
+    clean = clean.replace(/\b(Ладно,\s*скажу по-другому:\s*){2,}/gi, 'Ладно, скажу по-другому: ');
+
+    return clean.trim();
+}
+
 function buildCompactMoodPrompt(chatId, userId = 'chat') {
     const mood = getOrCreateMood(chatId, userId);
     const stageMap = {
@@ -2453,7 +2469,8 @@ async function processAI(msg, extra) {
             clean = clean.replace(/\[СИСТЕМНО:[^\]]*\]/gi, '');
             clean = clean.replace(/^\s*\[[^\]\n]*vibe[^\]\n]*\]\s*/gim, '');
             clean = stripToolCallLeak(stripInternalPromptLeak(clean));
-            clean = ensureCharacterfulFallback(stripAIDisclaimer(clean));
+            clean = collapseRepeatPrefixes(stripAIDisclaimer(clean));
+            clean = ensureCharacterfulFallback(clean);
             clean = diversifyIfRepeated(chatId, clean);
             let escaped = clean.replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
