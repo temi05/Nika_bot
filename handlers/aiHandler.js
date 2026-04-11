@@ -1337,37 +1337,43 @@ function diversifyIfRepeated(chatId, text) {
     const current = String(text || '').trim();
     if (!current) return current;
 
-    const history = chatHistory[chatId] || [];
-    const lastAssistant = [...history].reverse().find((m) => m?.role === 'assistant' && m?.content);
-    if (!lastAssistant) return current;
-
-    const lastText = String(lastAssistant.content || '').trim();
-    if (!lastText) return current;
-
     let candidate = current;
-    const currentFirst = candidate.split(/(?<=[.!?])\s+/)[0] || candidate;
-    const lastFirst = lastText.split(/(?<=[.!?])\s+/)[0] || lastText;
-    const sameFirstSentence = normalizeForRepeatCheck(currentFirst) && normalizeForRepeatCheck(currentFirst) === normalizeForRepeatCheck(lastFirst);
+    const history = chatHistory[chatId] || [];
+    const recentAssistants = [...history]
+        .reverse()
+        .filter((m) => m?.role === 'assistant' && m?.content)
+        .slice(0, 3);
+    if (recentAssistants.length === 0) return candidate;
 
-    if (sameFirstSentence) {
-        const chunks = candidate.split(/(?<=[.!?])\s+/).filter(Boolean);
-        if (chunks.length > 1) {
-            chunks.shift();
-            candidate = chunks.join(' ').trim();
+    for (const recent of recentAssistants) {
+        const lastText = String(recent.content || '').trim();
+        if (!lastText) continue;
+
+        const currentFirst = candidate.split(/(?<=[.!?])\s+/)[0] || candidate;
+        const lastFirst = lastText.split(/(?<=[.!?])\s+/)[0] || lastText;
+        const sameFirstSentence = normalizeForRepeatCheck(currentFirst)
+            && normalizeForRepeatCheck(currentFirst) === normalizeForRepeatCheck(lastFirst);
+
+        if (sameFirstSentence) {
+            const chunks = candidate.split(/(?<=[.!?])\s+/).filter(Boolean);
+            if (chunks.length > 1) {
+                chunks.shift();
+                candidate = chunks.join(' ').trim();
+            }
         }
-    }
 
-    const exactDuplicate = normalizeForRepeatCheck(candidate) === normalizeForRepeatCheck(lastText);
-    const overlap = tokenOverlapScore(candidate, lastText);
-    if (exactDuplicate || overlap >= 0.9) {
-        const antiRepeatPrefixes = [
-            'Окей, перефразирую:',
-            'Ладно, скажу по-другому:',
-            'Без повтора, коротко:',
-            'Давай так:'
-        ];
-        const prefix = antiRepeatPrefixes[Math.floor(Math.random() * antiRepeatPrefixes.length)];
-        candidate = `${prefix} ${candidate}`.trim();
+        const exactDuplicate = normalizeForRepeatCheck(candidate) === normalizeForRepeatCheck(lastText);
+        const overlap = tokenOverlapScore(candidate, lastText);
+        if (exactDuplicate || overlap >= 0.9) {
+            const antiRepeatPrefixes = [
+                'Окей, перефразирую:',
+                'Ладно, скажу по-другому:',
+                'Без повтора, коротко:',
+                'Давай так:'
+            ];
+            const prefix = antiRepeatPrefixes[Math.floor(Math.random() * antiRepeatPrefixes.length)];
+            candidate = `${prefix} ${candidate}`.trim();
+        }
     }
 
     return candidate || current;
