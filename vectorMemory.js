@@ -495,10 +495,26 @@ async function extractAndSaveFacts(chatId, historyText, participants = []) {
         let failed = 0;
         let saved = 0;
         let skippedExisting = 0;
+        const batchSeen = new Set();
 
         for (const fact of extractedFacts) {
             const factText = buildFactText(fact);
             if (!factText || factText.includes('участник диалога')) continue;
+            if (
+                fact.kind === 'attribute'
+                && String(fact.attribute || '').toLowerCase().trim() === 'имя'
+                && String(fact.value || '').toLowerCase().trim() === String(fact.subject || '').toLowerCase().trim()
+            ) {
+                skippedExisting++;
+                continue;
+            }
+
+            const batchKey = normalizeText(factText).toLowerCase();
+            if (batchSeen.has(batchKey)) {
+                skippedExisting++;
+                continue;
+            }
+            batchSeen.add(batchKey);
 
             const exists = await checkFactExists(chatId, fact);
             if (!exists) {
@@ -511,19 +527,7 @@ async function extractAndSaveFacts(chatId, historyText, participants = []) {
                     : [];
 
                 if (duplicates.length > 0) {
-                    const result = await insertKnowledge(chatId, fact, embedding);
-                    if (result?._memoryAction === 'created' || result?._memoryAction === 'fallback_created') {
-                        created++;
-                        saved++;
-                    }
-                    else if (result?._memoryAction === 'updated') {
-                        updated++;
-                        saved++;
-                    }
-                    else {
-                        failed++;
-                        console.warn(`[MEMORY] failed to persist: ${normalizeText(factText).slice(0, 160)}`);
-                    }
+                    skippedExisting++;
                     continue;
                 }
             }

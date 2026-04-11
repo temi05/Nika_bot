@@ -2069,9 +2069,6 @@ async function processAI(msg, extra) {
             .replace(/нейроника/gi, 'Нейроника')
             .replace(/neironika/gi, 'Нейроника');
     }
-    if (isReplyToBot) {
-        memoryText = memoryText.replace(/\bника\b/gi, 'Нейроника');
-    }
 
     let memoryLine = `${userName}: ${memoryText}`;
     if (msg.reply_to_message) {
