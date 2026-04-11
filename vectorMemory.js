@@ -78,7 +78,7 @@ function sanitizeEmbeddingVector(embedding, sourceLabel = EMBEDDING_MODEL) {
 
 function normalizeName(value) {
     return String(value || '')
-        .replace(/Чатик 🫐 Nika_grdt 👾/gi, 'Нейроника')
+        .replace(/Чатик 🫐 Nika_grdt 👾/gi, 'Ника (канал)')
         .replace(/^channel$/i, 'Ника (канал)')
         .replace(/^канал$/i, 'Ника (канал)')
         .replace(/^ника \(канал\)$/i, 'Ника (канал)')
@@ -375,7 +375,7 @@ async function extractAndSaveFacts(chatId, historyText, participants = []) {
 
     try {
         const cleanHistory = historyText
-            .replace(/Чатик 🫐 Nika_grdt 👾/gi, 'Нейроника')
+            .replace(/Чатик 🫐 Nika_grdt 👾/gi, 'Ника (канал)')
             .replace(/^(?:Channel|Канал):\s/gmi, 'Ника (канал): ');
 
         const compactHistory = cleanHistory.slice(0, MEMORY_EXTRACT_INPUT_LIMIT);
@@ -591,7 +591,7 @@ async function getRelevantFacts(chatId, userMessage, userName = '', activePartic
     try {
         if (!userMessage || userMessage.trim().length < 3) return '';
 
-        const cleanMessage = normalizeText(userMessage.replace(/Чатик 🫐 Nika_grdt 👾/gi, 'Нейроника'));
+        const cleanMessage = normalizeText(userMessage.replace(/Чатик 🫐 Nika_grdt 👾/gi, 'Ника (канал)'));
         const cleanUserName = normalizeName(userName);
         const allFoundFacts = new Map();
 
