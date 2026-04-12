@@ -162,6 +162,18 @@ function isSpeculativeOrCreepyMemory(text) {
     return blockedPatterns.some(pattern => normalized.includes(pattern));
 }
 
+function isNegativeOrTrashMemory(text) {
+    const normalized = normalizeText(text).toLowerCase();
+    if (!normalized) return false;
+
+    const blocked = [
+        'ненавид', 'бесит', 'раздраж', 'тупой', 'тупая', 'уеб', 'мудак', 'чмош',
+        'пидор', 'шлюх', 'мраз', 'кончен', 'говн', 'лох', 'долбоеб', 'сдохни'
+    ];
+
+    return blocked.some(pattern => normalized.includes(pattern));
+}
+
 function isLowValueEphemeralMemory(text) {
     const normalized = normalizeText(text).toLowerCase();
     if (!normalized) return false;
@@ -188,6 +200,24 @@ function isLowValueEphemeralMemory(text) {
     return blockedRegexes.some((re) => re.test(normalized));
 }
 
+function isAllowedAttribute(attribute) {
+    const normalized = normalizeText(attribute).toLowerCase();
+    const allowed = new Set([
+        'роль', 'интерес', 'прозвище', 'факт', 'привычка', 'хобби', 'профессия', 'работа',
+        'стример', 'стримит', 'платформа', 'любимое', 'предпочтение'
+    ]);
+    return allowed.has(normalized);
+}
+
+function isAllowedRelation(relation) {
+    const normalized = normalizeText(relation).toLowerCase();
+    const allowed = [
+        'друг', 'дружит', 'приятель', 'состоит', 'в отношениях', 'пара', 'коллега',
+        'модератор', 'админ', 'знаком', 'подписан', 'интересуется'
+    ];
+    return allowed.some((item) => normalized.includes(item));
+}
+
 function convertExtractedFact(rawFact) {
     if (!rawFact || typeof rawFact !== 'object') return null;
 
@@ -199,6 +229,7 @@ function convertExtractedFact(rawFact) {
         const relation = normalizeText(rawFact.relation);
         const object = normalizeName(rawFact.object);
         if (!relation || !object) return null;
+        if (!isAllowedRelation(relation)) return null;
 
         return {
             factType: 'relation',
@@ -218,6 +249,8 @@ function convertExtractedFact(rawFact) {
     const attribute = normalizeText(rawFact.attribute || 'факт');
     const value = normalizeText(rawFact.value);
     if (!attribute || !value) return null;
+    if (!isAllowedAttribute(attribute)) return null;
+    if (isNegativeOrTrashMemory(value)) return null;
 
     return {
         factType: 'attribute',
