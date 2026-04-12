@@ -1,4 +1,13 @@
 const { supabase } = require('./config');
+const {
+    qdrantEnabled,
+    buildKnowledgeId,
+    upsertPoint,
+    getPoint,
+    deletePoint,
+    searchPoints,
+    scrollPoints
+} = require('./qdrantClient');
 
 const userCache = {}; // { chatId_userId: { data: userObj, expires: timestamp } }
 const USER_CACHE_TTL = 300000; // 5 минут
@@ -737,6 +746,28 @@ function applyKnowledgeFilters(rows, options = {}) {
     return filtered;
 }
 
+function mapQdrantPointToRow(point) {
+    if (!point || !point.payload) return null;
+    const payload = point.payload || {};
+    return {
+        id: point.id,
+        chat_id: payload.chat_id,
+        fact: payload.fact,
+        fact_type: payload.fact_type,
+        subject_name: payload.subject_name,
+        relation_type: payload.relation_type,
+        object_name: payload.object_name,
+        confidence: payload.confidence,
+        status: payload.status,
+        source_count: payload.source_count,
+        times_seen: payload.times_seen,
+        fingerprint: payload.fingerprint,
+        meta: payload.meta,
+        last_seen_at: payload.last_seen_at,
+        similarity: point.score
+    };
+}
+
 async function insertKnowledge(chatId, factText, embedding) {
     const payload = normalizeKnowledgePayload(factText);
 
@@ -747,6 +778,86 @@ async function insertKnowledge(chatId, factText, embedding) {
     const confidence = Math.max(0.3, Math.min(0.98, Number(payload.confidence || 0.55)));
     const nowIso = new Date().toISOString();
     const safeEmbedding = sanitizeKnowledgeEmbedding(embedding);
+
+    if (qdrantEnabled()) {
+        try {
+            const id = buildKnowledgeId(chatId, fingerprint);
+            const existing = await getPoint(id, true);
+
+            if (existing && existing.payload) {
+                const mergedMeta = {
+                    ...(existing.payload.meta || {}),
+                    ...(payload.meta || {})
+                };
+                const memoryKind = getKnowledgeMemoryKind({ meta: mergedMeta });
+                const nextTimesSeen = (existing.payload.times_seen || 1) + 1;
+                const nextSourceCount = (existing.payload.source_count || 1) + 1;
+                const nextConfidence = Math.min(
+                    0.98,
+                    Math.max(existing.payload.confidence || 0.55, confidence) + (memoryKind === 'pattern' ? 0.04 : 0.08)
+                );
+                const nextStatus = shouldPromoteKnowledge(existing.payload.status, nextConfidence, nextSourceCount, nextTimesSeen)
+                    ? 'confirmed'
+                    : 'candidate';
+
+                const vector = safeEmbedding || existing.vector;
+                if (!vector) return null;
+
+                await upsertPoint([{
+                    id,
+                    vector,
+                    payload: {
+                        chat_id: chatId,
+                        fact,
+                        fact_type: payload.factType || existing.payload.fact_type || 'fact',
+                        subject_name: payload.subjectName || existing.payload.subject_name || null,
+                        relation_type: payload.relationType || existing.payload.relation_type || null,
+                        object_name: payload.objectName || existing.payload.object_name || null,
+                        confidence: nextConfidence,
+                        status: nextStatus,
+                        source_count: nextSourceCount,
+                        times_seen: nextTimesSeen,
+                        fingerprint,
+                        meta: mergedMeta,
+                        last_seen_at: nowIso
+                    }
+                }]);
+
+                return { ...existing.payload, _memoryAction: 'updated' };
+            }
+
+            if (!safeEmbedding) return null;
+
+            const status = shouldPromoteKnowledge(payload.status || 'candidate', confidence, 1, 1)
+                ? 'confirmed'
+                : (payload.status || 'candidate');
+
+            await upsertPoint([{
+                id,
+                vector: safeEmbedding,
+                payload: {
+                    chat_id: chatId,
+                    fact,
+                    fact_type: payload.factType || 'fact',
+                    subject_name: payload.subjectName || null,
+                    relation_type: payload.relationType || null,
+                    object_name: payload.objectName || null,
+                    confidence,
+                    status,
+                    source_count: 1,
+                    times_seen: 1,
+                    fingerprint,
+                    meta: payload.meta || {},
+                    last_seen_at: nowIso
+                }
+            }]);
+
+            return { fact, _memoryAction: 'created' };
+        } catch (error) {
+            console.error('[QDRANT ERROR] insertKnowledge:', error.message || String(error));
+            return null;
+        }
+    }
 
     try {
         const { data: existing, error: existingError } = await supabase
@@ -858,6 +969,38 @@ async function searchKnowledge(chatId, queryEmbedding, limit = 3, threshold = 0.
     const statuses = options.statuses || ['confirmed'];
     const minConfidence = options.minConfidence ?? 0.55;
 
+    if (qdrantEnabled()) {
+        try {
+            const shouldStatus = statuses.map(status => ({ key: 'status', match: { value: status } }));
+            const filter = {
+                must: [
+                    { key: 'chat_id', match: { value: chatId } },
+                    { key: 'confidence', range: { gte: minConfidence } }
+                ],
+                should: shouldStatus,
+                minimum_should_match: shouldStatus.length ? 1 : 0
+            };
+
+            const results = await searchPoints(queryEmbedding, limit, filter);
+            const rows = results
+                .map(mapQdrantPointToRow)
+                .filter(Boolean)
+                .map(row => ({
+                    ...row,
+                    similarity: row.similarity ?? 0
+                }))
+                .filter(row => row.similarity >= threshold);
+
+            return applyKnowledgeFilters(rows, {
+                ...options,
+                limitAfterFilter: limit
+            });
+        } catch (error) {
+            console.error('[QDRANT ERROR] searchKnowledge:', error.message || String(error));
+            return [];
+        }
+    }
+
     const advanced = await supabase.rpc('match_knowledge_v2', {
         query_embedding: queryEmbedding,
         match_threshold: threshold,
@@ -902,6 +1045,42 @@ async function searchKnowledgeByText(chatId, query, limit = 5, options = {}) {
     const statuses = options.statuses || ['confirmed', 'candidate'];
     const minConfidence = options.minConfidence ?? 0;
 
+    if (qdrantEnabled()) {
+        try {
+            const shouldStatus = statuses.map(status => ({ key: 'status', match: { value: status } }));
+            const filter = {
+                must: [
+                    { key: 'chat_id', match: { value: chatId } },
+                    { key: 'confidence', range: { gte: minConfidence } }
+                ],
+                should: shouldStatus,
+                minimum_should_match: shouldStatus.length ? 1 : 0
+            };
+
+            let results = [];
+            let nextPage = null;
+            const queryLower = String(query || '').toLowerCase();
+
+            do {
+                const batch = await scrollPoints(filter, 50, nextPage);
+                nextPage = batch.nextPage;
+                const filtered = (batch.points || [])
+                    .map(mapQdrantPointToRow)
+                    .filter(Boolean)
+                    .filter(row => String(row.fact || '').toLowerCase().includes(queryLower));
+                results = results.concat(filtered);
+            } while (nextPage && results.length < limit * 3);
+
+            return applyKnowledgeFilters(results, {
+                ...options,
+                limitAfterFilter: limit
+            });
+        } catch (error) {
+            console.error('[QDRANT ERROR] searchKnowledgeByText:', error.message || String(error));
+            return [];
+        }
+    }
+
     let advancedQuery = supabase
         .from('bot_knowledge')
         .select('*')
@@ -943,6 +1122,51 @@ async function searchKnowledgeByText(chatId, query, limit = 5, options = {}) {
 async function getRecentKnowledge(chatId, userName = "", limit = 10, options = {}) {
     const statuses = options.statuses || ['confirmed', 'candidate'];
     const minConfidence = options.minConfidence ?? 0;
+
+    if (qdrantEnabled()) {
+        try {
+            const shouldStatus = statuses.map(status => ({ key: 'status', match: { value: status } }));
+            const filter = {
+                must: [
+                    { key: 'chat_id', match: { value: chatId } },
+                    { key: 'confidence', range: { gte: minConfidence } }
+                ],
+                should: shouldStatus,
+                minimum_should_match: shouldStatus.length ? 1 : 0
+            };
+
+            let results = [];
+            let nextPage = null;
+            const userLower = String(userName || '').toLowerCase();
+
+            do {
+                const batch = await scrollPoints(filter, 50, nextPage);
+                nextPage = batch.nextPage;
+                let mapped = (batch.points || [])
+                    .map(mapQdrantPointToRow)
+                    .filter(Boolean);
+
+                if (userLower) {
+                    mapped = mapped.filter(row =>
+                        String(row.subject_name || '').toLowerCase().includes(userLower)
+                        || String(row.fact || '').toLowerCase().includes(userLower)
+                    );
+                }
+
+                results = results.concat(mapped);
+            } while (nextPage && results.length < limit * 3);
+
+            results.sort((a, b) => new Date(b.last_seen_at || 0).getTime() - new Date(a.last_seen_at || 0).getTime());
+
+            return applyKnowledgeFilters(results, {
+                ...options,
+                limitAfterFilter: limit
+            });
+        } catch (error) {
+            console.error('[QDRANT ERROR] getRecentKnowledge:', error.message || String(error));
+            return [];
+        }
+    }
 
     let advancedQuery = supabase
         .from('bot_knowledge')
@@ -997,6 +1221,17 @@ async function checkFactExists(chatId, factText) {
     const fact = buildKnowledgeFactText(payload);
     const fingerprint = buildKnowledgeFingerprint({ ...payload, fact });
 
+    if (qdrantEnabled()) {
+        try {
+            const id = buildKnowledgeId(chatId, fingerprint);
+            const existing = await getPoint(id);
+            return !!existing;
+        } catch (error) {
+            console.error('[QDRANT ERROR] checkFactExists:', error.message || String(error));
+            return false;
+        }
+    }
+
     const advanced = await supabase
         .from('bot_knowledge')
         .select('id')
@@ -1020,6 +1255,16 @@ async function checkFactExists(chatId, factText) {
 }
 
 async function deleteKnowledge(chatId, knowledgeId) {
+    if (qdrantEnabled()) {
+        try {
+            await deletePoint(knowledgeId);
+            return true;
+        } catch (error) {
+            console.error('[QDRANT ERROR] deleteKnowledge:', error.message || String(error));
+            return false;
+        }
+    }
+
     const { error } = await supabase
         .from('bot_knowledge')
         .delete()
@@ -1084,6 +1329,59 @@ async function getRecentMemorySummaries(chatId, limit = 3) {
 async function weakenStaleKnowledge(chatId, options = {}) {
     const staleBeforeIso = options.staleBeforeIso;
     if (!chatId || !staleBeforeIso) return 0;
+
+    if (qdrantEnabled()) {
+        try {
+            const filter = {
+                must: [
+                    { key: 'chat_id', match: { value: chatId } }
+                ],
+                should: [
+                    { key: 'status', match: { value: 'candidate' } },
+                    { key: 'status', match: { value: 'confirmed' } }
+                ],
+                minimum_should_match: 1
+            };
+
+            let updated = 0;
+            let nextPage = null;
+            do {
+                const batch = await scrollPoints(filter, options.limit || 25, nextPage, true);
+                nextPage = batch.nextPage;
+                const points = batch.points || [];
+                for (const point of points) {
+                    const row = mapQdrantPointToRow(point);
+                    if (!row || !row.last_seen_at) continue;
+                    if (new Date(row.last_seen_at).toISOString() >= staleBeforeIso) continue;
+                    if (Number(row.times_seen || 0) >= (options.maxTimesSeen || 3)) continue;
+                    if (Number(row.confidence || 0) >= (options.maxConfidence || 0.75)) continue;
+
+                    const memoryKind = getKnowledgeMemoryKind(row);
+                    const decayStep = memoryKind === 'pattern' ? 0.14 : memoryKind === 'risk' ? 0.1 : 0.08;
+                    const nextConfidence = Math.max(0.18, Number(row.confidence || 0.55) - decayStep);
+                    const nextStatus = nextConfidence < 0.45 ? 'candidate' : row.status;
+
+                    if (!point.vector) continue;
+
+                    await upsertPoint([{
+                        id: point.id,
+                        vector: point.vector,
+                        payload: {
+                            ...point.payload,
+                            confidence: nextConfidence,
+                            status: nextStatus
+                        }
+                    }]);
+                    updated++;
+                }
+            } while (nextPage);
+
+            return updated;
+        } catch (error) {
+            console.error('[QDRANT ERROR] weakenStaleKnowledge:', error.message || String(error));
+            return 0;
+        }
+    }
 
     const { data, error } = await supabase
         .from('bot_knowledge')
