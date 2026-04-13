@@ -976,10 +976,12 @@ async function searchKnowledge(chatId, queryEmbedding, limit = 3, threshold = 0.
                 must: [
                     { key: 'chat_id', match: { value: chatId } },
                     { key: 'confidence', range: { gte: minConfidence } }
-                ],
-                should: shouldStatus,
-                min_should: shouldStatus.length ? 1 : 0
+                ]
             };
+            if (shouldStatus.length) {
+                filter.should = shouldStatus;
+                filter.min_should = { min_count: 1 };
+            }
 
             const results = await searchPoints(queryEmbedding, limit, filter);
             const rows = results
@@ -1052,10 +1054,12 @@ async function searchKnowledgeByText(chatId, query, limit = 5, options = {}) {
                 must: [
                     { key: 'chat_id', match: { value: chatId } },
                     { key: 'confidence', range: { gte: minConfidence } }
-                ],
-                should: shouldStatus,
-                min_should: shouldStatus.length ? 1 : 0
+                ]
             };
+            if (shouldStatus.length) {
+                filter.should = shouldStatus;
+                filter.min_should = { min_count: 1 };
+            }
 
             let results = [];
             let nextPage = null;
@@ -1130,10 +1134,12 @@ async function getRecentKnowledge(chatId, userName = "", limit = 10, options = {
                 must: [
                     { key: 'chat_id', match: { value: chatId } },
                     { key: 'confidence', range: { gte: minConfidence } }
-                ],
-                should: shouldStatus,
-                min_should: shouldStatus.length ? 1 : 0
+                ]
             };
+            if (shouldStatus.length) {
+                filter.should = shouldStatus;
+                filter.min_should = { min_count: 1 };
+            }
 
             let results = [];
             let nextPage = null;
@@ -1340,7 +1346,7 @@ async function weakenStaleKnowledge(chatId, options = {}) {
                     { key: 'status', match: { value: 'candidate' } },
                     { key: 'status', match: { value: 'confirmed' } }
                 ],
-                min_should: 1
+                min_should: { min_count: 1 }
             };
 
             let updated = 0;
