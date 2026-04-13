@@ -107,6 +107,7 @@ async function upsertPoint(points) {
     if (!qdrantEnabled()) return null;
     await ensureCollection();
     return qdrantFetch(`/collections/${QDRANT_COLLECTION}/points?wait=true`, {
+        method: 'PUT',
         body: { points }
     });
 }
