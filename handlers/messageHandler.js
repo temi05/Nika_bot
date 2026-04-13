@@ -8,6 +8,7 @@ const LOG_XP_EVENTS = process.env.LOG_XP_EVENTS === '1';
 const LOG_PASSIVE_MEMORY_PREVIEW = process.env.LOG_PASSIVE_MEMORY_PREVIEW === '1';
 const MODERATION_PROFILE = String(process.env.MODERATION_PROFILE || process.env.AI_BEHAVIOR_PROFILE || 'legacy_chaos').trim().toLowerCase();
 const LEGACY_MODERATION_PROFILE = MODERATION_PROFILE === 'legacy' || MODERATION_PROFILE === 'legacy_chaos';
+let BOT_ID_CACHE = null;
 
 // Буфер последних сообщений для пассивного наблюдения ИИ (только RAM, не в БД)
 const chatBuffer = {}; // { chatId: [{name, text, time}] }
@@ -46,6 +47,13 @@ function registerMessageHandlers() {
         const chatId = msg.chat.id;
         const { userId, user } = getSenderData(msg);
 
+        if (!BOT_ID_CACHE) {
+            try {
+                const me = await bot.getMe();
+                BOT_ID_CACHE = me?.id || null;
+            } catch (e) { }
+        }
+
         // [GLOBAL LOG] Видим всё, что прилетает от Telegram
         if (LOG_MESSAGE_EVENTS) {
             if (msg.text) console.log(`[MSG] ID: ${msg.message_id} | Chat: ${chatId} | User: ${userId} | Text: ${msg.text.slice(0, 30)}...`);
@@ -54,8 +62,8 @@ function registerMessageHandlers() {
 
         if (pendingVerifications[userId]) return; // Пропускаем, пока не пройдет капчу
 
-        // Не реагируем на сообщения ботов, чтобы избежать циклов
-        if (msg.from?.is_bot) return;
+        // Не реагируем на сообщения своего бота, чтобы избежать циклов
+        if (msg.from?.is_bot && BOT_ID_CACHE && msg.from.id === BOT_ID_CACHE) return;
 
         // Не обрабатываем дубликаты апдейтов
         if (isDuplicateMessage(chatId, msg.message_id)) return;
