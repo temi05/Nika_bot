@@ -7,6 +7,7 @@ const QDRANT_DISTANCE = process.env.QDRANT_DISTANCE ? process.env.QDRANT_DISTANC
 const QDRANT_VECTOR_SIZE = Number(process.env.QDRANT_VECTOR_SIZE || 1536);
 
 let collectionReady = false;
+let payloadIndexesReady = false;
 
 function qdrantEnabled() {
     return Boolean(QDRANT_URL);
@@ -57,6 +58,7 @@ async function ensureCollection() {
     try {
         await qdrantFetch(`/collections/${QDRANT_COLLECTION}`, { method: 'GET' });
         collectionReady = true;
+        await ensurePayloadIndexes();
         return;
     } catch (e) {
         if (e.status !== 404) throw e;
@@ -72,6 +74,33 @@ async function ensureCollection() {
         }
     });
     collectionReady = true;
+    await ensurePayloadIndexes();
+}
+
+async function ensurePayloadIndexes() {
+    if (!qdrantEnabled() || payloadIndexesReady) return;
+    const indexes = [
+        { field_name: 'chat_id', field_schema: 'integer' },
+        { field_name: 'status', field_schema: 'keyword' },
+        { field_name: 'confidence', field_schema: 'float' },
+        { field_name: 'last_seen_at', field_schema: 'datetime' }
+    ];
+
+    for (const index of indexes) {
+        try {
+            await qdrantFetch(`/collections/${QDRANT_COLLECTION}/index`, {
+                method: 'PUT',
+                body: index
+            });
+        } catch (error) {
+            // Ignore if already exists; surface other errors
+            if (String(error.message || '').includes('already exists')) continue;
+            if (error.status === 409) continue;
+            throw error;
+        }
+    }
+
+    payloadIndexesReady = true;
 }
 
 async function upsertPoint(points) {
@@ -85,10 +114,15 @@ async function upsertPoint(points) {
 async function getPoint(id, withVector = false) {
     if (!qdrantEnabled()) return null;
     await ensureCollection();
-    const res = await qdrantFetch(`/collections/${QDRANT_COLLECTION}/points/get`, {
-        body: { ids: [id], with_payload: true, with_vector: withVector }
-    });
-    return res?.result?.[0] || null;
+    try {
+        const res = await qdrantFetch(`/collections/${QDRANT_COLLECTION}/points/get`, {
+            body: { ids: [id], with_payload: true, with_vector: withVector }
+        });
+        return res?.result?.[0] || null;
+    } catch (error) {
+        if (error.status === 404) return null;
+        throw error;
+    }
 }
 
 async function deletePoint(id) {
@@ -135,6 +169,7 @@ module.exports = {
     qdrantEnabled,
     buildKnowledgeId,
     ensureCollection,
+    ensurePayloadIndexes,
     upsertPoint,
     getPoint,
     deletePoint,
