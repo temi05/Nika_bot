@@ -978,7 +978,7 @@ async function searchKnowledge(chatId, queryEmbedding, limit = 3, threshold = 0.
                     { key: 'confidence', range: { gte: minConfidence } }
                 ],
                 should: shouldStatus,
-                minimum_should_match: shouldStatus.length ? 1 : 0
+                min_should: shouldStatus.length ? 1 : 0
             };
 
             const results = await searchPoints(queryEmbedding, limit, filter);
@@ -1054,7 +1054,7 @@ async function searchKnowledgeByText(chatId, query, limit = 5, options = {}) {
                     { key: 'confidence', range: { gte: minConfidence } }
                 ],
                 should: shouldStatus,
-                minimum_should_match: shouldStatus.length ? 1 : 0
+                min_should: shouldStatus.length ? 1 : 0
             };
 
             let results = [];
@@ -1132,7 +1132,7 @@ async function getRecentKnowledge(chatId, userName = "", limit = 10, options = {
                     { key: 'confidence', range: { gte: minConfidence } }
                 ],
                 should: shouldStatus,
-                minimum_should_match: shouldStatus.length ? 1 : 0
+                min_should: shouldStatus.length ? 1 : 0
             };
 
             let results = [];
@@ -1340,7 +1340,7 @@ async function weakenStaleKnowledge(chatId, options = {}) {
                     { key: 'status', match: { value: 'candidate' } },
                     { key: 'status', match: { value: 'confirmed' } }
                 ],
-                minimum_should_match: 1
+                min_should: 1
             };
 
             let updated = 0;

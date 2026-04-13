@@ -15,9 +15,18 @@ function qdrantEnabled() {
 function buildKnowledgeId(chatId, fingerprint) {
     const base = `${chatId}::${fingerprint}`;
     const hex = crypto.createHash('sha256').update(base).digest('hex');
-    // Build a deterministic UUIDv5-like string from hash
-    const uuid = `${hex.slice(0, 8)}-${hex.slice(8, 12)}-5${hex.slice(13, 16)}-a${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
-    return uuid;
+    // Build a deterministic UUIDv5-like string from hash (valid version/variant bits)
+    const hex32 = hex.slice(0, 32);
+    const timeHiAndVersion = (parseInt(hex32.slice(12, 16), 16) & 0x0fff) | 0x5000;
+    const clockSeqHiAndReserved = (parseInt(hex32.slice(16, 20), 16) & 0x3fff) | 0x8000;
+    const pad4 = (value) => value.toString(16).padStart(4, '0');
+    return [
+        hex32.slice(0, 8),
+        hex32.slice(8, 12),
+        pad4(timeHiAndVersion),
+        pad4(clockSeqHiAndReserved),
+        hex32.slice(20, 32)
+    ].join('-');
 }
 
 async function qdrantFetch(path, options = {}) {
