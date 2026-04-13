@@ -85,7 +85,7 @@ async function upsertPoint(points) {
 async function getPoint(id, withVector = false) {
     if (!qdrantEnabled()) return null;
     await ensureCollection();
-    const res = await qdrantFetch(`/collections/${QDRANT_COLLECTION}/points`, {
+    const res = await qdrantFetch(`/collections/${QDRANT_COLLECTION}/points/get`, {
         body: { ids: [id], with_payload: true, with_vector: withVector }
     });
     return res?.result?.[0] || null;

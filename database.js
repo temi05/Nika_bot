@@ -971,17 +971,13 @@ async function searchKnowledge(chatId, queryEmbedding, limit = 3, threshold = 0.
 
     if (qdrantEnabled()) {
         try {
-            const shouldStatus = statuses.map(status => ({ key: 'status', match: { value: status } }));
             const filter = {
                 must: [
                     { key: 'chat_id', match: { value: chatId } },
-                    { key: 'confidence', range: { gte: minConfidence } }
+                    { key: 'confidence', range: { gte: minConfidence } },
+                    { key: 'status', match: { any: statuses } }
                 ]
             };
-            if (shouldStatus.length) {
-                filter.should = shouldStatus;
-                filter.min_should = { min_count: 1 };
-            }
 
             const results = await searchPoints(queryEmbedding, limit, filter);
             const rows = results
@@ -1049,17 +1045,13 @@ async function searchKnowledgeByText(chatId, query, limit = 5, options = {}) {
 
     if (qdrantEnabled()) {
         try {
-            const shouldStatus = statuses.map(status => ({ key: 'status', match: { value: status } }));
             const filter = {
                 must: [
                     { key: 'chat_id', match: { value: chatId } },
-                    { key: 'confidence', range: { gte: minConfidence } }
+                    { key: 'confidence', range: { gte: minConfidence } },
+                    { key: 'status', match: { any: statuses } }
                 ]
             };
-            if (shouldStatus.length) {
-                filter.should = shouldStatus;
-                filter.min_should = { min_count: 1 };
-            }
 
             let results = [];
             let nextPage = null;
@@ -1129,17 +1121,13 @@ async function getRecentKnowledge(chatId, userName = "", limit = 10, options = {
 
     if (qdrantEnabled()) {
         try {
-            const shouldStatus = statuses.map(status => ({ key: 'status', match: { value: status } }));
             const filter = {
                 must: [
                     { key: 'chat_id', match: { value: chatId } },
-                    { key: 'confidence', range: { gte: minConfidence } }
+                    { key: 'confidence', range: { gte: minConfidence } },
+                    { key: 'status', match: { any: statuses } }
                 ]
             };
-            if (shouldStatus.length) {
-                filter.should = shouldStatus;
-                filter.min_should = { min_count: 1 };
-            }
 
             let results = [];
             let nextPage = null;
@@ -1340,13 +1328,9 @@ async function weakenStaleKnowledge(chatId, options = {}) {
         try {
             const filter = {
                 must: [
-                    { key: 'chat_id', match: { value: chatId } }
-                ],
-                should: [
-                    { key: 'status', match: { value: 'candidate' } },
-                    { key: 'status', match: { value: 'confirmed' } }
-                ],
-                min_should: { min_count: 1 }
+                    { key: 'chat_id', match: { value: chatId } },
+                    { key: 'status', match: { any: ['candidate', 'confirmed'] } }
+                ]
             };
 
             let updated = 0;
