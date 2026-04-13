@@ -14,7 +14,10 @@ function qdrantEnabled() {
 
 function buildKnowledgeId(chatId, fingerprint) {
     const base = `${chatId}::${fingerprint}`;
-    return crypto.createHash('sha256').update(base).digest('hex');
+    const hex = crypto.createHash('sha256').update(base).digest('hex');
+    // Build a deterministic UUIDv5-like string from hash
+    const uuid = `${hex.slice(0, 8)}-${hex.slice(8, 12)}-5${hex.slice(13, 16)}-a${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
+    return uuid;
 }
 
 async function qdrantFetch(path, options = {}) {
