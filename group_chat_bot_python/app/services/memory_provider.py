@@ -55,14 +55,14 @@ class LightRAGMemoryProvider(BaseMemoryProvider):
             return response.json()
 
     async def save_transcript(self, chat_id: int, transcript: str, participants: list[str]) -> None:
-        payload = {"text": f"[chat_id:{chat_id}]\nParticipants: {', '.join(participants)}\nTranscript:\n{transcript}"}
+        payload = {"text": transcript}
         if self.settings.lightrag_workspace:
             payload["workspace"] = self.settings.lightrag_workspace
         await self._request("POST", "/documents/text", payload)
 
     async def get_relevant_facts(self, chat_id: int, user_message: str, user_name: str) -> str:
         payload = {
-            "query": f"Chat ID: {chat_id}\nCurrent speaker: {user_name}\nQuestion: {user_message}",
+            "query": f"{user_name}: {user_message}",
             "mode": self.settings.lightrag_query_mode,
             "only_need_context": True,
             "include_references": True,

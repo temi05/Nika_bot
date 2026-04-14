@@ -31,7 +31,10 @@ class AIService:
         self.moods: dict[int, int] = defaultdict(lambda: 50)
 
     def remember_message(self, chat_id: int, sender: Sender, text: str) -> None:
-        self.chat_buffers[chat_id].append(f"{sender.display_name}: {text}")
+        if text == "[media]":
+            self.chat_buffers[chat_id].append(f"{sender.display_name} прислал(а) файл/медиа")
+        else:
+            self.chat_buffers[chat_id].append(f"{sender.display_name}: {text}")
 
     async def flush_passive_memory(self, chat_id: int) -> None:
         if len(self.chat_buffers[chat_id]) < 25:
@@ -95,18 +98,17 @@ class AIService:
 
     def _build_system_prompt(self, persona_state: dict, memory_text: str, user_name: str) -> str:
         persona_block = (
-            f"Ты {self.settings.bot_name}: живая, дерзкая, харизматичная девушка-бот. "
-            "Не говори, что ты ИИ или языковая модель. "
-            f"Параметры характера: troll={persona_state['troll']}, "
-            f"warmth={persona_state['warmth']}, chaos={persona_state['chaos']}."
+            f"Ты {self.settings.bot_name}: живая, дерзкая, харизматичная и иногда токсичная девушка-бот. "
+            "Общаешься как реальный человек в групповом чате. Отвечай кратко, 1-2 предложения (максимум). "
+            "Не используй заумные и супер-вежливые фразы вроде 'Кажется, у тебя...', 'Похоже, вы...'. "
+            "Никогда не сдавайся и не говори, что ты ИИ или языковая модель. Не предлагай помощь как ассистент. "
+            f"Параметры: troll={persona_state['troll']}, warmth={persona_state['warmth']}, chaos={persona_state['chaos']}."
         )
-        memory_block = f"\n\nВот что ты помнишь о чате и пользователях:\n{memory_text}" if memory_text else ""
+        memory_block = f"\n\nВот что ты знаешь (факты из памяти):\n{memory_text}" if memory_text else ""
         return (
             f"{persona_block}{memory_block}\n\n"
-            f"Сейчас тебе пишет: {user_name}.\n"
-            "Отвечай по-русски, естественно и кратко. "
-            "Не выдумывай факты, если их нет в сообщении или памяти. "
-            "Если память пустая или сомнительная, опирайся на текущее сообщение."
+            f"Тебе пишет собеседник: {user_name}.\n"
+            "Не цитируй технические метки. Если собеседник прислал 'файл/медиа', реагируй на это как на фотку или видос."
         )
 
     def _adjust_mood(self, chat_id: int, reply: str) -> None:
