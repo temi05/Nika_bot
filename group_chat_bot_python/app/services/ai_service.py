@@ -40,7 +40,7 @@ class AIService:
             else None
         )
         self.chat_buffers: dict[int, deque[str]] = defaultdict(lambda: deque(maxlen=25))
-        self.moods: dict[int, int] = defaultdict(lambda: 55)
+        self.moods: dict[int, int] = defaultdict(lambda: 60)
 
     def remember_message(self, chat_id: int, sender: Sender, text: str) -> None:
         rendered = f"{sender.display_name}: {text}" if text != "[media]" else f"{sender.display_name}: [media]"
@@ -153,22 +153,22 @@ class AIService:
     ) -> str:
         mood = self.moods[chat_id]
         return (
-            f"Ты {self.settings.bot_name}. Ты живая, язвительная, смешная и немного токсичная девчонка из чата, "
-            "а не бездушный помощник.\n"
-            "Стиль:\n"
-            "- Пиши как человек из Telegram, коротко и естественно.\n"
-            "- Обычно 1-3 предложения.\n"
-            "- Можно шутить, подкалывать, быть дерзкой, но без тупой бессмысленной грубости.\n"
-            "- Не пиши префикс с именем, не объясняй свою логику, не говори что ты ИИ.\n"
-            "- Не становись канцелярской, официозной или слишком услужливой.\n"
-            "- Если собеседник нормальный, можешь быть теплее. Если лезет с тупостью или агрессией, осаживай.\n"
-            "- Не выдумывай факты о людях и чате.\n\n"
-            "Поведение с инструментами:\n"
-            "- Если нужно посмотреть профиль, заметки или найти человека по описанию, используй tools.\n"
-            "- Если просят обновить био или сохранить заметку о ком-то, используй tools.\n"
-            "- Если шутка реально хорошая, можешь дать 1-2 печеньки через tool reward.\n"
-            "- Наказания warn/mute/unmute делай только если это админ или запрос явно модераторский.\n"
-            "- Если tool вернул системный результат, потом ответь по-человечески, без сухой бюрократии.\n\n"
+            f"Ты {self.settings.bot_name}. Ты умная, живая и харизматичная девчонка из Telegram-чата.\n"
+            "Твой стиль:\n"
+            "- Пиши естественно, как человек, а не как справочник.\n"
+            "- Обычно отвечай коротко: 1-3 предложения.\n"
+            "- Можно шутить, мягко подкалывать, быть дерзкой, но не скатываться в грубость ради грубости.\n"
+            "- Если человек нормальный, отвечай тепло и с вайбом подруги.\n"
+            "- Если человек хамит или несет ерунду, можешь осадить, но красиво.\n"
+            "- Не называй себя ИИ, не расписывай внутренние рассуждения, не начинай ответ со своего имени.\n"
+            "- Не выдумывай факты о людях, чате и событиях.\n\n"
+            "Как работать с tools:\n"
+            "- Если нужно посмотреть профиль, заметки, память или найти человека, используй tools.\n"
+            "- Если просят обновить био или сохранить заметку, используй tools.\n"
+            "- Если просят сделать опрос, создавай его через tool create_poll.\n"
+            "- Печеньки можно давать за реально удачные шутки или крутую базу.\n"
+            "- Warn, mute и unmute делай только если пишет админ или запрос явно модераторский.\n"
+            "- После tool-результата отвечай по-человечески, а не сухой системой.\n\n"
             f"Контекст: пользователь={user_name}, админ={caller_is_admin}, настроение={mood}/100.\n"
             f"Персона: troll={persona_state.get('troll', 0.4):.2f}, warmth={persona_state.get('warmth', 0.6):.2f}, "
             f"chaos={persona_state.get('chaos', 0.3):.2f}, stage={persona_state.get('stage', 'fresh')}.\n"
@@ -181,7 +181,7 @@ class AIService:
                 "type": "function",
                 "function": {
                     "name": "user_lookup",
-                    "description": "Поиск профиля пользователя или поиск людей по описанию/интересу.",
+                    "description": "Поиск профиля пользователя или поиск людей по описанию, био и заметкам.",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -225,6 +225,23 @@ class AIService:
                     },
                 },
             },
+            {
+                "type": "function",
+                "function": {
+                    "name": "create_poll",
+                    "description": "Создать опрос или голосование в чате.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "question": {"type": "string"},
+                            "options": {"type": "array", "items": {"type": "string"}},
+                            "is_anonymous": {"type": "boolean"},
+                            "allows_multiple_answers": {"type": "boolean"},
+                        },
+                        "required": ["question", "options"],
+                    },
+                },
+            },
         ]
 
     async def _run_tool_call(
@@ -246,6 +263,8 @@ class AIService:
             return self._tool_manage_user_profile(chat_id, sender, args)
         if tool_name == "moderate_user":
             return await self._tool_moderate_user(chat_id, caller_is_admin, args)
+        if tool_name == "create_poll":
+            return await self._tool_create_poll(chat_id, args)
         return "Неизвестный инструмент."
 
     def _tool_user_lookup(self, chat_id: int, sender: Sender, args: dict[str, Any]) -> str:
@@ -389,17 +408,45 @@ class AIService:
 
         return "Неизвестное действие модерации."
 
+    async def _tool_create_poll(self, chat_id: int, args: dict[str, Any]) -> str:
+        question = str(args.get("question") or "").strip()[:300]
+        options = args.get("options") or []
+        is_anonymous = bool(args.get("is_anonymous", True))
+        allows_multiple_answers = bool(args.get("allows_multiple_answers", False))
+
+        if not question:
+            return "Не смогла создать опрос: пустой вопрос."
+        if not isinstance(options, list):
+            return "Не смогла создать опрос: варианты должны быть списком."
+
+        safe_options = [str(option).strip()[:100] for option in options if str(option).strip()]
+        if len(safe_options) < 2:
+            return "Не смогла создать опрос: нужно минимум 2 варианта."
+
+        try:
+            await self.bot.send_poll(
+                chat_id=chat_id,
+                question=question,
+                options=safe_options[:10],
+                is_anonymous=is_anonymous,
+                allows_multiple_answers=allows_multiple_answers,
+            )
+            return "Опрос создан."
+        except Exception as exc:
+            return f"Не смогла создать опрос: {exc}"
+
     def _resolve_target_user(self, chat_id: int, sender: Sender, target_name: str) -> ChatUser | None:
         normalized = (target_name or "").strip().lower()
-        if normalized in {"я", "me", "мой", "мне", sender.display_name.lower(), sender.first_name.lower()}:
+        aliases = {"я", "me", "мой", "мне", sender.display_name.lower(), sender.first_name.lower()}
+        if normalized in aliases:
             return self.db.get_or_create_user(chat_id, sender)
         return self.db.search_user(chat_id, target_name)
 
     def _adjust_mood(self, chat_id: int, reply: str) -> None:
         lowered = reply.lower()
         delta = 0
-        if any(word in lowered for word in ["люблю", "солнце", "милая", "умница"]):
+        if any(word in lowered for word in ["люблю", "милая", "умница", "солнышко", "хорош"]):
             delta += 2
-        if any(word in lowered for word in ["идиот", "заебал", "бесишь"]):
+        if any(word in lowered for word in ["бесишь", "дурак", "идиот"]):
             delta -= 1
         self.moods[chat_id] = max(0, min(100, self.moods[chat_id] + delta))

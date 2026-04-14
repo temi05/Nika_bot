@@ -174,7 +174,8 @@ def build_messages_router(bot: Bot, settings: Settings, db: SupabaseDB, ai: AISe
             found_bad_word = any(word and _word_in_text(lowered, word) for word in bad_words)
             promo_link = "t.me/" in lowered or "telegram.me/" in lowered
 
-            if found_bad_word or (promo_link and settings_row.link_filter_enabled and not await _user_is_admin(bot, message.chat.id, sender.user_id)):
+            sender_is_admin = await _message_sender_is_admin(bot, message, sender)
+            if found_bad_word or (promo_link and settings_row.link_filter_enabled and not sender_is_admin):
                 try:
                     await message.delete()
                 except Exception:
@@ -247,7 +248,7 @@ def build_messages_router(bot: Bot, settings: Settings, db: SupabaseDB, ai: AISe
             print(f"   └ Bot ID: {me.id}, Reply to User ID: {message.reply_to_message.from_user.id}")
 
         if text or is_media:
-            caller_is_admin = await _user_is_admin(bot, message.chat.id, sender.user_id)
+            caller_is_admin = await _message_sender_is_admin(bot, message, sender)
             reply = await ai.generate_reply(
                 message.chat.id,
                 sender,
@@ -286,3 +287,9 @@ async def _user_is_admin(bot: Bot, chat_id: int, user_id: int) -> bool:
     except Exception:
         return False
     return member.status in {"creator", "administrator"}
+
+
+async def _message_sender_is_admin(bot: Bot, message: Message, sender) -> bool:
+    if message.sender_chat and message.sender_chat.id == message.chat.id:
+        return True
+    return await _user_is_admin(bot, message.chat.id, sender.user_id)
