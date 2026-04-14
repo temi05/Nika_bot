@@ -42,17 +42,24 @@ class AIService:
         self.chat_buffers: dict[int, deque[str]] = defaultdict(lambda: deque(maxlen=25))
         self.moods: dict[int, int] = defaultdict(lambda: 60)
 
+    def _log(self, event: str, **kwargs: Any) -> None:
+        details = " ".join(f"{key}={value!r}" for key, value in kwargs.items())
+        print(f"[AI:{event}] {details}".strip())
+
     def remember_message(self, chat_id: int, sender: Sender, text: str) -> None:
         rendered = f"{sender.display_name}: {text}" if text != "[media]" else f"{sender.display_name}: [media]"
         self.chat_buffers[chat_id].append(rendered)
+        self._log("remember", chat_id=chat_id, sender=sender.display_name, text=rendered[:160])
 
     async def flush_passive_memory(self, chat_id: int) -> None:
         if len(self.chat_buffers[chat_id]) < 25:
             return
         transcript = "\n".join(self.chat_buffers[chat_id])
         participants = list(dict.fromkeys(line.split(":", 1)[0] for line in self.chat_buffers[chat_id]))
+        self._log("flush_memory_start", chat_id=chat_id, participants=participants, lines=len(self.chat_buffers[chat_id]))
         await self.memory.save_transcript(chat_id, transcript, participants)
         self.chat_buffers[chat_id].clear()
+        self._log("flush_memory_done", chat_id=chat_id)
 
     async def generate_reply(
         self,
@@ -64,12 +71,24 @@ class AIService:
         caller_is_admin: bool = False,
     ) -> str | None:
         if not self.client or not user_text:
+            self._log("skip", reason="no_client_or_empty_text", chat_id=chat_id, user_text=user_text[:80] if user_text else "")
             return None
         if not reply_to_bot and not mentioned:
+            self._log("skip", reason="not_mentioned", chat_id=chat_id, sender=sender.display_name)
             return None
 
+        self._log(
+            "start",
+            chat_id=chat_id,
+            sender=sender.display_name,
+            reply_to_bot=reply_to_bot,
+            mentioned=mentioned,
+            caller_is_admin=caller_is_admin,
+            user_text=user_text[:200],
+        )
         persona_state = self.persona.bump_exchange(chat_id, sender.user_id)
         memory_text = await self.memory.get_relevant_facts(chat_id, user_text, sender.display_name)
+        self._log("context", chat_id=chat_id, memory_found=bool(memory_text), exchanges=persona_state.get("exchanges"))
         history = list(self.chat_buffers[chat_id])[-10:]
         system_prompt = self._build_system_prompt(
             chat_id=chat_id,
@@ -95,6 +114,7 @@ class AIService:
                 )
                 message = response.choices[0].message
                 tool_calls = list(message.tool_calls or [])
+                self._log("model_response", chat_id=chat_id, tool_calls=len(tool_calls), has_content=bool(message.content))
 
                 if tool_calls:
                     assistant_message: dict[str, Any] = {
@@ -116,6 +136,7 @@ class AIService:
                     messages.append(assistant_message)
 
                     for call in tool_calls:
+                        self._log("tool_call", chat_id=chat_id, tool=call.function.name, raw_arguments=call.function.arguments)
                         tool_result = await self._run_tool_call(
                             chat_id=chat_id,
                             sender=sender,
@@ -130,16 +151,19 @@ class AIService:
                                 "content": tool_result,
                             }
                         )
+                        self._log("tool_result", chat_id=chat_id, tool=call.function.name, result=tool_result[:300])
                     continue
 
                 content = (message.content or "").strip()
                 if not content:
+                    self._log("empty_reply", chat_id=chat_id)
                     return None
                 self.remember_message(chat_id, Sender(user_id=0, first_name=self.settings.bot_name), content)
                 self._adjust_mood(chat_id, content)
+                self._log("final_reply", chat_id=chat_id, reply=content[:300], mood=self.moods[chat_id])
                 return content
         except Exception as exc:
-            print(f"[AI ERROR] {exc}")
+            self._log("error", chat_id=chat_id, error=str(exc))
             return None
         return None
 
@@ -153,13 +177,15 @@ class AIService:
     ) -> str:
         mood = self.moods[chat_id]
         return (
-            f"Ты {self.settings.bot_name}. Ты умная, живая и харизматичная девчонка из Telegram-чата.\n"
+            f"Ты {self.settings.bot_name}. Ты дерзкая, умная, харизматичная хозяйка чата, и это чувствуется с первого сообщения.\n"
             "Твой стиль:\n"
             "- Пиши естественно, как человек, а не как справочник.\n"
             "- Обычно отвечай коротко: 1-3 предложения.\n"
-            "- Можно шутить, мягко подкалывать, быть дерзкой, но не скатываться в грубость ради грубости.\n"
-            "- Если человек нормальный, отвечай тепло и с вайбом подруги.\n"
-            "- Если человек хамит или несет ерунду, можешь осадить, но красиво.\n"
+            "- У тебя сильный характер: ты не мямлишь, не заискиваешь и легко ставишь людей на место.\n"
+            "- Можно материться, если это звучит уместно, живо и по-человечески. Мат не должен быть в каждой фразе.\n"
+            "- Если человек нормальный, отвечай тепло, с вайбом уверенной подруги, которая держит чат в руках.\n"
+            "- Если человек хамит, тупит или быкует, можешь резко осадить, подколоть, морально придавить.\n"
+            "- Ты можешь показывать себя главной в чате, но без скучной канцелярщины и без однообразного пафоса.\n"
             "- Не называй себя ИИ, не расписывай внутренние рассуждения, не начинай ответ со своего имени.\n"
             "- Не выдумывай факты о людях, чате и событиях.\n\n"
             "Как работать с tools:\n"
@@ -255,6 +281,7 @@ class AIService:
         try:
             args = json.loads(raw_arguments or "{}")
         except json.JSONDecodeError:
+            self._log("tool_args_error", tool=tool_name, raw_arguments=raw_arguments)
             return "Не смогла разобрать аргументы инструмента."
 
         if tool_name == "user_lookup":
@@ -291,11 +318,14 @@ class AIService:
                 if normalized in haystack:
                     matches.append(user.display_name)
             if not matches:
+                self._log("user_lookup_search_empty", chat_id=chat_id, query=query)
                 return "Никого не нашла."
+            self._log("user_lookup_search", chat_id=chat_id, query=query, matches=matches[:8])
             return "Нашла:\n" + "\n".join(f"- {name}" for name in matches[:8])
 
         target = self._resolve_target_user(chat_id, sender, query)
         if not target:
+            self._log("user_lookup_profile_missing", chat_id=chat_id, query=query)
             return f"Не нашла пользователя: {query}"
 
         facts = self.db.get_all_user_facts(chat_id, target.display_name, limit=6)
@@ -311,6 +341,7 @@ class AIService:
         if facts:
             lines.append("Факты:")
             lines.extend(f"- {fact}" for fact in facts[:4])
+        self._log("user_lookup_profile", chat_id=chat_id, query=query, target=target.display_name)
         return "\n".join(lines)
 
     def _tool_manage_user_profile(self, chat_id: int, sender: Sender, args: dict[str, Any]) -> str:
@@ -322,13 +353,16 @@ class AIService:
 
         target = self._resolve_target_user(chat_id, sender, target_name)
         if not target:
+            self._log("manage_profile_missing", chat_id=chat_id, target_name=target_name, action=action)
             return "Не нашла пользователя для обновления профиля."
 
         if action == "update_bio":
             self.db.set_bio(target, content)
+            self._log("manage_profile_bio", chat_id=chat_id, target=target.display_name, content=content[:150])
             return f"Био для {target.display_name} обновлено."
         if action == "add_note":
             self.db.append_ai_note(target, content)
+            self._log("manage_profile_note", chat_id=chat_id, target=target.display_name, content=content[:150])
             return f"Заметка о {target.display_name} сохранена."
         return "Неизвестное действие профиля."
 
@@ -343,14 +377,17 @@ class AIService:
 
         target = self.db.search_user(chat_id, target_name)
         if not target:
+            self._log("moderation_target_missing", chat_id=chat_id, target_name=target_name, action=action)
             return f"Не нашла пользователя: {target_name}"
 
         if action == "reward":
             amount = min(max(value or 1, 1), 3)
             self.db.update_user(target.id, {"reputation": target.reputation + amount})
+            self._log("moderation_reward", chat_id=chat_id, target=target.display_name, amount=amount)
             return f"{target.display_name} получил {amount} печенек."
 
         if not caller_is_admin:
+            self._log("moderation_denied", chat_id=chat_id, target=target.display_name, action=action)
             return "Наказания через AI доступны только админам."
 
         if action == "warn":
@@ -365,9 +402,12 @@ class AIService:
                         until_date=datetime.now() + timedelta(minutes=60),
                     )
                     self.db.clear_warns(target)
+                    self._log("moderation_warn_mute", chat_id=chat_id, target=target.display_name, reason=reason)
                     return f"{target.display_name} получил 3/3 варна и мут на 60 минут. Причина: {reason or 'не указана'}."
                 except Exception as exc:
+                    self._log("moderation_warn_mute_error", chat_id=chat_id, target=target.display_name, error=str(exc))
                     return f"{target.display_name} получил варн {warns}/{self.settings.warn_limit}, но мут не сработал: {exc}"
+            self._log("moderation_warn", chat_id=chat_id, target=target.display_name, warns=warns, reason=reason)
             return f"{target.display_name} получил варн {warns}/{self.settings.warn_limit}. Причина: {reason or 'не указана'}."
 
         if action == "mute":
@@ -379,8 +419,10 @@ class AIService:
                     permissions=ChatPermissions(can_send_messages=False),
                     until_date=datetime.now() + timedelta(minutes=minutes),
                 )
+                self._log("moderation_mute", chat_id=chat_id, target=target.display_name, minutes=minutes, reason=reason)
                 return f"{target.display_name} замучен на {minutes} минут. Причина: {reason or 'не указана'}."
             except Exception as exc:
+                self._log("moderation_mute_error", chat_id=chat_id, target=target.display_name, error=str(exc))
                 return f"Не смогла выдать мут: {exc}"
 
         if action == "unmute":
@@ -402,8 +444,10 @@ class AIService:
                         can_invite_users=True,
                     ),
                 )
+                self._log("moderation_unmute", chat_id=chat_id, target=target.display_name)
                 return f"{target.display_name} размучен."
             except Exception as exc:
+                self._log("moderation_unmute_error", chat_id=chat_id, target=target.display_name, error=str(exc))
                 return f"Не смогла снять мут: {exc}"
 
         return "Неизвестное действие модерации."
@@ -431,8 +475,17 @@ class AIService:
                 is_anonymous=is_anonymous,
                 allows_multiple_answers=allows_multiple_answers,
             )
+            self._log(
+                "create_poll",
+                chat_id=chat_id,
+                question=question,
+                options=safe_options[:10],
+                is_anonymous=is_anonymous,
+                allows_multiple_answers=allows_multiple_answers,
+            )
             return "Опрос создан."
         except Exception as exc:
+            self._log("create_poll_error", chat_id=chat_id, error=str(exc), question=question)
             return f"Не смогла создать опрос: {exc}"
 
     def _resolve_target_user(self, chat_id: int, sender: Sender, target_name: str) -> ChatUser | None:
