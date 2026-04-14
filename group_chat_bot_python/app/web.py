@@ -33,18 +33,21 @@ def create_app() -> FastAPI:
     reminder_task: asyncio.Task | None = None
 
     async def reminders_loop() -> None:
-        while True:
-            try:
-                for reminder in db.get_due_reminders():
-                    mention = reminder.user_name or f"ID: {reminder.user_id}"
-                    await bot.send_message(
-                        reminder.chat_id,
-                        f"⏰ Дзынь-дзынь! Напоминалочка для {mention}:\n\n{reminder.text}",
-                    )
-                    db.mark_reminder_sent(reminder.id)
-            except Exception:
-                pass
-            await asyncio.sleep(60)
+        try:
+            while True:
+                try:
+                    for reminder in db.get_due_reminders():
+                        mention = reminder.user_name or f"ID: {reminder.user_id}"
+                        await bot.send_message(
+                            reminder.chat_id,
+                            f"⏰ Дзынь-дзынь! Напоминалочка для {mention}:\n\n{reminder.text}",
+                        )
+                        db.mark_reminder_sent(reminder.id)
+                except Exception:
+                    pass
+                await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            pass
 
     async def configure_webhook() -> None:
         base_url = settings.render_external_url.rstrip("/")
