@@ -53,31 +53,45 @@ class AIService:
         reply_to_bot: bool,
         mentioned: bool,
     ) -> str | None:
-        if not self.client or not user_text:
+        if not self.client:
+            print("⚠️ [AI ERROR] ИИ-клиент не инициализирован. Проверь API ключи!")
             return None
+            
+        if not user_text:
+            return None
+
         if not reply_to_bot and not mentioned:
             return None
 
-        persona_state = self.persona.bump_exchange(chat_id, sender.user_id)
-        memory_text = await self.memory.get_relevant_facts(chat_id, user_text, sender.display_name)
-        history = list(self.chat_buffers[chat_id])[-10:]
-        system_prompt = self._build_system_prompt(persona_state, memory_text, sender.display_name)
+        print(f"🧠 [AI] Ника думает над ответом для {sender.display_name}...")
+        try:
+            persona_state = self.persona.bump_exchange(chat_id, sender.user_id)
+            memory_text = await self.memory.get_relevant_facts(chat_id, user_text, sender.display_name)
+            history = list(self.chat_buffers[chat_id])[-10:]
+            system_prompt = self._build_system_prompt(persona_state, memory_text, sender.display_name)
 
-        messages = [{"role": "system", "content": system_prompt}]
-        messages.extend({"role": "user", "content": line} for line in history)
-        messages.append({"role": "user", "content": f"{sender.display_name}: {user_text}"})
+            messages = [{"role": "system", "content": system_prompt}]
+            messages.extend({"role": "user", "content": line} for line in history)
+            messages.append({"role": "user", "content": f"{sender.display_name}: {user_text}"})
 
-        response = await self.client.chat.completions.create(
-            model=self.settings.ai_model,
-            messages=messages,
-            temperature=self.settings.ai_temperature,
-            max_tokens=self.settings.ai_max_tokens,
-        )
-        content = (response.choices[0].message.content or "").strip()
-        if content:
-            self.remember_message(chat_id, Sender(user_id=0, first_name=self.settings.bot_name), content)
-            self._adjust_mood(chat_id, content)
-        return content or None
+            response = await self.client.chat.completions.create(
+                model=self.settings.ai_model,
+                messages=messages,
+                temperature=self.settings.ai_temperature,
+                max_tokens=self.settings.ai_max_tokens,
+            )
+            content = (response.choices[0].message.content or "").strip()
+            
+            if content:
+                print(f"✨ [AI SUCCESS] Ответ сгенерирован: {content[:50]}...")
+                self.remember_message(chat_id, Sender(user_id=0, first_name=self.settings.bot_name), content)
+                self._adjust_mood(chat_id, content)
+            else:
+                print("⚠️ [AI WARNING] ИИ вернул пустой ответ.")
+            return content or None
+        except Exception as exc:
+            print(f"❌ [AI ERROR] Ошибка при вызове ИИ: {exc}")
+            return None
 
     def _build_system_prompt(self, persona_state: dict, memory_text: str, user_name: str) -> str:
         persona_block = (
