@@ -15,13 +15,16 @@ class AIService:
         self.settings = settings
         self.memory = memory
         self.persona = persona
+        effective_api_key = settings.effective_ai_api_key
+        effective_base_url = settings.effective_ai_base_url
+        
         self.client = (
             AsyncOpenAI(
-                api_key=settings.openai_api_key,
-                base_url=settings.openai_base_url,
+                api_key=effective_api_key,
+                base_url=effective_base_url,
                 timeout=settings.ai_timeout_seconds,
             )
-            if settings.openai_api_key
+            if effective_api_key
             else None
         )
         self.chat_buffers: dict[int, deque[str]] = defaultdict(lambda: deque(maxlen=25))

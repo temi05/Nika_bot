@@ -24,12 +24,23 @@ class Settings(BaseSettings):
     render_external_url: str = Field(default="http://127.0.0.1:8080", alias="RENDER_EXTERNAL_URL")
     port: int = Field(default=8080, alias="PORT")
 
-    openai_api_key: str | None = Field(default=None, alias="OPENAI_API_KEY")
+    openai_api_key: str | None = Field(default=None, validation_alias="OPENAI_API_KEY")
+    polza_api_key: str | None = Field(default=None, validation_alias="POLZA_API_KEY")
     openai_base_url: str = Field(default="https://api.openai.com/v1", alias="OPENAI_BASE_URL")
     ai_model: str = Field(default="gpt-4o-mini", alias="AI_MODEL")
     ai_temperature: float = Field(default=0.7, alias="AI_TEMPERATURE")
     ai_max_tokens: int = Field(default=700, alias="AI_MAX_TOKENS")
     ai_timeout_seconds: int = Field(default=45, alias="AI_TIMEOUT_SECONDS")
+
+    @property
+    def effective_ai_api_key(self) -> str | None:
+        return self.openai_api_key or self.polza_api_key
+
+    @property
+    def effective_ai_base_url(self) -> str:
+        if self.polza_api_key and self.openai_base_url == "https://api.openai.com/v1":
+             return "https://polza.ai/api/v1"
+        return self.openai_base_url
 
     memory_provider: str = Field(default="database", alias="MEMORY_PROVIDER")
     lightrag_base_url: str = Field(default="http://127.0.0.1:9621", alias="LIGHTRAG_BASE_URL")
