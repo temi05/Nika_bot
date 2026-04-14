@@ -71,11 +71,14 @@ class LightRAGMemoryProvider(BaseMemoryProvider):
         if self.settings.lightrag_workspace:
             payload["workspace"] = self.settings.lightrag_workspace
 
-        data = await self._request("POST", "/query", payload)
-        if isinstance(data.get("context"), str):
-            return data["context"]
-        if isinstance(data.get("response"), str):
-            return data["response"]
+        try:
+            data = await self._request("POST", "/query", payload)
+            if isinstance(data.get("context"), str):
+                return data["context"]
+            if isinstance(data.get("response"), str):
+                return data["response"]
+        except Exception as exc:
+            print(f"⚠️ [MEMORY ERROR] Не удалось получить данные из LightRAG: {exc}")
         return ""
 
     async def health(self) -> dict:
