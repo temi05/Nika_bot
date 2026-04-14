@@ -32,16 +32,6 @@ class Settings(BaseSettings):
     ai_max_tokens: int = Field(default=700, alias="AI_MAX_TOKENS")
     ai_timeout_seconds: int = Field(default=45, alias="AI_TIMEOUT_SECONDS")
 
-    @property
-    def effective_ai_api_key(self) -> str | None:
-        return self.openai_api_key or self.polza_api_key
-
-    @property
-    def effective_ai_base_url(self) -> str:
-        if self.polza_api_key and self.openai_base_url == "https://api.openai.com/v1":
-             return "https://polza.ai/api/v1"
-        return self.openai_base_url
-
     memory_provider: str = Field(default="database", alias="MEMORY_PROVIDER")
     lightrag_base_url: str = Field(default="http://127.0.0.1:9621", alias="LIGHTRAG_BASE_URL")
     lightrag_api_key: str | None = Field(default=None, alias="LIGHTRAG_API_KEY")
@@ -54,6 +44,16 @@ class Settings(BaseSettings):
     warn_decay_days: int = Field(default=7, alias="WARN_DECAY_DAYS")
     daily_xp_min: int = Field(default=50, alias="DAILY_XP_MIN")
     daily_xp_max: int = Field(default=150, alias="DAILY_XP_MAX")
+
+    @property
+    def effective_ai_api_key(self) -> str | None:
+        return self.openai_api_key or self.polza_api_key
+
+    @property
+    def effective_ai_base_url(self) -> str:
+        if self.polza_api_key and self.openai_base_url == "https://api.openai.com/v1":
+            return "https://polza.ai/api/v1"
+        return self.openai_base_url
 
 
 @lru_cache(maxsize=1)

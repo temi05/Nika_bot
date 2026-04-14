@@ -24,7 +24,7 @@ def create_app() -> FastAPI:
     db = SupabaseDB(settings)
     memory = build_memory_provider(settings, db)
     persona = PersonaService(db)
-    ai_service = AIService(settings, memory, persona)
+    ai_service = AIService(settings, db, memory, persona, bot)
 
     dispatcher.include_router(build_admin_router(bot, db))
     dispatcher.include_router(build_commands_router(db, settings.bot_name, ai_service))
@@ -40,7 +40,7 @@ def create_app() -> FastAPI:
                         mention = reminder.user_name or f"ID: {reminder.user_id}"
                         await bot.send_message(
                             reminder.chat_id,
-                            f"⏰ Дзынь-дзынь! Напоминалочка для {mention}:\n\n{reminder.text}",
+                            f"Напоминание для {mention}:\n\n{reminder.text}",
                         )
                         db.mark_reminder_sent(reminder.id)
                 except Exception:
@@ -57,12 +57,7 @@ def create_app() -> FastAPI:
         await bot.set_webhook(
             webhook_url,
             secret_token=settings.webhook_secret_token,
-            allowed_updates=[
-                "message",
-                "message_reaction",
-                "callback_query",
-                "chat_member",
-            ],
+            allowed_updates=["message", "message_reaction", "callback_query", "chat_member"],
             drop_pending_updates=False,
         )
 
@@ -98,8 +93,7 @@ def create_app() -> FastAPI:
 
     @app.get("/health")
     async def health() -> dict:
-        memory_health = await memory.health()
-        return {"status": "ok", "memory": memory_health}
+        return {"status": "ok", "memory": await memory.health()}
 
     @app.get("/api/memory/health")
     async def memory_health() -> dict:
@@ -109,8 +103,8 @@ def create_app() -> FastAPI:
     async def telegram_webhook(request: Request) -> dict:
         if request.headers.get("x-telegram-bot-api-secret-token") != settings.webhook_secret_token:
             raise HTTPException(status_code=403, detail="Invalid secret token")
-        payload = await request.json()
 
+        payload = await request.json()
         if payload.get("message_reaction"):
             await handle_message_reaction(payload["message_reaction"], db)
 

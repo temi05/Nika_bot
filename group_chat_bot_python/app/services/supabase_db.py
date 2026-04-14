@@ -250,6 +250,24 @@ class SupabaseDB:
         )
         return updated
 
+    def append_ai_note(self, user: ChatUser, note: str) -> ChatUser | None:
+        clean_note = note.strip()[:300]
+        if not clean_note:
+            return user
+        old_notes = (user.ai_notes or "").strip()
+        final_notes = f"{old_notes}\n- {clean_note}".strip() if old_notes else f"- {clean_note}"
+        updated = self.update_user(user.id, {"ai_notes": final_notes})
+        self.store_memory(
+            user.chat_id,
+            MemoryRecord(
+                fact=f"Заметка о {user.display_name}: {clean_note}",
+                source="ai_note",
+                confidence=0.85,
+                meta={"user_id": user.user_id},
+            ),
+        )
+        return updated
+
     def set_birthday(self, user: ChatUser, birthday: str) -> ChatUser | None:
         updated = self.update_user(user.id, {"birthday": birthday})
         self.store_memory(

@@ -1,50 +1,56 @@
 from __future__ import annotations
 
+import json
 from collections import defaultdict, deque
+from datetime import datetime, timedelta
+from typing import Any
 
+from aiogram import Bot
+from aiogram.types import ChatPermissions
 from openai import AsyncOpenAI
 
 from app.config import Settings
-from app.models import Sender
+from app.models import ChatUser, Sender
 from app.services.memory_provider import BaseMemoryProvider
 from app.services.persona_service import PersonaService
+from app.services.supabase_db import SupabaseDB
 
 
 class AIService:
-    def __init__(self, settings: Settings, memory: BaseMemoryProvider, persona: PersonaService) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        db: SupabaseDB,
+        memory: BaseMemoryProvider,
+        persona: PersonaService,
+        bot: Bot,
+    ) -> None:
         self.settings = settings
+        self.db = db
         self.memory = memory
         self.persona = persona
-        effective_api_key = settings.effective_ai_api_key
-        effective_base_url = settings.effective_ai_base_url
-        
+        self.bot = bot
         self.client = (
             AsyncOpenAI(
-                api_key=effective_api_key,
-                base_url=effective_base_url,
+                api_key=settings.effective_ai_api_key,
+                base_url=settings.effective_ai_base_url,
                 timeout=settings.ai_timeout_seconds,
             )
-            if effective_api_key
+            if settings.effective_ai_api_key
             else None
         )
         self.chat_buffers: dict[int, deque[str]] = defaultdict(lambda: deque(maxlen=25))
-        self.moods: dict[int, int] = defaultdict(lambda: 50)
+        self.moods: dict[int, int] = defaultdict(lambda: 55)
 
     def remember_message(self, chat_id: int, sender: Sender, text: str) -> None:
-        if text == "[media]":
-            self.chat_buffers[chat_id].append(f"{sender.display_name} прислал(а) файл/медиа")
-        else:
-            self.chat_buffers[chat_id].append(f"{sender.display_name}: {text}")
+        rendered = f"{sender.display_name}: {text}" if text != "[media]" else f"{sender.display_name}: [media]"
+        self.chat_buffers[chat_id].append(rendered)
 
     async def flush_passive_memory(self, chat_id: int) -> None:
         if len(self.chat_buffers[chat_id]) < 25:
             return
         transcript = "\n".join(self.chat_buffers[chat_id])
-        participants: list[str] = []
-        for line in self.chat_buffers[chat_id]:
-            name = line.split(":", 1)[0]
-            if name not in participants:
-                participants.append(name)
+        participants = list(dict.fromkeys(line.split(":", 1)[0] for line in self.chat_buffers[chat_id]))
         await self.memory.save_transcript(chat_id, transcript, participants)
         self.chat_buffers[chat_id].clear()
 
@@ -55,71 +61,345 @@ class AIService:
         user_text: str,
         reply_to_bot: bool,
         mentioned: bool,
+        caller_is_admin: bool = False,
     ) -> str | None:
-        if not self.client:
-            print("⚠️ [AI ERROR] ИИ-клиент не инициализирован. Проверь API ключи!")
+        if not self.client or not user_text:
             return None
-            
-        if not user_text:
-            return None
-
         if not reply_to_bot and not mentioned:
             return None
 
-        print(f"🧠 [AI] Ника думает над ответом для {sender.display_name}...")
+        persona_state = self.persona.bump_exchange(chat_id, sender.user_id)
+        memory_text = await self.memory.get_relevant_facts(chat_id, user_text, sender.display_name)
+        history = list(self.chat_buffers[chat_id])[-10:]
+        system_prompt = self._build_system_prompt(
+            chat_id=chat_id,
+            user_name=sender.display_name,
+            memory_text=memory_text,
+            persona_state=persona_state,
+            caller_is_admin=caller_is_admin,
+        )
+
+        messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
+        messages.extend({"role": "user", "content": line} for line in history)
+        messages.append({"role": "user", "content": f"{sender.display_name}: {user_text}"})
+
         try:
-            persona_state = self.persona.bump_exchange(chat_id, sender.user_id)
-            memory_text = await self.memory.get_relevant_facts(chat_id, user_text, sender.display_name)
-            history = list(self.chat_buffers[chat_id])[-10:]
-            system_prompt = self._build_system_prompt(persona_state, memory_text, sender.display_name)
+            for _ in range(3):
+                response = await self.client.chat.completions.create(
+                    model=self.settings.ai_model,
+                    messages=messages,
+                    tools=self._tool_definitions(),
+                    tool_choice="auto",
+                    temperature=self.settings.ai_temperature,
+                    max_tokens=self.settings.ai_max_tokens,
+                )
+                message = response.choices[0].message
+                tool_calls = list(message.tool_calls or [])
 
-            messages = [{"role": "system", "content": system_prompt}]
-            messages.extend({"role": "user", "content": line} for line in history)
-            messages.append({"role": "user", "content": f"{sender.display_name}: {user_text}"})
+                if tool_calls:
+                    assistant_message: dict[str, Any] = {
+                        "role": "assistant",
+                        "content": message.content or "",
+                        "tool_calls": [],
+                    }
+                    for call in tool_calls:
+                        assistant_message["tool_calls"].append(
+                            {
+                                "id": call.id,
+                                "type": "function",
+                                "function": {
+                                    "name": call.function.name,
+                                    "arguments": call.function.arguments,
+                                },
+                            }
+                        )
+                    messages.append(assistant_message)
 
-            response = await self.client.chat.completions.create(
-                model=self.settings.ai_model,
-                messages=messages,
-                temperature=self.settings.ai_temperature,
-                max_tokens=self.settings.ai_max_tokens,
-            )
-            content = (response.choices[0].message.content or "").strip()
-            
-            if content:
-                print(f"✨ [AI SUCCESS] Ответ сгенерирован: {content[:50]}...")
+                    for call in tool_calls:
+                        tool_result = await self._run_tool_call(
+                            chat_id=chat_id,
+                            sender=sender,
+                            caller_is_admin=caller_is_admin,
+                            tool_name=call.function.name,
+                            raw_arguments=call.function.arguments,
+                        )
+                        messages.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": call.id,
+                                "content": tool_result,
+                            }
+                        )
+                    continue
+
+                content = (message.content or "").strip()
+                if not content:
+                    return None
                 self.remember_message(chat_id, Sender(user_id=0, first_name=self.settings.bot_name), content)
                 self._adjust_mood(chat_id, content)
-            else:
-                print("⚠️ [AI WARNING] ИИ вернул пустой ответ.")
-            return content or None
+                return content
         except Exception as exc:
-            print(f"❌ [AI ERROR] Ошибка при вызове ИИ: {exc}")
+            print(f"[AI ERROR] {exc}")
             return None
+        return None
 
-    def _build_system_prompt(self, persona_state: dict, memory_text: str, user_name: str) -> str:
-        persona_block = (
-            f"Ты {self.settings.bot_name} — дерзкая, саркастичная и токсичная девушка в Telegram-чате.\n"
-            "Твоя цель — общаться как реальный, острый на язык человек. Никакой вежливости, никакой помощи.\n"
-            "ПРАВИЛА:\n"
-            "1. Отвечай кратко, 1-2 предложения.\n"
-            "2. Пиши как в мессенджере (без точек в конце, с матом если к месту).\n"
-            "3. НИКОГДА не пиши свое имя в начале (например, 'НейроНика:' или 'Ника:'). Сразу выдавай ответ.\n"
-            "4. Забудь фразы вроде 'Что у тебя на уме?', 'Кажется...', 'Чем могу помочь?'.\n"
-            "5. Если тебя оскорбляют - жестко осаживай в ответ.\n"
-            f"Параметры: troll={persona_state['troll']}, warmth={persona_state['warmth']}, chaos={persona_state['chaos']}."
-        )
-        memory_block = f"\n\nФакты из прошлого:\n{memory_text}" if memory_text else ""
+    def _build_system_prompt(
+        self,
+        chat_id: int,
+        user_name: str,
+        memory_text: str,
+        persona_state: dict[str, Any],
+        caller_is_admin: bool,
+    ) -> str:
+        mood = self.moods[chat_id]
         return (
-            f"{persona_block}{memory_block}\n\n"
-            f"Пишет: {user_name}.\n"
-            "Просто ответь ему. Не пиши свое имя перед текстом!"
+            f"Ты {self.settings.bot_name}. Ты живая, язвительная, смешная и немного токсичная девчонка из чата, "
+            "а не бездушный помощник.\n"
+            "Стиль:\n"
+            "- Пиши как человек из Telegram, коротко и естественно.\n"
+            "- Обычно 1-3 предложения.\n"
+            "- Можно шутить, подкалывать, быть дерзкой, но без тупой бессмысленной грубости.\n"
+            "- Не пиши префикс с именем, не объясняй свою логику, не говори что ты ИИ.\n"
+            "- Не становись канцелярской, официозной или слишком услужливой.\n"
+            "- Если собеседник нормальный, можешь быть теплее. Если лезет с тупостью или агрессией, осаживай.\n"
+            "- Не выдумывай факты о людях и чате.\n\n"
+            "Поведение с инструментами:\n"
+            "- Если нужно посмотреть профиль, заметки или найти человека по описанию, используй tools.\n"
+            "- Если просят обновить био или сохранить заметку о ком-то, используй tools.\n"
+            "- Если шутка реально хорошая, можешь дать 1-2 печеньки через tool reward.\n"
+            "- Наказания warn/mute/unmute делай только если это админ или запрос явно модераторский.\n"
+            "- Если tool вернул системный результат, потом ответь по-человечески, без сухой бюрократии.\n\n"
+            f"Контекст: пользователь={user_name}, админ={caller_is_admin}, настроение={mood}/100.\n"
+            f"Персона: troll={persona_state.get('troll', 0.4):.2f}, warmth={persona_state.get('warmth', 0.6):.2f}, "
+            f"chaos={persona_state.get('chaos', 0.3):.2f}, stage={persona_state.get('stage', 'fresh')}.\n"
+            + (f"\nПамять о чате и людях:\n{memory_text}\n" if memory_text else "\n")
         )
+
+    def _tool_definitions(self) -> list[dict[str, Any]]:
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": "user_lookup",
+                    "description": "Поиск профиля пользователя или поиск людей по описанию/интересу.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "action": {"type": "string", "enum": ["profile", "search"]},
+                            "query": {"type": "string"},
+                        },
+                        "required": ["action", "query"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "manage_user_profile",
+                    "description": "Обновить био пользователя или добавить заметку в его AI-досье.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "target_name": {"type": "string"},
+                            "action": {"type": "string", "enum": ["update_bio", "add_note"]},
+                            "content": {"type": "string"},
+                        },
+                        "required": ["target_name", "action", "content"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "moderate_user",
+                    "description": "Выдать предупреждение, мут, размут или наградить печеньками.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "target_name": {"type": "string"},
+                            "action": {"type": "string", "enum": ["warn", "mute", "unmute", "reward"]},
+                            "value": {"type": "number"},
+                            "reason": {"type": "string"},
+                        },
+                        "required": ["target_name", "action"],
+                    },
+                },
+            },
+        ]
+
+    async def _run_tool_call(
+        self,
+        chat_id: int,
+        sender: Sender,
+        caller_is_admin: bool,
+        tool_name: str,
+        raw_arguments: str,
+    ) -> str:
+        try:
+            args = json.loads(raw_arguments or "{}")
+        except json.JSONDecodeError:
+            return "Не смогла разобрать аргументы инструмента."
+
+        if tool_name == "user_lookup":
+            return self._tool_user_lookup(chat_id, sender, args)
+        if tool_name == "manage_user_profile":
+            return self._tool_manage_user_profile(chat_id, sender, args)
+        if tool_name == "moderate_user":
+            return await self._tool_moderate_user(chat_id, caller_is_admin, args)
+        return "Неизвестный инструмент."
+
+    def _tool_user_lookup(self, chat_id: int, sender: Sender, args: dict[str, Any]) -> str:
+        action = str(args.get("action") or "").lower()
+        query = str(args.get("query") or "").strip()
+        if not query:
+            return "Пустой запрос."
+
+        if action == "search":
+            users = self.db.get_all_users(chat_id)
+            normalized = query.lower()
+            matches = []
+            for user in users:
+                haystack = " | ".join(
+                    filter(
+                        None,
+                        [
+                            user.display_name.lower(),
+                            (user.bio or "").lower(),
+                            (user.ai_notes or "").lower(),
+                        ],
+                    )
+                )
+                if normalized in haystack:
+                    matches.append(user.display_name)
+            if not matches:
+                return "Никого не нашла."
+            return "Нашла:\n" + "\n".join(f"- {name}" for name in matches[:8])
+
+        target = self._resolve_target_user(chat_id, sender, query)
+        if not target:
+            return f"Не нашла пользователя: {query}"
+
+        facts = self.db.get_all_user_facts(chat_id, target.display_name, limit=6)
+        lines = [
+            f"Профиль: {target.display_name}",
+            f"Уровень: {target.level}",
+            f"XP: {target.xp}",
+            f"Печеньки: {target.reputation}",
+            f"Варны: {target.warns}/{self.settings.warn_limit}",
+            f"Био: {target.bio or 'нет'}",
+            f"Заметки: {target.ai_notes or 'нет'}",
+        ]
+        if facts:
+            lines.append("Факты:")
+            lines.extend(f"- {fact}" for fact in facts[:4])
+        return "\n".join(lines)
+
+    def _tool_manage_user_profile(self, chat_id: int, sender: Sender, args: dict[str, Any]) -> str:
+        action = str(args.get("action") or "").lower()
+        target_name = str(args.get("target_name") or "").strip()
+        content = str(args.get("content") or "").strip()
+        if not content:
+            return "Пустой контент."
+
+        target = self._resolve_target_user(chat_id, sender, target_name)
+        if not target:
+            return "Не нашла пользователя для обновления профиля."
+
+        if action == "update_bio":
+            self.db.set_bio(target, content)
+            return f"Био для {target.display_name} обновлено."
+        if action == "add_note":
+            self.db.append_ai_note(target, content)
+            return f"Заметка о {target.display_name} сохранена."
+        return "Неизвестное действие профиля."
+
+    async def _tool_moderate_user(self, chat_id: int, caller_is_admin: bool, args: dict[str, Any]) -> str:
+        action = str(args.get("action") or "").lower()
+        target_name = str(args.get("target_name") or "").strip()
+        reason = str(args.get("reason") or "").strip()
+        value = int(args.get("value") or 0)
+
+        if not target_name:
+            return "Не указана цель."
+
+        target = self.db.search_user(chat_id, target_name)
+        if not target:
+            return f"Не нашла пользователя: {target_name}"
+
+        if action == "reward":
+            amount = min(max(value or 1, 1), 3)
+            self.db.update_user(target.id, {"reputation": target.reputation + amount})
+            return f"{target.display_name} получил {amount} печенек."
+
+        if not caller_is_admin:
+            return "Наказания через AI доступны только админам."
+
+        if action == "warn":
+            updated = self.db.apply_warn(target)
+            warns = updated.warns if updated else target.warns + 1
+            if warns >= self.settings.warn_limit:
+                try:
+                    await self.bot.restrict_chat_member(
+                        chat_id,
+                        target.user_id,
+                        permissions=ChatPermissions(can_send_messages=False),
+                        until_date=datetime.now() + timedelta(minutes=60),
+                    )
+                    self.db.clear_warns(target)
+                    return f"{target.display_name} получил 3/3 варна и мут на 60 минут. Причина: {reason or 'не указана'}."
+                except Exception as exc:
+                    return f"{target.display_name} получил варн {warns}/{self.settings.warn_limit}, но мут не сработал: {exc}"
+            return f"{target.display_name} получил варн {warns}/{self.settings.warn_limit}. Причина: {reason or 'не указана'}."
+
+        if action == "mute":
+            minutes = min(max(value or 15, 1), 1440)
+            try:
+                await self.bot.restrict_chat_member(
+                    chat_id,
+                    target.user_id,
+                    permissions=ChatPermissions(can_send_messages=False),
+                    until_date=datetime.now() + timedelta(minutes=minutes),
+                )
+                return f"{target.display_name} замучен на {minutes} минут. Причина: {reason or 'не указана'}."
+            except Exception as exc:
+                return f"Не смогла выдать мут: {exc}"
+
+        if action == "unmute":
+            try:
+                await self.bot.restrict_chat_member(
+                    chat_id,
+                    target.user_id,
+                    permissions=ChatPermissions(
+                        can_send_messages=True,
+                        can_send_audios=True,
+                        can_send_documents=True,
+                        can_send_photos=True,
+                        can_send_videos=True,
+                        can_send_video_notes=True,
+                        can_send_voice_notes=True,
+                        can_send_polls=True,
+                        can_send_other_messages=True,
+                        can_add_web_page_previews=True,
+                        can_invite_users=True,
+                    ),
+                )
+                return f"{target.display_name} размучен."
+            except Exception as exc:
+                return f"Не смогла снять мут: {exc}"
+
+        return "Неизвестное действие модерации."
+
+    def _resolve_target_user(self, chat_id: int, sender: Sender, target_name: str) -> ChatUser | None:
+        normalized = (target_name or "").strip().lower()
+        if normalized in {"я", "me", "мой", "мне", sender.display_name.lower(), sender.first_name.lower()}:
+            return self.db.get_or_create_user(chat_id, sender)
+        return self.db.search_user(chat_id, target_name)
 
     def _adjust_mood(self, chat_id: int, reply: str) -> None:
-        delta = 0
         lowered = reply.lower()
-        if "спасибо" in lowered:
+        delta = 0
+        if any(word in lowered for word in ["люблю", "солнце", "милая", "умница"]):
             delta += 2
-        if "люблю" in lowered or "обожаю" in lowered:
-            delta += 1
+        if any(word in lowered for word in ["идиот", "заебал", "бесишь"]):
+            delta -= 1
         self.moods[chat_id] = max(0, min(100, self.moods[chat_id] + delta))

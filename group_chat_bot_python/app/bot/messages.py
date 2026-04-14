@@ -247,7 +247,15 @@ def build_messages_router(bot: Bot, settings: Settings, db: SupabaseDB, ai: AISe
             print(f"   └ Bot ID: {me.id}, Reply to User ID: {message.reply_to_message.from_user.id}")
 
         if text or is_media:
-            reply = await ai.generate_reply(message.chat.id, sender, text or "[media]", is_reply_to_bot, is_mentioned)
+            caller_is_admin = await _user_is_admin(bot, message.chat.id, sender.user_id)
+            reply = await ai.generate_reply(
+                message.chat.id,
+                sender,
+                text or "[media]",
+                is_reply_to_bot,
+                is_mentioned,
+                caller_is_admin,
+            )
             if reply:
                 await message.reply(reply)
 
