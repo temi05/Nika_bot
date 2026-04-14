@@ -279,5 +279,10 @@ def _reputation_delta(text: str) -> int:
 
 
 async def _user_is_admin(bot: Bot, chat_id: int, user_id: int) -> bool:
-    member = await bot.get_chat_member(chat_id, user_id)
+    if not user_id or user_id <= 0:
+        return False
+    try:
+        member = await bot.get_chat_member(chat_id, user_id)
+    except Exception:
+        return False
     return member.status in {"creator", "administrator"}
