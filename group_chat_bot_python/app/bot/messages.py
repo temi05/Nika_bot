@@ -224,10 +224,30 @@ def build_messages_router(bot: Bot, settings: Settings, db: SupabaseDB, ai: AISe
             db.last_birthday_check[message.chat.id] = today_key
 
         me = await bot.get_me()
-        mentioned = bool(text and me.username and f"@{me.username.lower()}" in text.lower()) or settings.bot_name.lower() in text.lower()
-        reply_to_bot = bool(message.reply_to_message and message.reply_to_message.from_user and message.reply_to_message.from_user.id == me.id)
+        
+        # Более гибкая проверка имени: реагируем и на полное имя, и на короткое "Ника"
+        bot_name_low = settings.bot_name.lower()
+        short_name = "ника"
+        is_mentioned = False
+        if text:
+            text_low = text.lower()
+            is_mentioned = (
+                (me.username and f"@{me.username.lower()}" in text_low) or 
+                (bot_name_low in text_low) or
+                (short_name in text_low)
+            )
+            
+        is_reply_to_bot = False
+        if message.reply_to_message and message.reply_to_message.from_user:
+            is_reply_to_bot = (message.reply_to_message.from_user.id == me.id)
+
+        # ЛОГИ ДЛЯ ОТЛАДКИ (появятся в Render)
+        print(f"🔍 [DEBUG] Msg from {sender.display_name}: mentioned={is_mentioned}, reply_to_bot={is_reply_to_bot}")
+        if is_reply_to_bot:
+            print(f"   └ Bot ID: {me.id}, Reply to User ID: {message.reply_to_message.from_user.id}")
+
         if text or is_media:
-            reply = await ai.generate_reply(message.chat.id, sender, text or "[media]", reply_to_bot, mentioned)
+            reply = await ai.generate_reply(message.chat.id, sender, text or "[media]", is_reply_to_bot, is_mentioned)
             if reply:
                 await message.reply(reply)
 
