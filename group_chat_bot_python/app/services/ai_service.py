@@ -75,9 +75,6 @@ class AIService:
         if not self.client or not user_text:
             self._log("skip", reason="no_client_or_empty_text", chat_id=chat_id)
             return None
-        if not reply_to_bot and not mentioned:
-            self._log("skip", reason="not_mentioned", chat_id=chat_id, sender=sender.display_name)
-            return None
 
         self._log(
             "start",
@@ -558,7 +555,69 @@ class AIService:
                 flags=re.IGNORECASE,
             ).strip(" -,.!?")
 
+        cleaned = self._enforce_personality_mode(cleaned, user_text=user_text)
         return cleaned
+
+    def _enforce_personality_mode(self, content: str, *, user_text: str) -> str:
+        mode = (self.settings.bot_personality_mode or "hard").strip().lower()
+        cleaned = self._strip_soft_phrases(content)
+        if mode not in {"hard", "insane"}:
+            return cleaned
+        if not self._is_hostile_user_text(user_text):
+            return cleaned
+
+        lowered = user_text.lower()
+        if any(token in lowered for token in ["характер", "не верю", "не способна", "докажи"]):
+            if mode == "insane":
+                return "Характер не объявляют, им давят. Сиди ровно и не путай свою дерзость с весом."
+            return "Характер не выпрашивают. Его на тебе и проверяют, так что стой ровнее."
+        if any(token in lowered for token in ["ну ну", "ага да", "посмотрим"]):
+            if mode == "insane":
+                return "Вот и сиди со своим \"ну ну\". Когда до тебя дойдёт, будет уже поздно изображать скептика."
+            return "С этим \"ну ну\" далеко не уедешь. Наберись веса в реплике, потом качай права."
+        if any(token in lowered for token in ["не ебет", "не еб", "суч", "твар", "хуй", "нахуй", "туп", "дур"]):
+            if mode == "insane":
+                return "Пасть пошире не делает тебя убедительнее. Шуму много, веса ноль."
+            return "Рот у тебя громкий, а аргумент как был пустой, так и остался."
+
+        if self._looks_too_soft(cleaned):
+            if mode == "insane":
+                return "Полегче с тоном, герой. Я тебя уже услышала, теперь учись выдерживать ответ."
+            return "Не суетись. Я тебя услышала, просто не обязана плясать под твой лай."
+        return cleaned
+
+    def _strip_soft_phrases(self, content: str) -> str:
+        cleaned = content
+        soft_phrases = [
+            "радость моя",
+            "заяц",
+            "дерзкий заяц",
+            "магия",
+            "сюрпризам",
+            "сюрпризы",
+            "малой",
+            "золотце",
+            "милый",
+            "милая",
+        ]
+        for phrase in soft_phrases:
+            cleaned = re.sub(rf"\b{re.escape(phrase)}\b", "", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"\s{2,}", " ", cleaned)
+        cleaned = re.sub(r"\s+([,!.?])", r"\1", cleaned)
+        return cleaned.strip(" ,")
+
+    def _looks_too_soft(self, content: str) -> bool:
+        lowered = content.lower()
+        soft_markers = [
+            "радость моя",
+            "заяц",
+            "магия",
+            "сюрприз",
+            "не оставлять тебя равнодушным",
+            "приготовься",
+            "как там дела",
+        ]
+        return any(marker in lowered for marker in soft_markers)
 
     def _is_hostile_user_text(self, user_text: str) -> bool:
         lowered = user_text.lower()
