@@ -127,3 +127,9 @@ MEMORY_SYNC_MAX_ATTEMPTS=20
 ```sql
 -- файл: supabase/message_logs.sql
 ```
+
+Для persona-state и новых полей отношений выполни:
+
+```sql
+-- файл: supabase/bot_persona_state.sql
+```

@@ -5,6 +5,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from postgrest.exceptions import APIError
 from supabase import Client, create_client
 
 from app.config import Settings
@@ -493,7 +494,16 @@ class SupabaseDB:
 
     def upsert_persona_state(self, chat_id: int, user_id: int, payload: dict[str, Any]) -> None:
         row = {"chat_id": chat_id, "user_id": user_id, **payload, "updated_at": datetime.now(timezone.utc).isoformat()}
-        self._persona().upsert(row).execute()
+        try:
+            self._persona().upsert(row).execute()
+        except APIError as exc:
+            message = str(exc)
+            if "respect" not in message:
+                raise
+
+            legacy_row = dict(row)
+            legacy_row.pop("respect", None)
+            self._persona().upsert(legacy_row).execute()
 
     def insert_reminder(self, chat_id: int, user_id: int, user_name: str, text: str, trigger_time: datetime) -> Reminder | None:
         result = self._reminders().insert(
