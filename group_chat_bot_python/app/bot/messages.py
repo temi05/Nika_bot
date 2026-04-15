@@ -245,7 +245,8 @@ def build_messages_router(bot: Bot, settings: Settings, db: SupabaseDB, ai: AISe
 
         if text or is_media:
             caller_is_admin = await _message_sender_is_admin(bot, message, sender)
-            should_reply = is_reply_to_bot or is_mentioned
+            is_private_chat = message.chat.type == "private"
+            should_reply = is_private_chat or is_reply_to_bot or is_mentioned
             reply = None
             if should_reply:
                 async with ChatActionSender.typing(bot=bot, chat_id=message.chat.id):
@@ -253,10 +254,10 @@ def build_messages_router(bot: Bot, settings: Settings, db: SupabaseDB, ai: AISe
                         message.chat.id,
                         sender,
                         text or "[media]",
-                    is_reply_to_bot,
-                    is_mentioned,
-                    caller_is_admin,
-                )
+                        is_reply_to_bot,
+                        is_mentioned,
+                        caller_is_admin,
+                    )
             if reply:
                 await message.reply(reply)
 
@@ -306,4 +307,4 @@ def _message_mentions_bot(text: str, bot_name: str, username: str | None) -> boo
     if not name:
         return False
 
-    return bool(re.search(rf"(^|\\W){re.escape(name)}($|\\W)", normalized, flags=re.IGNORECASE))
+    return bool(re.search(rf"(^|\W){re.escape(name)}($|\W)", normalized, flags=re.IGNORECASE))

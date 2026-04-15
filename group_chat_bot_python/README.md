@@ -121,3 +121,9 @@ MEMORY_SYNC_MAX_ATTEMPTS=20
 ```sql
 -- файл: supabase/memory_sync_queue.sql
 ```
+
+Для постоянного учёта реакций и авторов сообщений также нужна таблица:
+
+```sql
+-- файл: supabase/message_logs.sql
+```

@@ -31,6 +31,9 @@ class SupabaseDB:
     def _chats(self):
         return self.client.table("chats")
 
+    def _message_logs(self):
+        return self.client.table("message_logs")
+
     def _knowledge(self):
         return self.client.table("bot_knowledge")
 
@@ -391,9 +394,38 @@ class SupabaseDB:
         if len(authors) > 1000:
             for key in list(authors.keys())[:-1000]:
                 authors.pop(key, None)
+        try:
+            self._message_logs().upsert(
+                {
+                    "chat_id": chat_id,
+                    "message_id": message_id,
+                    "user_id": user_id,
+                },
+                on_conflict="chat_id,message_id",
+            ).execute()
+        except Exception:
+            pass
 
     def get_message_author(self, chat_id: int, message_id: int) -> int | None:
-        return self.message_authors.get(chat_id, {}).get(message_id)
+        cached = self.message_authors.get(chat_id, {}).get(message_id)
+        if cached:
+            return cached
+        try:
+            response = (
+                self._message_logs()
+                .select("user_id")
+                .eq("chat_id", chat_id)
+                .eq("message_id", message_id)
+                .limit(1)
+                .execute()
+            )
+            if response.data:
+                user_id = int(response.data[0]["user_id"])
+                self.message_authors.setdefault(chat_id, {})[message_id] = user_id
+                return user_id
+        except Exception:
+            pass
+        return None
 
     def store_memory(self, chat_id: int, memory: MemoryRecord) -> None:
         self._knowledge().insert(
