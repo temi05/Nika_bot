@@ -46,6 +46,10 @@ class Settings(BaseSettings):
     lightrag_query_mode: str = Field(default="hybrid", alias="LIGHTRAG_QUERY_MODE")
     lightrag_workspace: str | None = Field(default=None, alias="LIGHTRAG_WORKSPACE")
     lightrag_timeout_seconds: int = Field(default=30, alias="LIGHTRAG_TIMEOUT_SECONDS")
+    memory_sync_batch_size: int = Field(default=5, alias="MEMORY_SYNC_BATCH_SIZE")
+    memory_sync_retry_base_seconds: int = Field(default=30, alias="MEMORY_SYNC_RETRY_BASE_SECONDS")
+    memory_sync_retry_max_seconds: int = Field(default=1800, alias="MEMORY_SYNC_RETRY_MAX_SECONDS")
+    memory_sync_max_attempts: int = Field(default=20, alias="MEMORY_SYNC_MAX_ATTEMPTS")
 
     link_filter_default: bool = Field(default=True, alias="LINK_FILTER_DEFAULT")
     warn_limit: int = Field(default=3, alias="WARN_LIMIT")

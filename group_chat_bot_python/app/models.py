@@ -67,6 +67,22 @@ class MemoryRecord:
 
 
 @dataclass(slots=True)
+class MemorySyncJob:
+    id: int
+    chat_id: int
+    transcript: str
+    participants: list[str]
+    provider: str
+    workspace: str | None
+    status: str
+    attempts: int
+    next_attempt_at: datetime
+    last_error: str | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+@dataclass(slots=True)
 class VerificationChallenge:
     chat_id: int
     user_id: int

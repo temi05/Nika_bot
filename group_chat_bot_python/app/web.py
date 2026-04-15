@@ -31,6 +31,7 @@ def create_app() -> FastAPI:
     dispatcher.include_router(build_messages_router(bot, settings, db, ai_service))
 
     reminder_task: asyncio.Task | None = None
+    memory_sync_task: asyncio.Task | None = None
 
     async def reminders_loop() -> None:
         try:
@@ -49,6 +50,17 @@ def create_app() -> FastAPI:
         except asyncio.CancelledError:
             pass
 
+    async def memory_sync_loop() -> None:
+        try:
+            while True:
+                try:
+                    await memory.flush_pending_queue()
+                except Exception as exc:
+                    print(f"[MEMORY:sync_loop_error] error={exc}")
+                await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            pass
+
     async def configure_webhook() -> None:
         base_url = settings.render_external_url.rstrip("/")
         if not base_url.startswith("http"):
@@ -63,7 +75,7 @@ def create_app() -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
-        nonlocal reminder_task
+        nonlocal reminder_task, memory_sync_task
         me = await bot.get_me()
         settings.bot_username = me.username
         try:
@@ -71,11 +83,18 @@ def create_app() -> FastAPI:
         except Exception:
             pass
         reminder_task = asyncio.create_task(reminders_loop())
+        memory_sync_task = asyncio.create_task(memory_sync_loop())
         yield
         if reminder_task:
             reminder_task.cancel()
             try:
                 await reminder_task
+            except Exception:
+                pass
+        if memory_sync_task:
+            memory_sync_task.cancel()
+            try:
+                await memory_sync_task
             except Exception:
                 pass
         await bot.session.close()

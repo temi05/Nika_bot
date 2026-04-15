@@ -101,4 +101,23 @@ MEMORY_PROVIDER=lightrag
 LIGHTRAG_BASE_URL=https://your-lightrag-service.onrender.com
 LIGHTRAG_QUERY_MODE=hybrid
 LIGHTRAG_WORKSPACE=telegram-bot
+MEMORY_SYNC_BATCH_SIZE=5
+MEMORY_SYNC_RETRY_BASE_SECONDS=30
+MEMORY_SYNC_RETRY_MAX_SECONDS=1800
+MEMORY_SYNC_MAX_ATTEMPTS=20
+```
+
+### Durable LightRAG Queue
+
+Если `LightRAG` спит или временно отдаёт `502`, память теперь не теряется:
+
+- transcript сначала пишется в `Supabase` как job в очереди;
+- бот пробует отправить его сразу;
+- если upstream недоступен, job остаётся `pending` и ретраится в фоне;
+- после успеха job помечается как `done`, после слишком многих неудач — как `failed`.
+
+Перед включением `MEMORY_PROVIDER=lightrag` создай таблицу очереди в Supabase:
+
+```sql
+-- файл: supabase/memory_sync_queue.sql
 ```

@@ -8,7 +8,7 @@ from typing import Any
 from supabase import Client, create_client
 
 from app.config import Settings
-from app.models import ChatSettings, ChatUser, MemoryRecord, Reminder, Sender, VerificationChallenge
+from app.models import ChatSettings, ChatUser, MemoryRecord, MemorySyncJob, Reminder, Sender, VerificationChallenge
 from app.utils import birthday_is_today, normalize_search_text
 
 
@@ -40,6 +40,9 @@ class SupabaseDB:
     def _persona(self):
         return self.client.table("bot_persona_state")
 
+    def _memory_sync_queue(self):
+        return self.client.table("memory_sync_queue")
+
     def _user_from_row(self, row: dict[str, Any]) -> ChatUser:
         return ChatUser(
             id=row["id"],
@@ -69,6 +72,25 @@ class SupabaseDB:
             trigger_time=datetime.fromisoformat(str(row["trigger_time"]).replace("Z", "+00:00")),
             user_name=row.get("user_name"),
             is_sent=bool(row.get("is_sent", False)),
+        )
+
+    def _memory_sync_job_from_row(self, row: dict[str, Any]) -> MemorySyncJob:
+        def parse_dt(value: Any) -> datetime:
+            return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+
+        return MemorySyncJob(
+            id=row["id"],
+            chat_id=row["chat_id"],
+            transcript=row["transcript"],
+            participants=list(row.get("participants") or []),
+            provider=row.get("provider") or "lightrag",
+            workspace=row.get("workspace"),
+            status=row.get("status") or "pending",
+            attempts=int(row.get("attempts") or 0),
+            next_attempt_at=parse_dt(row.get("next_attempt_at") or datetime.now(timezone.utc).isoformat()),
+            last_error=row.get("last_error"),
+            created_at=parse_dt(row["created_at"]) if row.get("created_at") else None,
+            updated_at=parse_dt(row["updated_at"]) if row.get("updated_at") else None,
         )
 
     def get_or_create_user(self, chat_id: int, sender: Sender) -> ChatUser:
@@ -463,6 +485,83 @@ class SupabaseDB:
 
     def mark_reminder_sent(self, reminder_id: int) -> None:
         self._reminders().update({"is_sent": True}).eq("id", reminder_id).execute()
+
+    def enqueue_memory_sync(
+        self,
+        chat_id: int,
+        transcript: str,
+        participants: list[str],
+        provider: str,
+        workspace: str | None,
+    ) -> MemorySyncJob | None:
+        result = self._memory_sync_queue().insert(
+            {
+                "chat_id": chat_id,
+                "transcript": transcript,
+                "participants": participants,
+                "provider": provider,
+                "workspace": workspace,
+                "status": "pending",
+                "attempts": 0,
+                "next_attempt_at": datetime.now(timezone.utc).isoformat(),
+                "last_error": None,
+            }
+        ).execute()
+        if not result.data:
+            return None
+        return self._memory_sync_job_from_row(result.data[0])
+
+    def get_due_memory_sync_jobs(self, provider: str, limit: int = 10) -> list[MemorySyncJob]:
+        now = datetime.now(timezone.utc).isoformat()
+        response = (
+            self._memory_sync_queue()
+            .select("*")
+            .eq("provider", provider)
+            .eq("status", "pending")
+            .lte("next_attempt_at", now)
+            .order("created_at")
+            .limit(limit)
+            .execute()
+        )
+        return [self._memory_sync_job_from_row(row) for row in response.data or []]
+
+    def mark_memory_sync_done(self, job_id: int) -> None:
+        self._memory_sync_queue().update(
+            {
+                "status": "done",
+                "last_error": None,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+        ).eq("id", job_id).execute()
+
+    def reschedule_memory_sync_job(self, job_id: int, attempts: int, next_attempt_at: datetime, error: str) -> None:
+        self._memory_sync_queue().update(
+            {
+                "attempts": attempts,
+                "next_attempt_at": next_attempt_at.astimezone(timezone.utc).isoformat(),
+                "last_error": error[:1000],
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+        ).eq("id", job_id).execute()
+
+    def mark_memory_sync_failed(self, job_id: int, attempts: int, error: str) -> None:
+        self._memory_sync_queue().update(
+            {
+                "status": "failed",
+                "attempts": attempts,
+                "last_error": error[:1000],
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+        ).eq("id", job_id).execute()
+
+    def get_memory_sync_stats(self, provider: str) -> dict[str, int]:
+        response = self._memory_sync_queue().select("status").eq("provider", provider).limit(5000).execute()
+        stats = {"pending": 0, "done": 0, "failed": 0}
+        for row in response.data or []:
+            status = row.get("status") or "pending"
+            if status in stats:
+                stats[status] += 1
+        return stats
 
     def set_verification(self, challenge: VerificationChallenge) -> None:
         self.pending_verifications[challenge.user_id] = challenge

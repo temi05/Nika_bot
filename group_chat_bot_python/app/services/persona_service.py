@@ -41,7 +41,7 @@ class PersonaService:
             state["attachment"] = self._clamp(state.get("attachment", 0.2) + 0.03)
             state["troll"] = self._clamp(state.get("troll", 0.4) - 0.02)
 
-        if any(token in lowered for token in ["дура", "тупая", "идиот", "заткнись", "нахуй", "пошла"]):
+        if any(token in lowered for token in ["дура", "тупая", "идиот", "заткнись", "нахуй", "пошла", "хуево", "хуёво", "глупая", "пиздец"]):
             state["troll"] = self._clamp(state.get("troll", 0.4) + 0.06)
             state["chaos"] = self._clamp(state.get("chaos", 0.3) + 0.04)
             state["warmth"] = self._clamp(state.get("warmth", 0.6) - 0.05)

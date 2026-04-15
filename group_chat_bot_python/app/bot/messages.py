@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from datetime import datetime
 
 from aiogram import Bot, Router
 from aiogram.types import BufferedInputFile, ChatPermissions, Message
+from aiogram.utils.chat_action import ChatActionSender
 
 from app.config import Settings
 from app.models import VerificationChallenge
@@ -165,7 +167,10 @@ def build_messages_router(bot: Bot, settings: Settings, db: SupabaseDB, ai: AISe
             )
 
         ai.remember_message(message.chat.id, sender, text or "[media]")
-        await ai.flush_passive_memory(message.chat.id)
+        try:
+            await ai.flush_passive_memory(message.chat.id)
+        except Exception as exc:
+            print(f"[AI:flush_memory_error] chat_id={message.chat.id} error={exc}")
 
         if text:
             settings_row = db.get_chat_settings(message.chat.id)
@@ -227,16 +232,7 @@ def build_messages_router(bot: Bot, settings: Settings, db: SupabaseDB, ai: AISe
         me = await bot.get_me()
         
         # Более гибкая проверка имени: реагируем и на полное имя, и на короткое "Ника"
-        bot_name_low = settings.bot_name.lower()
-        short_name = "ника"
-        is_mentioned = False
-        if text:
-            text_low = text.lower()
-            is_mentioned = (
-                (me.username and f"@{me.username.lower()}" in text_low) or 
-                (bot_name_low in text_low) or
-                (short_name in text_low)
-            )
+        is_mentioned = _message_mentions_bot(text, settings.bot_name, me.username)
             
         is_reply_to_bot = False
         if message.reply_to_message and message.reply_to_message.from_user:
@@ -249,14 +245,18 @@ def build_messages_router(bot: Bot, settings: Settings, db: SupabaseDB, ai: AISe
 
         if text or is_media:
             caller_is_admin = await _message_sender_is_admin(bot, message, sender)
-            reply = await ai.generate_reply(
-                message.chat.id,
-                sender,
-                text or "[media]",
-                is_reply_to_bot,
-                is_mentioned,
-                caller_is_admin,
-            )
+            should_reply = is_reply_to_bot or is_mentioned
+            reply = None
+            if should_reply:
+                async with ChatActionSender.typing(bot=bot, chat_id=message.chat.id):
+                    reply = await ai.generate_reply(
+                        message.chat.id,
+                        sender,
+                        text or "[media]",
+                    is_reply_to_bot,
+                    is_mentioned,
+                    caller_is_admin,
+                )
             if reply:
                 await message.reply(reply)
 
@@ -264,8 +264,6 @@ def build_messages_router(bot: Bot, settings: Settings, db: SupabaseDB, ai: AISe
 
 
 def _word_in_text(text: str, word: str) -> bool:
-    import re
-
     return bool(re.search(rf"(^|\W){re.escape(word)}($|\W)", text, flags=re.IGNORECASE))
 
 
@@ -293,3 +291,19 @@ async def _message_sender_is_admin(bot: Bot, message: Message, sender) -> bool:
     if message.sender_chat and message.sender_chat.id == message.chat.id:
         return True
     return await _user_is_admin(bot, message.chat.id, sender.user_id)
+
+
+def _message_mentions_bot(text: str, bot_name: str, username: str | None) -> bool:
+    if not text:
+        return False
+
+    normalized = text.casefold()
+
+    if username and f"@{username.casefold()}" in normalized:
+        return True
+
+    name = bot_name.strip().casefold()
+    if not name:
+        return False
+
+    return bool(re.search(rf"(^|\\W){re.escape(name)}($|\\W)", normalized, flags=re.IGNORECASE))

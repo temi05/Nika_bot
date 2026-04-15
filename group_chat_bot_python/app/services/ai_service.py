@@ -103,6 +103,7 @@ class AIService:
             reply_to_bot=reply_to_bot,
             mentioned=mentioned,
         )
+        self._adjust_mood_from_user_message(chat_id, user_text)
         persona_state = self.persona.bump_exchange(chat_id, sender.user_id)
 
         memory_text = await self.memory.get_relevant_facts(chat_id, user_text, sender.display_name)
@@ -175,7 +176,7 @@ class AIService:
                         self._log("tool_result", chat_id=chat_id, tool=call.function.name, result=tool_result[:240])
                     continue
 
-                content = (message.content or "").strip()
+                content = self._finalize_reply((message.content or "").strip(), user_text=user_text)
                 if not content:
                     self._log("empty_reply", chat_id=chat_id)
                     return None
@@ -524,8 +525,55 @@ class AIService:
     def _adjust_mood(self, chat_id: int, reply: str) -> None:
         lowered = reply.lower()
         delta = 0
-        if any(word in lowered for word in ["люблю", "милая", "умница", "солнышко", "хорош"]):
+        if any(word in lowered for word in ["люблю", "милая", "умница", "солнышко", "хорош", "красава"]):
             delta += 2
-        if any(word in lowered for word in ["бесишь", "дурак", "идиот"]):
-            delta -= 1
+        if any(word in lowered for word in ["бесишь", "дурак", "идиот", "нахуй", "заебал"]):
+            delta -= 2
         self.moods[chat_id] = max(0, min(100, self.moods[chat_id] + delta))
+
+    def _adjust_mood_from_user_message(self, chat_id: int, user_text: str) -> None:
+        lowered = user_text.lower()
+        delta = 0
+        if any(word in lowered for word in ["спасибо", "обожаю", "люблю", "умница", "красава"]):
+            delta += 4
+        if any(word in lowered for word in ["хуево", "хуёво", "туп", "глуп", "идиот", "нахуй", "пизд", "еба", "пошла"]):
+            delta -= 6
+        self.moods[chat_id] = max(0, min(100, self.moods[chat_id] + delta))
+
+    def _finalize_reply(self, content: str, *, user_text: str) -> str:
+        cleaned = content.strip()
+        if not cleaned:
+            return ""
+
+        bot_name = re.escape(self.settings.bot_name)
+        cleaned = re.sub(rf"^(?:{bot_name}\s*:\s*)+", "", cleaned, flags=re.IGNORECASE).strip()
+        cleaned = re.sub(r"^\s*нейроника\s*:\s*", "", cleaned, flags=re.IGNORECASE).strip()
+        cleaned = re.sub(r"\s{2,}", " ", cleaned)
+
+        if self._is_hostile_user_text(user_text):
+            cleaned = re.sub(
+                r"(?:\s*(?:А|Ну а|И)\s+у\s+тебя\s+как.*|\s*Как\s+у\s+тебя.*|\s*Чем\s+занят.*|\s*Что\s+конкретно\s+интересует\??)\s*$",
+                "",
+                cleaned,
+                flags=re.IGNORECASE,
+            ).strip(" -,.!?")
+
+        return cleaned
+
+    def _is_hostile_user_text(self, user_text: str) -> bool:
+        lowered = user_text.lower()
+        hostile_tokens = [
+            "хуево",
+            "хуёво",
+            "туп",
+            "глуп",
+            "идиот",
+            "дура",
+            "глупая голова",
+            "нахуй",
+            "пизд",
+            "еба",
+            "пошла",
+            "отвечаешь как-то",
+        ]
+        return any(token in lowered for token in hostile_tokens)
