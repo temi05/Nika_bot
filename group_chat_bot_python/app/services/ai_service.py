@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from hashlib import sha1
 from collections import defaultdict, deque
 from datetime import datetime, timedelta
 from typing import Any
@@ -92,6 +93,13 @@ class AIService:
             self._adjust_mood(chat_id, direct_reply)
             self._log("direct_action_reply", chat_id=chat_id, reply=direct_reply[:200])
             return direct_reply
+
+        forced_style_reply = self._maybe_handle_forced_style_reply(user_text)
+        if forced_style_reply:
+            self.remember_message(chat_id, Sender(user_id=0, first_name=self.settings.bot_name), forced_style_reply)
+            self._adjust_mood(chat_id, forced_style_reply)
+            self._log("forced_style_reply", chat_id=chat_id, reply=forced_style_reply[:200])
+            return forced_style_reply
 
         self.persona.observe_user_message(
             chat_id,
@@ -518,6 +526,92 @@ class AIService:
         if normalized in aliases:
             return self.db.get_or_create_user(chat_id, sender)
         return self.db.search_user(chat_id, target_name)
+
+    def _maybe_handle_forced_style_reply(self, user_text: str) -> str | None:
+        mode = (self.settings.bot_personality_mode or "hard").strip().lower()
+        if mode not in {"hard", "insane"}:
+            return None
+
+        lowered = user_text.lower().strip()
+        if not lowered:
+            return None
+
+        category: str | None = None
+        if any(token in lowered for token in ["характер", "не верю", "не можешь", "не способна", "фиговый"]):
+            category = "challenge"
+        elif any(token in lowered for token in ["хай суч", "сучка", "шлюх", "твар", "хуйня", "туп", "дур", "пиздец", "не ебет", "не ебёт"]):
+            category = "insult"
+        elif any(token in lowered for token in ["ой ой ой", "страшно", "ну ну", "ага да", "посмотрим"]):
+            category = "taunt"
+        elif any(token in lowered for token in ["одно и то же", "повторя", "копир", "эхо"]):
+            category = "copycat"
+        elif any(token in lowered for token in ["трусы", "флирт", "соси", "секс", "трах", "в пизду"]):
+            category = "dirty"
+
+        if not category:
+            return None
+        return self._pick_forced_reply(mode, category, user_text)
+
+    def _pick_forced_reply(self, mode: str, category: str, user_text: str) -> str:
+        reply_sets: dict[str, dict[str, list[str]]] = {
+            "hard": {
+                "challenge": [
+                    "Характер не выпрашивают. Его на тебе и проверяют, так что стой ровнее.",
+                    "Ты не характер оцениваешь, а пытаешься нащупать, где тебя прижмут. Уже близко.",
+                    "Если до тебя не дошло с первого раза, это не мой минус. Это у тебя приём слабый.",
+                ],
+                "insult": [
+                    "Рот у тебя громкий, а аргумент как был пустой, так и остался.",
+                    "Лаять ты умеешь. Теперь попробуй сказать что-то с весом.",
+                    "Шума много, смысла мало. В целом, ты стабилен.",
+                ],
+                "taunt": [
+                    "С этим \"ну ну\" далеко не уедешь. Наберись веса в реплике, потом качай права.",
+                    "Паясничать можешь дольше. Суть от этого умнее не станет.",
+                    "Сарказм у тебя пока на детском режиме. Попробуй ещё раз, может попадёшь.",
+                ],
+                "copycat": [
+                    "Повторять за мной несложно. Сложнее самому родить хоть одну нормальную мысль.",
+                    "Эхо включилось? Ладно, хоть какая-то функция у тебя работает.",
+                    "Копируй дальше. На оригинал ты всё равно пока не тянешь.",
+                ],
+                "dirty": [
+                    "Фантазия у тебя шумная, но дешёвая. Давай ближе к делу, цирк уже открыт.",
+                    "Пошлятина вместо мысли. Не лучший обмен, если честно.",
+                    "Грязный заход засчитан. Уровень остроумия, правда, так и не появился.",
+                ],
+            },
+            "insane": {
+                "challenge": [
+                    "Характер не объявляют, им давят. Сиди ровно и не путай свою дерзость с весом.",
+                    "Ты не мой характер щупаешь, а свою планку палишь. Пока она у тебя под плинтусом.",
+                    "Когда у тебя появится хребет, тогда и поговорим о характере. Пока ты просто фон.",
+                ],
+                "insult": [
+                    "Пасть пошире не делает тебя убедительнее. Шуму много, веса ноль.",
+                    "Ты хамишь так, будто это заменяет мозги. Спойлер: не заменяет.",
+                    "С таким заходом ты не страшный, ты просто дешёвый шум на фоне.",
+                ],
+                "taunt": [
+                    "Вот и сиди со своим \"ой ой ой\". Это максимум твоего давления, я поняла.",
+                    "Смешно, как ты изображаешь угрозу, не вытягивая даже подачу.",
+                    "Кривляйся дальше. Может, хоть раз попадёшь в что-то кроме пустоты.",
+                ],
+                "copycat": [
+                    "Повторюша нашлась. Только копия всё равно остаётся копией, как ни корчи рожу.",
+                    "Ты даже в ответах вторичен. Своего в тебе пока меньше, чем шума.",
+                    "Подражать мне можешь сколько угодно, но до оригинала тебе как пешком до мозга.",
+                ],
+                "dirty": [
+                    "Пошлая подача без зубов. Даже провокацию надо уметь делать, а не мазать по стенам.",
+                    "Грязью ты не давишь, ты просто светишь тем, что внутри пусто.",
+                    "Сексуальная бравада без харизмы выглядит жалко. Попробуй хотя бы не позориться так открыто.",
+                ],
+            },
+        }
+        options = reply_sets[mode][category]
+        digest = sha1(user_text.encode("utf-8")).digest()[0]
+        return options[digest % len(options)]
 
     def _adjust_mood(self, chat_id: int, reply: str) -> None:
         lowered = reply.lower()
