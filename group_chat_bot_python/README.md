@@ -1,6 +1,6 @@
 # Python Bot Rewrite
 
-Python-версия бота живет отдельно от старого Node.js-бота и рассчитана на webhook-режим в Render.
+Python-версия бота живет отдельно от старого Node.js-бота и рассчитана на webhook-режим через FastAPI + aiogram.
 
 ## Что уже есть
 
@@ -9,25 +9,58 @@ Python-версия бота живет отдельно от старого Nod
 - автопопытка `setWebhook` при старте
 - `Supabase` как база
 - память через `database` или `LightRAG`
-- команды `/me`, `/top`, `/daily`, `/bio`, `/mybirthday`, `/notes`, `/mood`, `/linkfilter`, `/shop`, `/buy`, `/give`, `/kto`, `/remind`
-- админ-команды `/ban`, `/unban`, `/banword`, `/unbanword`, `/listwords`
-- XP, печеньки, варны, фильтры, напоминания, капча, поздравления с днем рождения
-- AI-ответы с character prompt и tool-use
+- AI-ответы с character prompt, tool-use и персонификацией по пользователям
+- AI memory extraction: диалог режется в summary + факты, а не просто валится сырым логом
+- опросы, профиль, заметки, печеньки, варны, мут и размут через tools
 
-## AI tools
+## Prompt Architecture
 
-Сейчас в Python-версии AI умеет вызывать инструменты для:
+Промпты в этом проекте лучше писать не на "языке программирования", а как структурированные текстовые инструкции.
 
-- поиска профиля и поиска людей по описанию
-- обновления био
-- сохранения AI-заметок о пользователях
-- награды печеньками
-- варна
-- мута и размута
+Практический вариант для этого репозитория:
 
-Это уже ближе к старому `aiHandler.js`, но реализация чище и компактнее.
+- сам prompt писать обычным естественным языком;
+- для характера и чата использовать русский, потому что сам бот живет в русском Telegram-контексте;
+- Python использовать только как слой сборки prompt-шаблонов и подстановки runtime-контекста.
 
-## Запуск локально
+Режим характера теперь можно менять через env:
+
+```env
+BOT_PERSONALITY_MODE=hard
+```
+
+Режимы:
+
+- `normal` — дерзкая, но относительно аккуратная
+- `hard` — уверенная, колкая, с уместным матом и нажимом
+- `insane` — максимально наглая, жёсткая и доминирующая версия
+
+Где это лежит сейчас:
+
+- `app/services/prompt_builders.py` — character/system prompt и memory extraction prompt
+- `app/services/ai_service.py` — orchestration, tools, direct poll handling, logging
+- `app/services/memory_provider.py` — извлечение и сборка памяти
+
+## Memory Tuning
+
+Новые env-поля для качества памяти:
+
+```env
+MEMORY_MODEL=
+MEMORY_EXTRACTION_ENABLED=true
+MEMORY_EXTRACTION_MAX_FACTS=6
+MEMORY_FACT_MIN_CONFIDENCE=0.72
+MEMORY_RETRIEVAL_LIMIT=6
+```
+
+Идея такая:
+
+- `AI_MODEL` отвечает за диалог
+- `MEMORY_MODEL` можно задать отдельно, если хочешь вынести память на другой более дешевый или более точный модельный слой
+- `MEMORY_FACT_MIN_CONFIDENCE` режет мусорные факты
+- `MEMORY_RETRIEVAL_LIMIT` контролирует, сколько тематической памяти бот тащит в prompt
+
+## Run Local
 
 ```bash
 pip install -e .
@@ -36,13 +69,19 @@ uvicorn main:app --host 0.0.0.0 --port 8080
 
 ## Render
 
-Start Command:
+Start command:
 
 ```bash
 uvicorn main:app --host 0.0.0.0 --port $PORT
 ```
 
-Минимальные env:
+Recommended health check:
+
+```text
+/health
+```
+
+Minimal env:
 
 ```env
 TELEGRAM_BOT_TOKEN=...

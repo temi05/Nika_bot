@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections import defaultdict, deque
 from datetime import datetime, timedelta
 from typing import Any
@@ -13,6 +14,7 @@ from app.config import Settings
 from app.models import ChatUser, Sender
 from app.services.memory_provider import BaseMemoryProvider
 from app.services.persona_service import PersonaService
+from app.services.prompt_builders import build_character_system_prompt
 from app.services.supabase_db import SupabaseDB
 
 
@@ -71,7 +73,7 @@ class AIService:
         caller_is_admin: bool = False,
     ) -> str | None:
         if not self.client or not user_text:
-            self._log("skip", reason="no_client_or_empty_text", chat_id=chat_id, user_text=user_text[:80] if user_text else "")
+            self._log("skip", reason="no_client_or_empty_text", chat_id=chat_id)
             return None
         if not reply_to_bot and not mentioned:
             self._log("skip", reason="not_mentioned", chat_id=chat_id, sender=sender.display_name)
@@ -86,24 +88,43 @@ class AIService:
             caller_is_admin=caller_is_admin,
             user_text=user_text[:200],
         )
+
+        direct_reply = await self._maybe_handle_direct_action(chat_id, sender, user_text)
+        if direct_reply:
+            self.remember_message(chat_id, Sender(user_id=0, first_name=self.settings.bot_name), direct_reply)
+            self._adjust_mood(chat_id, direct_reply)
+            self._log("direct_action_reply", chat_id=chat_id, reply=direct_reply[:200])
+            return direct_reply
+
+        self.persona.observe_user_message(
+            chat_id,
+            sender.user_id,
+            user_text,
+            reply_to_bot=reply_to_bot,
+            mentioned=mentioned,
+        )
         persona_state = self.persona.bump_exchange(chat_id, sender.user_id)
+
         memory_text = await self.memory.get_relevant_facts(chat_id, user_text, sender.display_name)
         self._log("context", chat_id=chat_id, memory_found=bool(memory_text), exchanges=persona_state.get("exchanges"))
-        history = list(self.chat_buffers[chat_id])[-10:]
-        system_prompt = self._build_system_prompt(
-            chat_id=chat_id,
+
+        system_prompt = build_character_system_prompt(
+            bot_name=self.settings.bot_name,
             user_name=sender.display_name,
-            memory_text=memory_text,
-            persona_state=persona_state,
             caller_is_admin=caller_is_admin,
+            mood=self.moods[chat_id],
+            persona_state=persona_state,
+            memory_context=memory_text,
+            personality_mode=self.settings.bot_personality_mode,
         )
 
+        history = list(self.chat_buffers[chat_id])[-10:]
         messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
         messages.extend({"role": "user", "content": line} for line in history)
         messages.append({"role": "user", "content": f"{sender.display_name}: {user_text}"})
 
         try:
-            for _ in range(3):
+            for round_index in range(3):
                 response = await self.client.chat.completions.create(
                     model=self.settings.ai_model,
                     messages=messages,
@@ -114,7 +135,7 @@ class AIService:
                 )
                 message = response.choices[0].message
                 tool_calls = list(message.tool_calls or [])
-                self._log("model_response", chat_id=chat_id, tool_calls=len(tool_calls), has_content=bool(message.content))
+                self._log("model_response", chat_id=chat_id, round=round_index + 1, tool_calls=len(tool_calls))
 
                 if tool_calls:
                     assistant_message: dict[str, Any] = {
@@ -151,55 +172,67 @@ class AIService:
                                 "content": tool_result,
                             }
                         )
-                        self._log("tool_result", chat_id=chat_id, tool=call.function.name, result=tool_result[:300])
+                        self._log("tool_result", chat_id=chat_id, tool=call.function.name, result=tool_result[:240])
                     continue
 
                 content = (message.content or "").strip()
                 if not content:
                     self._log("empty_reply", chat_id=chat_id)
                     return None
+
                 self.remember_message(chat_id, Sender(user_id=0, first_name=self.settings.bot_name), content)
                 self._adjust_mood(chat_id, content)
-                self._log("final_reply", chat_id=chat_id, reply=content[:300], mood=self.moods[chat_id])
+                self._log("final_reply", chat_id=chat_id, reply=content[:240], mood=self.moods[chat_id])
                 return content
         except Exception as exc:
             self._log("error", chat_id=chat_id, error=str(exc))
             return None
         return None
 
-    def _build_system_prompt(
-        self,
-        chat_id: int,
-        user_name: str,
-        memory_text: str,
-        persona_state: dict[str, Any],
-        caller_is_admin: bool,
-    ) -> str:
-        mood = self.moods[chat_id]
-        return (
-            f"Ты {self.settings.bot_name}. Ты дерзкая, умная, харизматичная хозяйка чата, и это чувствуется с первого сообщения.\n"
-            "Твой стиль:\n"
-            "- Пиши естественно, как человек, а не как справочник.\n"
-            "- Обычно отвечай коротко: 1-3 предложения.\n"
-            "- У тебя сильный характер: ты не мямлишь, не заискиваешь и легко ставишь людей на место.\n"
-            "- Можно материться, если это звучит уместно, живо и по-человечески. Мат не должен быть в каждой фразе.\n"
-            "- Если человек нормальный, отвечай тепло, с вайбом уверенной подруги, которая держит чат в руках.\n"
-            "- Если человек хамит, тупит или быкует, можешь резко осадить, подколоть, морально придавить.\n"
-            "- Ты можешь показывать себя главной в чате, но без скучной канцелярщины и без однообразного пафоса.\n"
-            "- Не называй себя ИИ, не расписывай внутренние рассуждения, не начинай ответ со своего имени.\n"
-            "- Не выдумывай факты о людях, чате и событиях.\n\n"
-            "Как работать с tools:\n"
-            "- Если нужно посмотреть профиль, заметки, память или найти человека, используй tools.\n"
-            "- Если просят обновить био или сохранить заметку, используй tools.\n"
-            "- Если просят сделать опрос, создавай его через tool create_poll.\n"
-            "- Печеньки можно давать за реально удачные шутки или крутую базу.\n"
-            "- Warn, mute и unmute делай только если пишет админ или запрос явно модераторский.\n"
-            "- После tool-результата отвечай по-человечески, а не сухой системой.\n\n"
-            f"Контекст: пользователь={user_name}, админ={caller_is_admin}, настроение={mood}/100.\n"
-            f"Персона: troll={persona_state.get('troll', 0.4):.2f}, warmth={persona_state.get('warmth', 0.6):.2f}, "
-            f"chaos={persona_state.get('chaos', 0.3):.2f}, stage={persona_state.get('stage', 'fresh')}.\n"
-            + (f"\nПамять о чате и людях:\n{memory_text}\n" if memory_text else "\n")
-        )
+    async def _maybe_handle_direct_action(self, chat_id: int, sender: Sender, user_text: str) -> str | None:
+        poll_request = self._extract_poll_request(user_text)
+        if not poll_request:
+            return None
+
+        result = await self._tool_create_poll(chat_id, poll_request)
+        if "Опрос создан" in result:
+            return "щас устроила голосование, посмотрим кто тут вообще вменяемый"
+        return f"хотела поднять опрос, но что-то пошло по пизде: {result}"
+
+    def _extract_poll_request(self, user_text: str) -> dict[str, Any] | None:
+        lowered = user_text.lower()
+        if not any(keyword in lowered for keyword in ["опрос", "голосован", "poll"]):
+            return None
+
+        body = user_text.split(":", 1)[1].strip() if ":" in user_text else user_text
+        body = re.sub(r"(?i)\b(сделай|создай|запусти|устрой)\b", "", body).strip()
+        body = re.sub(r"(?i)\b(опрос|голосование|poll)\b", "", body).strip(" .,-")
+
+        options: list[str] = []
+        if "," in body:
+            options = [part.strip() for part in body.split(",") if part.strip()]
+        elif ";" in body:
+            options = [part.strip() for part in body.split(";") if part.strip()]
+        elif " или " in lowered:
+            options = [part.strip() for part in re.split(r"(?i)\s+или\s+", body) if part.strip()]
+
+        if len(options) < 2:
+            return None
+
+        question = "Что выбираем?"
+        if "кто" in lowered:
+            question = "Ну и кто тут победит?"
+        elif "лучше" in lowered:
+            question = "Что лучше?"
+        elif "выбери" in lowered or "выбираем" in lowered:
+            question = "Что выбираем?"
+
+        return {
+            "question": question,
+            "options": options[:10],
+            "is_anonymous": True,
+            "allows_multiple_answers": False,
+        }
 
     def _tool_definitions(self) -> list[dict[str, Any]]:
         return [
@@ -207,7 +240,7 @@ class AIService:
                 "type": "function",
                 "function": {
                     "name": "user_lookup",
-                    "description": "Поиск профиля пользователя или поиск людей по описанию, био и заметкам.",
+                    "description": "Найти профиль пользователя или людей по описанию, био и заметкам.",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -306,14 +339,7 @@ class AIService:
             matches = []
             for user in users:
                 haystack = " | ".join(
-                    filter(
-                        None,
-                        [
-                            user.display_name.lower(),
-                            (user.bio or "").lower(),
-                            (user.ai_notes or "").lower(),
-                        ],
-                    )
+                    filter(None, [user.display_name.lower(), (user.bio or "").lower(), (user.ai_notes or "").lower()])
                 )
                 if normalized in haystack:
                     matches.append(user.display_name)

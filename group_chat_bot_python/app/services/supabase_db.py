@@ -386,6 +386,17 @@ class SupabaseDB:
             }
         ).execute()
 
+    def memory_exists(self, chat_id: int, fact: str) -> bool:
+        rows = (
+            self._knowledge()
+            .select("id")
+            .eq("chat_id", chat_id)
+            .eq("fact", fact)
+            .limit(1)
+            .execute()
+        )
+        return bool(rows.data)
+
     def search_memory(self, chat_id: int, query: str, limit: int = 5) -> list[str]:
         if not query.strip():
             return []
@@ -394,6 +405,17 @@ class SupabaseDB:
             .select("fact,last_seen_at")
             .eq("chat_id", chat_id)
             .ilike("fact", f"%{query}%")
+            .order("last_seen_at", desc=True)
+            .limit(limit)
+            .execute()
+        )
+        return [row["fact"] for row in rows.data or []]
+
+    def get_recent_memories(self, chat_id: int, limit: int = 5) -> list[str]:
+        rows = (
+            self._knowledge()
+            .select("fact,last_seen_at")
+            .eq("chat_id", chat_id)
             .order("last_seen_at", desc=True)
             .limit(limit)
             .execute()

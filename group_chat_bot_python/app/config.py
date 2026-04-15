@@ -27,10 +27,18 @@ class Settings(BaseSettings):
     openai_api_key: str | None = Field(default=None, validation_alias="OPENAI_API_KEY")
     polza_api_key: str | None = Field(default=None, validation_alias="POLZA_API_KEY")
     openai_base_url: str = Field(default="https://api.openai.com/v1", alias="OPENAI_BASE_URL")
+
     ai_model: str = Field(default="gpt-4o-mini", alias="AI_MODEL")
     ai_temperature: float = Field(default=0.7, alias="AI_TEMPERATURE")
     ai_max_tokens: int = Field(default=700, alias="AI_MAX_TOKENS")
     ai_timeout_seconds: int = Field(default=45, alias="AI_TIMEOUT_SECONDS")
+    bot_personality_mode: str = Field(default="hard", alias="BOT_PERSONALITY_MODE")
+
+    memory_model: str | None = Field(default=None, alias="MEMORY_MODEL")
+    memory_extraction_enabled: bool = Field(default=True, alias="MEMORY_EXTRACTION_ENABLED")
+    memory_extraction_max_facts: int = Field(default=6, alias="MEMORY_EXTRACTION_MAX_FACTS")
+    memory_fact_min_confidence: float = Field(default=0.72, alias="MEMORY_FACT_MIN_CONFIDENCE")
+    memory_retrieval_limit: int = Field(default=6, alias="MEMORY_RETRIEVAL_LIMIT")
 
     memory_provider: str = Field(default="database", alias="MEMORY_PROVIDER")
     lightrag_base_url: str = Field(default="http://127.0.0.1:9621", alias="LIGHTRAG_BASE_URL")
@@ -54,6 +62,10 @@ class Settings(BaseSettings):
         if self.polza_api_key and self.openai_base_url == "https://api.openai.com/v1":
             return "https://polza.ai/api/v1"
         return self.openai_base_url
+
+    @property
+    def effective_memory_model(self) -> str:
+        return self.memory_model or self.ai_model
 
 
 @lru_cache(maxsize=1)
