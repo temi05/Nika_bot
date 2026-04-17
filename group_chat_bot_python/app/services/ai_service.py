@@ -188,8 +188,16 @@ class AIService:
                         self._log("tool_result", chat_id=chat_id, tool=call.function.name, result=tool_result[:240])
                     continue
 
-                content = self._finalize_reply((message.content or "").strip(), user_text=user_text)
+                raw_text = self._coerce_model_content(message.content)
+                content = self._finalize_reply(raw_text, user_text=user_text)
                 if not content:
+                    rescued = await self._retry_empty_reply(messages, sender.display_name, user_text)
+                    if rescued:
+                        self.remember_message(chat_id, Sender(user_id=0, first_name=self.settings.bot_name), rescued)
+                        self._adjust_mood(chat_id, rescued)
+                        self._mark_group_reply(chat_id, is_private_chat=is_private_chat)
+                        self._log("empty_reply_recovered", chat_id=chat_id, reply=rescued[:180])
+                        return rescued
                     self._log("empty_reply", chat_id=chat_id)
                     return None
 
@@ -643,4 +651,45 @@ class AIService:
             "РѕС‚РІРµС‡Р°РµС€СЊ РєР°Рє-С‚Рѕ",
         ]
         return any(token in lowered for token in hostile_tokens)
+
+    def _coerce_model_content(self, content: Any) -> str:
+        if isinstance(content, str):
+            return content.strip()
+        if isinstance(content, list):
+            chunks: list[str] = []
+            for item in content:
+                if isinstance(item, str):
+                    chunks.append(item)
+                    continue
+                if isinstance(item, dict):
+                    text = item.get("text") or item.get("content")
+                    if isinstance(text, str) and text.strip():
+                        chunks.append(text.strip())
+            return " ".join(chunks).strip()
+        return ""
+
+    async def _retry_empty_reply(self, messages: list[dict[str, Any]], user_name: str, user_text: str) -> str:
+        retry_messages = [
+            *messages,
+            {
+                "role": "user",
+                "content": (
+                    f"{user_name}: Ответь на предыдущее сообщение одной короткой живой репликой "
+                    f"без молчания и без пустых фраз. Исходная реплика: {user_text}"
+                ),
+            },
+        ]
+        try:
+            response = await self.client.chat.completions.create(
+                model=self.settings.ai_model,
+                messages=retry_messages,
+                temperature=self.settings.ai_temperature,
+                max_tokens=min(self.settings.ai_max_tokens, 140),
+            )
+            message = response.choices[0].message
+            raw_text = self._coerce_model_content(message.content)
+            return self._finalize_reply(raw_text, user_text=user_text)
+        except Exception as exc:
+            self._log("empty_reply_retry_error", error=str(exc))
+            return ""
 
