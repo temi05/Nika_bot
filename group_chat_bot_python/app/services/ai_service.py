@@ -44,6 +44,7 @@ class AIService:
         )
         self.chat_buffers: dict[int, deque[str]] = defaultdict(lambda: deque(maxlen=25))
         self.moods: dict[int, int] = defaultdict(lambda: 60)
+        self.last_group_reply_at: dict[int, datetime] = {}
 
     def _log(self, event: str, **kwargs: Any) -> None:
         details = " ".join(f"{key}={value!r}" for key, value in kwargs.items())
@@ -72,10 +73,22 @@ class AIService:
         reply_to_bot: bool,
         mentioned: bool,
         caller_is_admin: bool = False,
+        is_private_chat: bool = False,
     ) -> str | None:
         if not self.client or not user_text:
             self._log("skip", reason="no_client_or_empty_text", chat_id=chat_id)
             return None
+
+        if not is_private_chat:
+            if not mentioned and user_text.strip() == "[media]":
+                self._log("skip", reason="media_without_mention", chat_id=chat_id)
+                return None
+            if not mentioned and len(user_text.strip()) < self.settings.ai_min_message_len:
+                self._log("skip", reason="too_short_in_group", chat_id=chat_id)
+                return None
+            if self._group_reply_cooldown_active(chat_id):
+                self._log("skip", reason="group_cooldown", chat_id=chat_id)
+                return None
 
         self._log(
             "start",
@@ -91,6 +104,7 @@ class AIService:
         if direct_reply:
             self.remember_message(chat_id, Sender(user_id=0, first_name=self.settings.bot_name), direct_reply)
             self._adjust_mood(chat_id, direct_reply)
+            self._mark_group_reply(chat_id, is_private_chat=is_private_chat)
             self._log("direct_action_reply", chat_id=chat_id, reply=direct_reply[:200])
             return direct_reply
 
@@ -98,6 +112,7 @@ class AIService:
         if forced_style_reply:
             self.remember_message(chat_id, Sender(user_id=0, first_name=self.settings.bot_name), forced_style_reply)
             self._adjust_mood(chat_id, forced_style_reply)
+            self._mark_group_reply(chat_id, is_private_chat=is_private_chat)
             self._log("forced_style_reply", chat_id=chat_id, reply=forced_style_reply[:200])
             return forced_style_reply
 
@@ -122,9 +137,10 @@ class AIService:
             persona_state=persona_state,
             memory_context=memory_text,
             personality_mode=self.settings.bot_personality_mode,
+            compact_prompt=self.settings.ai_compact_prompt,
         )
 
-        history = list(self.chat_buffers[chat_id])[-10:]
+        history = list(self.chat_buffers[chat_id])[-self.settings.ai_history_lines :]
         messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
         messages.extend({"role": "user", "content": line} for line in history)
         messages.append({"role": "user", "content": f"{sender.display_name}: {user_text}"})
@@ -188,6 +204,7 @@ class AIService:
 
                 self.remember_message(chat_id, Sender(user_id=0, first_name=self.settings.bot_name), content)
                 self._adjust_mood(chat_id, content)
+                self._mark_group_reply(chat_id, is_private_chat=is_private_chat)
                 self._log("final_reply", chat_id=chat_id, reply=content[:240], mood=self.moods[chat_id])
                 return content
         except Exception as exc:
@@ -612,6 +629,20 @@ class AIService:
         options = reply_sets[mode][category]
         digest = sha1(user_text.encode("utf-8")).digest()[0]
         return options[digest % len(options)]
+
+    def _group_reply_cooldown_active(self, chat_id: int) -> bool:
+        seconds = max(0, self.settings.ai_group_cooldown_seconds)
+        if seconds == 0:
+            return False
+        last = self.last_group_reply_at.get(chat_id)
+        if not last:
+            return False
+        return (datetime.utcnow() - last).total_seconds() < seconds
+
+    def _mark_group_reply(self, chat_id: int, *, is_private_chat: bool) -> None:
+        if is_private_chat:
+            return
+        self.last_group_reply_at[chat_id] = datetime.utcnow()
 
     def _adjust_mood(self, chat_id: int, reply: str) -> None:
         lowered = reply.lower()

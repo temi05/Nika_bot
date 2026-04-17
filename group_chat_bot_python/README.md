@@ -60,6 +60,26 @@ MEMORY_RETRIEVAL_LIMIT=6
 - `MEMORY_FACT_MIN_CONFIDENCE` режет мусорные факты
 - `MEMORY_RETRIEVAL_LIMIT` контролирует, сколько тематической памяти бот тащит в prompt
 
+## Cost Tuning
+
+Если бот тратит слишком много токенов, начни с этих env:
+
+```env
+AI_MAX_TOKENS=220
+AI_HISTORY_LINES=4
+AI_COMPACT_PROMPT=true
+AI_GROUP_COOLDOWN_SECONDS=12
+AI_MIN_MESSAGE_LEN=4
+```
+
+Что это даёт:
+
+- меньше длина ответа (`AI_MAX_TOKENS`);
+- меньше истории уходит в каждый запрос (`AI_HISTORY_LINES`);
+- короче системный prompt (`AI_COMPACT_PROMPT`);
+- в группе бот не отвечает на каждую реплику подряд (`AI_GROUP_COOLDOWN_SECONDS`);
+- короткий шум в группе не триггерит LLM без явного упоминания (`AI_MIN_MESSAGE_LEN`).
+
 ## Run Local
 
 ```bash

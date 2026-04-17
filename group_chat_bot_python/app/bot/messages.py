@@ -257,6 +257,7 @@ def build_messages_router(bot: Bot, settings: Settings, db: SupabaseDB, ai: AISe
                         is_reply_to_bot,
                         is_mentioned,
                         caller_is_admin,
+                        is_private_chat=is_private_chat,
                     )
             if reply:
                 await message.reply(reply)

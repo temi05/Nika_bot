@@ -30,8 +30,12 @@ class Settings(BaseSettings):
 
     ai_model: str = Field(default="gpt-4o-mini", alias="AI_MODEL")
     ai_temperature: float = Field(default=0.7, alias="AI_TEMPERATURE")
-    ai_max_tokens: int = Field(default=700, alias="AI_MAX_TOKENS")
+    ai_max_tokens: int = Field(default=220, alias="AI_MAX_TOKENS")
     ai_timeout_seconds: int = Field(default=45, alias="AI_TIMEOUT_SECONDS")
+    ai_history_lines: int = Field(default=4, alias="AI_HISTORY_LINES")
+    ai_compact_prompt: bool = Field(default=True, alias="AI_COMPACT_PROMPT")
+    ai_group_cooldown_seconds: int = Field(default=12, alias="AI_GROUP_COOLDOWN_SECONDS")
+    ai_min_message_len: int = Field(default=4, alias="AI_MIN_MESSAGE_LEN")
     bot_personality_mode: str = Field(default="hard", alias="BOT_PERSONALITY_MODE")
 
     memory_model: str | None = Field(default=None, alias="MEMORY_MODEL")
