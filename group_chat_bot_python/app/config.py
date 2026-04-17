@@ -43,6 +43,7 @@ class Settings(BaseSettings):
     memory_extraction_max_facts: int = Field(default=6, alias="MEMORY_EXTRACTION_MAX_FACTS")
     memory_fact_min_confidence: float = Field(default=0.72, alias="MEMORY_FACT_MIN_CONFIDENCE")
     memory_retrieval_limit: int = Field(default=6, alias="MEMORY_RETRIEVAL_LIMIT")
+    memory_capture_all_messages: bool = Field(default=False, alias="MEMORY_CAPTURE_ALL_MESSAGES")
 
     memory_provider: str = Field(default="database", alias="MEMORY_PROVIDER")
     lightrag_base_url: str = Field(default="http://127.0.0.1:9621", alias="LIGHTRAG_BASE_URL")

@@ -51,6 +51,7 @@ MEMORY_EXTRACTION_ENABLED=true
 MEMORY_EXTRACTION_MAX_FACTS=6
 MEMORY_FACT_MIN_CONFIDENCE=0.72
 MEMORY_RETRIEVAL_LIMIT=6
+MEMORY_CAPTURE_ALL_MESSAGES=false
 ```
 
 Идея такая:
@@ -59,6 +60,7 @@ MEMORY_RETRIEVAL_LIMIT=6
 - `MEMORY_MODEL` можно задать отдельно, если хочешь вынести память на другой более дешевый или более точный модельный слой
 - `MEMORY_FACT_MIN_CONFIDENCE` режет мусорные факты
 - `MEMORY_RETRIEVAL_LIMIT` контролирует, сколько тематической памяти бот тащит в prompt
+- `MEMORY_CAPTURE_ALL_MESSAGES=false` сохраняет память только по сообщениям, на которые бот реально отвечает (экономит токены в фоне)
 
 ## Cost Tuning
 

@@ -151,8 +151,9 @@ def build_messages_router(bot: Bot, settings: Settings, db: SupabaseDB, ai: AISe
         if message.pinned_message or message.left_chat_member or message.new_chat_title:
             return
 
-        text = message.text or message.caption or ""
-        is_media = bool(message.photo or message.sticker or message.video or message.document)
+        raw_text = message.text or message.caption or ""
+        ai_input_text = _build_ai_input_text(message, raw_text)
+        text = raw_text.strip()
         db.store_message_author(message.chat.id, message.message_id, sender.user_id)
 
         if text.startswith("/"):
@@ -165,12 +166,6 @@ def build_messages_router(bot: Bot, settings: Settings, db: SupabaseDB, ai: AISe
                 f"🎉 <b>{escape_html(sender.display_name)}</b> апнул <b>{updated_user.level}</b> уровень!",
                 parse_mode="HTML",
             )
-
-        ai.remember_message(message.chat.id, sender, text or "[media]")
-        try:
-            await ai.flush_passive_memory(message.chat.id)
-        except Exception as exc:
-            print(f"[AI:flush_memory_error] chat_id={message.chat.id} error={exc}")
 
         if text:
             settings_row = db.get_chat_settings(message.chat.id)
@@ -243,17 +238,27 @@ def build_messages_router(bot: Bot, settings: Settings, db: SupabaseDB, ai: AISe
         if is_reply_to_bot:
             print(f"   └ Bot ID: {me.id}, Reply to User ID: {message.reply_to_message.from_user.id}")
 
-        if text or is_media:
+        if ai_input_text:
             caller_is_admin = await _message_sender_is_admin(bot, message, sender)
             is_private_chat = message.chat.type == "private"
             should_reply = is_private_chat or is_reply_to_bot or is_mentioned
+            should_capture_memory = (
+                settings.memory_capture_all_messages
+                or should_reply
+            )
+            if should_capture_memory:
+                ai.remember_message(message.chat.id, sender, ai_input_text)
+                try:
+                    await ai.flush_passive_memory(message.chat.id)
+                except Exception as exc:
+                    print(f"[AI:flush_memory_error] chat_id={message.chat.id} error={exc}")
             reply = None
             if should_reply:
                 async with ChatActionSender.typing(bot=bot, chat_id=message.chat.id):
                     reply = await ai.generate_reply(
                         message.chat.id,
                         sender,
-                        text or "[media]",
+                        ai_input_text,
                         is_reply_to_bot,
                         is_mentioned,
                         caller_is_admin,
@@ -309,3 +314,36 @@ def _message_mentions_bot(text: str, bot_name: str, username: str | None) -> boo
         return False
 
     return bool(re.search(rf"(^|\W){re.escape(name)}($|\W)", normalized, flags=re.IGNORECASE))
+
+
+def _build_ai_input_text(message: Message, raw_text: str) -> str:
+    text = (raw_text or "").strip()
+
+    if message.sticker:
+        parts = ["[media:sticker"]
+        if message.sticker.emoji:
+            parts.append(f"emoji={message.sticker.emoji}")
+        if message.sticker.set_name:
+            parts.append(f"set={message.sticker.set_name}")
+        marker = " ".join(parts) + "]"
+        return f"{marker} {text}".strip()
+
+    if message.photo:
+        return f"[media:photo] {text}".strip()
+    if message.video:
+        return f"[media:video] {text}".strip()
+    if message.animation:
+        return f"[media:animation] {text}".strip()
+    if message.voice:
+        return f"[media:voice] {text}".strip()
+    if message.video_note:
+        return f"[media:video_note] {text}".strip()
+    if message.audio:
+        return f"[media:audio] {text}".strip()
+    if message.document:
+        file_name = (message.document.file_name or "").strip()
+        if file_name:
+            return f"[media:document name={file_name}] {text}".strip()
+        return f"[media:document] {text}".strip()
+
+    return text

@@ -76,7 +76,11 @@ def _build_filtered_fallback_document(transcript: str, participants: list[str], 
         if not line or ": " not in line:
             continue
         speaker, message = line.split(": ", 1)
-        if not message or message == "[media]":
+        if not message:
+            continue
+        # Keep useful captions from media messages, but skip pure media markers.
+        message = re.sub(r"^\[media:[^\]]+\]\s*", "", message, flags=re.IGNORECASE).strip()
+        if not message:
             continue
         if speaker.casefold() in bot_markers:
             continue
@@ -102,7 +106,7 @@ def _looks_memory_worthy_message(message: str) -> bool:
     lowered = normalized.casefold()
     if len(normalized) < 12:
         return False
-    if any(token in lowered for token in ["ахах", "пхах", "лол", "кек", "хаха", ")))", ")))", "ыыы"]):
+    if any(token in lowered for token in ["ахах", "пхах", "лол", "кек", "хаха", ")))", "))))", "ыыы"]):
         return False
     if re.fullmatch(r"[\W\d_]+", normalized):
         return False

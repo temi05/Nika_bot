@@ -1,9 +1,10 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 import re
 from collections import defaultdict, deque
 from datetime import datetime, timedelta
+from difflib import SequenceMatcher
 from typing import Any
 
 from aiogram import Bot
@@ -42,6 +43,7 @@ class AIService:
             else None
         )
         self.chat_buffers: dict[int, deque[str]] = defaultdict(lambda: deque(maxlen=25))
+        self.recent_bot_replies: dict[int, deque[str]] = defaultdict(lambda: deque(maxlen=8))
         self.moods: dict[int, int] = defaultdict(lambda: 60)
         self.last_group_reply_at: dict[int, datetime] = {}
 
@@ -50,13 +52,14 @@ class AIService:
         print(f"[AI:{event}] {details}".strip())
 
     def remember_message(self, chat_id: int, sender: Sender, text: str) -> None:
-        rendered = f"{sender.display_name}: {text}" if text != "[media]" else f"{sender.display_name}: [media]"
+        rendered = f"{sender.display_name}: {text}"
         self.chat_buffers[chat_id].append(rendered)
         self._log("remember", chat_id=chat_id, sender=sender.display_name, text=rendered[:160])
 
     async def flush_passive_memory(self, chat_id: int) -> None:
         if len(self.chat_buffers[chat_id]) < 25:
             return
+
         transcript = "\n".join(self.chat_buffers[chat_id])
         participants = list(dict.fromkeys(line.split(":", 1)[0] for line in self.chat_buffers[chat_id]))
         self._log("flush_memory_start", chat_id=chat_id, participants=participants, lines=len(self.chat_buffers[chat_id]))
@@ -78,14 +81,16 @@ class AIService:
             self._log("skip", reason="no_client_or_empty_text", chat_id=chat_id)
             return None
 
+        addressed = mentioned or reply_to_bot
+        is_media_message = self._is_media_marker(user_text)
         if not is_private_chat:
-            if not mentioned and user_text.strip() == "[media]":
+            if not addressed and is_media_message:
                 self._log("skip", reason="media_without_mention", chat_id=chat_id)
                 return None
-            if not mentioned and len(user_text.strip()) < self.settings.ai_min_message_len:
+            if not addressed and len(user_text.strip()) < self.settings.ai_min_message_len:
                 self._log("skip", reason="too_short_in_group", chat_id=chat_id)
                 return None
-            if self._group_reply_cooldown_active(chat_id):
+            if not addressed and self._group_reply_cooldown_active(chat_id):
                 self._log("skip", reason="group_cooldown", chat_id=chat_id)
                 return None
 
@@ -99,9 +104,10 @@ class AIService:
             user_text=user_text[:200],
         )
 
-        direct_reply = await self._maybe_handle_direct_action(chat_id, sender, user_text)
+        direct_reply = await self._maybe_handle_direct_action(chat_id, user_text)
         if direct_reply:
             self.remember_message(chat_id, Sender(user_id=0, first_name=self.settings.bot_name), direct_reply)
+            self._remember_bot_reply(chat_id, direct_reply)
             self._adjust_mood(chat_id, direct_reply)
             self._mark_group_reply(chat_id, is_private_chat=is_private_chat)
             self._log("direct_action_reply", chat_id=chat_id, reply=direct_reply[:200])
@@ -132,9 +138,11 @@ class AIService:
         )
 
         history = list(self.chat_buffers[chat_id])[-self.settings.ai_history_lines :]
+        current_line = f"{sender.display_name}: {user_text}"
         messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
         messages.extend({"role": "user", "content": line} for line in history)
-        messages.append({"role": "user", "content": f"{sender.display_name}: {user_text}"})
+        if not history or history[-1] != current_line:
+            messages.append({"role": "user", "content": current_line})
 
         try:
             for round_index in range(3):
@@ -193,7 +201,15 @@ class AIService:
                 if not content:
                     rescued = await self._retry_empty_reply(messages, sender.display_name, user_text)
                     if rescued:
+                        rescued = await self._ensure_non_repetitive_reply(
+                            chat_id=chat_id,
+                            messages=messages,
+                            sender_name=sender.display_name,
+                            user_text=user_text,
+                            content=rescued,
+                        )
                         self.remember_message(chat_id, Sender(user_id=0, first_name=self.settings.bot_name), rescued)
+                        self._remember_bot_reply(chat_id, rescued)
                         self._adjust_mood(chat_id, rescued)
                         self._mark_group_reply(chat_id, is_private_chat=is_private_chat)
                         self._log("empty_reply_recovered", chat_id=chat_id, reply=rescued[:180])
@@ -201,7 +217,15 @@ class AIService:
                     self._log("empty_reply", chat_id=chat_id)
                     return None
 
+                content = await self._ensure_non_repetitive_reply(
+                    chat_id=chat_id,
+                    messages=messages,
+                    sender_name=sender.display_name,
+                    user_text=user_text,
+                    content=content,
+                )
                 self.remember_message(chat_id, Sender(user_id=0, first_name=self.settings.bot_name), content)
+                self._remember_bot_reply(chat_id, content)
                 self._adjust_mood(chat_id, content)
                 self._mark_group_reply(chat_id, is_private_chat=is_private_chat)
                 self._log("final_reply", chat_id=chat_id, reply=content[:240], mood=self.moods[chat_id])
@@ -211,43 +235,41 @@ class AIService:
             return None
         return None
 
-    async def _maybe_handle_direct_action(self, chat_id: int, sender: Sender, user_text: str) -> str | None:
+    async def _maybe_handle_direct_action(self, chat_id: int, user_text: str) -> str | None:
         poll_request = self._extract_poll_request(user_text)
         if not poll_request:
             return None
 
         result = await self._tool_create_poll(chat_id, poll_request)
-        if "РћРїСЂРѕСЃ СЃРѕР·РґР°РЅ" in result:
-            return "С‰Р°СЃ СѓСЃС‚СЂРѕРёР»Р° РіРѕР»РѕСЃРѕРІР°РЅРёРµ, РїРѕСЃРјРѕС‚СЂРёРј РєС‚Рѕ С‚СѓС‚ РІРѕРѕР±С‰Рµ РІРјРµРЅСЏРµРјС‹Р№"
-        return f"С…РѕС‚РµР»Р° РїРѕРґРЅСЏС‚СЊ РѕРїСЂРѕСЃ, РЅРѕ С‡С‚Рѕ-С‚Рѕ РїРѕС€Р»Рѕ РїРѕ РїРёР·РґРµ: {result}"
+        if "Опрос создан." in result:
+            return "Сделала опрос. Голосуйте."
+        return f"Не получилось сделать опрос: {result}"
 
     def _extract_poll_request(self, user_text: str) -> dict[str, Any] | None:
         lowered = user_text.lower()
-        if not any(keyword in lowered for keyword in ["РѕРїСЂРѕСЃ", "РіРѕР»РѕСЃРѕРІР°РЅ", "poll"]):
+        if not any(keyword in lowered for keyword in ["опрос", "голосован", "poll"]):
             return None
 
         body = user_text.split(":", 1)[1].strip() if ":" in user_text else user_text
-        body = re.sub(r"(?i)\b(СЃРґРµР»Р°Р№|СЃРѕР·РґР°Р№|Р·Р°РїСѓСЃС‚Рё|СѓСЃС‚СЂРѕР№)\b", "", body).strip()
-        body = re.sub(r"(?i)\b(РѕРїСЂРѕСЃ|РіРѕР»РѕСЃРѕРІР°РЅРёРµ|poll)\b", "", body).strip(" .,-")
+        body = re.sub(r"(?i)\b(сделай|создай|запусти|устрой|делаем)\b", "", body).strip()
+        body = re.sub(r"(?i)\b(опрос|голосование|poll)\b", "", body).strip(" .,-")
 
         options: list[str] = []
         if "," in body:
             options = [part.strip() for part in body.split(",") if part.strip()]
         elif ";" in body:
             options = [part.strip() for part in body.split(";") if part.strip()]
-        elif " РёР»Рё " in lowered:
-            options = [part.strip() for part in re.split(r"(?i)\s+РёР»Рё\s+", body) if part.strip()]
+        elif re.search(r"(?i)\s+или\s+", body):
+            options = [part.strip() for part in re.split(r"(?i)\s+или\s+", body) if part.strip()]
 
         if len(options) < 2:
             return None
 
-        question = "Р§С‚Рѕ РІС‹Р±РёСЂР°РµРј?"
-        if "РєС‚Рѕ" in lowered:
-            question = "РќСѓ Рё РєС‚Рѕ С‚СѓС‚ РїРѕР±РµРґРёС‚?"
-        elif "Р»СѓС‡С€Рµ" in lowered:
-            question = "Р§С‚Рѕ Р»СѓС‡С€Рµ?"
-        elif "РІС‹Р±РµСЂРё" in lowered or "РІС‹Р±РёСЂР°РµРј" in lowered:
-            question = "Р§С‚Рѕ РІС‹Р±РёСЂР°РµРј?"
+        question = "Что выбираем?"
+        if "кто" in lowered:
+            question = "Кто победит?"
+        elif "лучше" in lowered:
+            question = "Что лучше?"
 
         return {
             "question": question,
@@ -262,7 +284,7 @@ class AIService:
                 "type": "function",
                 "function": {
                     "name": "user_lookup",
-                    "description": "РќР°Р№С‚Рё РїСЂРѕС„РёР»СЊ РїРѕР»СЊР·РѕРІР°С‚РµР»СЏ РёР»Рё Р»СЋРґРµР№ РїРѕ РѕРїРёСЃР°РЅРёСЋ, Р±РёРѕ Рё Р·Р°РјРµС‚РєР°Рј.",
+                    "description": "Find user profile or search users by notes and bio in this chat.",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -277,7 +299,7 @@ class AIService:
                 "type": "function",
                 "function": {
                     "name": "manage_user_profile",
-                    "description": "РћР±РЅРѕРІРёС‚СЊ Р±РёРѕ РїРѕР»СЊР·РѕРІР°С‚РµР»СЏ РёР»Рё РґРѕР±Р°РІРёС‚СЊ Р·Р°РјРµС‚РєСѓ РІ РµРіРѕ AI-РґРѕСЃСЊРµ.",
+                    "description": "Update user bio or append an AI note.",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -293,7 +315,7 @@ class AIService:
                 "type": "function",
                 "function": {
                     "name": "moderate_user",
-                    "description": "Р’С‹РґР°С‚СЊ РїСЂРµРґСѓРїСЂРµР¶РґРµРЅРёРµ, РјСѓС‚, СЂР°Р·РјСѓС‚ РёР»Рё РЅР°РіСЂР°РґРёС‚СЊ РїРµС‡РµРЅСЊРєР°РјРё.",
+                    "description": "Warn/mute/unmute or reward a user in this chat.",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -310,7 +332,7 @@ class AIService:
                 "type": "function",
                 "function": {
                     "name": "create_poll",
-                    "description": "РЎРѕР·РґР°С‚СЊ РѕРїСЂРѕСЃ РёР»Рё РіРѕР»РѕСЃРѕРІР°РЅРёРµ РІ С‡Р°С‚Рµ.",
+                    "description": "Create a Telegram poll in current chat.",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -337,7 +359,7 @@ class AIService:
             args = json.loads(raw_arguments or "{}")
         except json.JSONDecodeError:
             self._log("tool_args_error", tool=tool_name, raw_arguments=raw_arguments)
-            return "РќРµ СЃРјРѕРіР»Р° СЂР°Р·РѕР±СЂР°С‚СЊ Р°СЂРіСѓРјРµРЅС‚С‹ РёРЅСЃС‚СЂСѓРјРµРЅС‚Р°."
+            return "Не смогла разобрать аргументы инструмента."
 
         if tool_name == "user_lookup":
             return self._tool_user_lookup(chat_id, sender, args)
@@ -347,13 +369,13 @@ class AIService:
             return await self._tool_moderate_user(chat_id, caller_is_admin, args)
         if tool_name == "create_poll":
             return await self._tool_create_poll(chat_id, args)
-        return "РќРµРёР·РІРµСЃС‚РЅС‹Р№ РёРЅСЃС‚СЂСѓРјРµРЅС‚."
+        return "Неизвестный инструмент."
 
     def _tool_user_lookup(self, chat_id: int, sender: Sender, args: dict[str, Any]) -> str:
         action = str(args.get("action") or "").lower()
         query = str(args.get("query") or "").strip()
         if not query:
-            return "РџСѓСЃС‚РѕР№ Р·Р°РїСЂРѕСЃ."
+            return "Пустой запрос."
 
         if action == "search":
             users = self.db.get_all_users(chat_id)
@@ -367,27 +389,27 @@ class AIService:
                     matches.append(user.display_name)
             if not matches:
                 self._log("user_lookup_search_empty", chat_id=chat_id, query=query)
-                return "РќРёРєРѕРіРѕ РЅРµ РЅР°С€Р»Р°."
+                return "Никого не нашла."
             self._log("user_lookup_search", chat_id=chat_id, query=query, matches=matches[:8])
-            return "РќР°С€Р»Р°:\n" + "\n".join(f"- {name}" for name in matches[:8])
+            return "Нашла:\n" + "\n".join(f"- {name}" for name in matches[:8])
 
         target = self._resolve_target_user(chat_id, sender, query)
         if not target:
             self._log("user_lookup_profile_missing", chat_id=chat_id, query=query)
-            return f"РќРµ РЅР°С€Р»Р° РїРѕР»СЊР·РѕРІР°С‚РµР»СЏ: {query}"
+            return f"Не нашла пользователя: {query}"
 
         facts = self.db.get_all_user_facts(chat_id, target.display_name, limit=6)
         lines = [
-            f"РџСЂРѕС„РёР»СЊ: {target.display_name}",
-            f"РЈСЂРѕРІРµРЅСЊ: {target.level}",
+            f"Профиль: {target.display_name}",
+            f"Уровень: {target.level}",
             f"XP: {target.xp}",
-            f"РџРµС‡РµРЅСЊРєРё: {target.reputation}",
-            f"Р’Р°СЂРЅС‹: {target.warns}/{self.settings.warn_limit}",
-            f"Р‘РёРѕ: {target.bio or 'РЅРµС‚'}",
-            f"Р—Р°РјРµС‚РєРё: {target.ai_notes or 'РЅРµС‚'}",
+            f"Печеньки: {target.reputation}",
+            f"Варны: {target.warns}/{self.settings.warn_limit}",
+            f"Био: {target.bio or 'нет'}",
+            f"Заметки: {target.ai_notes or 'нет'}",
         ]
         if facts:
-            lines.append("Р¤Р°РєС‚С‹:")
+            lines.append("Факты:")
             lines.extend(f"- {fact}" for fact in facts[:4])
         self._log("user_lookup_profile", chat_id=chat_id, query=query, target=target.display_name)
         return "\n".join(lines)
@@ -397,22 +419,22 @@ class AIService:
         target_name = str(args.get("target_name") or "").strip()
         content = str(args.get("content") or "").strip()
         if not content:
-            return "РџСѓСЃС‚РѕР№ РєРѕРЅС‚РµРЅС‚."
+            return "Пустой контент."
 
         target = self._resolve_target_user(chat_id, sender, target_name)
         if not target:
             self._log("manage_profile_missing", chat_id=chat_id, target_name=target_name, action=action)
-            return "РќРµ РЅР°С€Р»Р° РїРѕР»СЊР·РѕРІР°С‚РµР»СЏ РґР»СЏ РѕР±РЅРѕРІР»РµРЅРёСЏ РїСЂРѕС„РёР»СЏ."
+            return "Не нашла пользователя для обновления профиля."
 
         if action == "update_bio":
             self.db.set_bio(target, content)
             self._log("manage_profile_bio", chat_id=chat_id, target=target.display_name, content=content[:150])
-            return f"Р‘РёРѕ РґР»СЏ {target.display_name} РѕР±РЅРѕРІР»РµРЅРѕ."
+            return f"Био для {target.display_name} обновлено."
         if action == "add_note":
             self.db.append_ai_note(target, content)
             self._log("manage_profile_note", chat_id=chat_id, target=target.display_name, content=content[:150])
-            return f"Р—Р°РјРµС‚РєР° Рѕ {target.display_name} СЃРѕС…СЂР°РЅРµРЅР°."
-        return "РќРµРёР·РІРµСЃС‚РЅРѕРµ РґРµР№СЃС‚РІРёРµ РїСЂРѕС„РёР»СЏ."
+            return f"Заметка о {target.display_name} сохранена."
+        return "Неизвестное действие профиля."
 
     async def _tool_moderate_user(self, chat_id: int, caller_is_admin: bool, args: dict[str, Any]) -> str:
         action = str(args.get("action") or "").lower()
@@ -421,22 +443,22 @@ class AIService:
         value = int(args.get("value") or 0)
 
         if not target_name:
-            return "РќРµ СѓРєР°Р·Р°РЅР° С†РµР»СЊ."
+            return "Не указана цель."
 
         target = self.db.search_user(chat_id, target_name)
         if not target:
             self._log("moderation_target_missing", chat_id=chat_id, target_name=target_name, action=action)
-            return f"РќРµ РЅР°С€Р»Р° РїРѕР»СЊР·РѕРІР°С‚РµР»СЏ: {target_name}"
+            return f"Не нашла пользователя: {target_name}"
 
         if action == "reward":
             amount = min(max(value or 1, 1), 3)
             self.db.update_user(target.id, {"reputation": target.reputation + amount})
             self._log("moderation_reward", chat_id=chat_id, target=target.display_name, amount=amount)
-            return f"{target.display_name} РїРѕР»СѓС‡РёР» {amount} РїРµС‡РµРЅРµРє."
+            return f"{target.display_name} получил {amount} печенек."
 
         if not caller_is_admin:
             self._log("moderation_denied", chat_id=chat_id, target=target.display_name, action=action)
-            return "РќР°РєР°Р·Р°РЅРёСЏ С‡РµСЂРµР· AI РґРѕСЃС‚СѓРїРЅС‹ С‚РѕР»СЊРєРѕ Р°РґРјРёРЅР°Рј."
+            return "Наказания через AI доступны только админам."
 
         if action == "warn":
             updated = self.db.apply_warn(target)
@@ -451,12 +473,15 @@ class AIService:
                     )
                     self.db.clear_warns(target)
                     self._log("moderation_warn_mute", chat_id=chat_id, target=target.display_name, reason=reason)
-                    return f"{target.display_name} РїРѕР»СѓС‡РёР» 3/3 РІР°СЂРЅР° Рё РјСѓС‚ РЅР° 60 РјРёРЅСѓС‚. РџСЂРёС‡РёРЅР°: {reason or 'РЅРµ СѓРєР°Р·Р°РЅР°'}."
+                    return (
+                        f"{target.display_name} получил {self.settings.warn_limit}/{self.settings.warn_limit} варнов "
+                        f"и мут на 60 минут. Причина: {reason or 'не указана'}."
+                    )
                 except Exception as exc:
                     self._log("moderation_warn_mute_error", chat_id=chat_id, target=target.display_name, error=str(exc))
-                    return f"{target.display_name} РїРѕР»СѓС‡РёР» РІР°СЂРЅ {warns}/{self.settings.warn_limit}, РЅРѕ РјСѓС‚ РЅРµ СЃСЂР°Р±РѕС‚Р°Р»: {exc}"
+                    return f"{target.display_name} получил варн {warns}/{self.settings.warn_limit}, но мут не сработал: {exc}"
             self._log("moderation_warn", chat_id=chat_id, target=target.display_name, warns=warns, reason=reason)
-            return f"{target.display_name} РїРѕР»СѓС‡РёР» РІР°СЂРЅ {warns}/{self.settings.warn_limit}. РџСЂРёС‡РёРЅР°: {reason or 'РЅРµ СѓРєР°Р·Р°РЅР°'}."
+            return f"{target.display_name} получил варн {warns}/{self.settings.warn_limit}. Причина: {reason or 'не указана'}."
 
         if action == "mute":
             minutes = min(max(value or 15, 1), 1440)
@@ -468,10 +493,10 @@ class AIService:
                     until_date=datetime.now() + timedelta(minutes=minutes),
                 )
                 self._log("moderation_mute", chat_id=chat_id, target=target.display_name, minutes=minutes, reason=reason)
-                return f"{target.display_name} Р·Р°РјСѓС‡РµРЅ РЅР° {minutes} РјРёРЅСѓС‚. РџСЂРёС‡РёРЅР°: {reason or 'РЅРµ СѓРєР°Р·Р°РЅР°'}."
+                return f"{target.display_name} замьючен на {minutes} минут. Причина: {reason or 'не указана'}."
             except Exception as exc:
                 self._log("moderation_mute_error", chat_id=chat_id, target=target.display_name, error=str(exc))
-                return f"РќРµ СЃРјРѕРіР»Р° РІС‹РґР°С‚СЊ РјСѓС‚: {exc}"
+                return f"Не смогла выдать мут: {exc}"
 
         if action == "unmute":
             try:
@@ -493,12 +518,12 @@ class AIService:
                     ),
                 )
                 self._log("moderation_unmute", chat_id=chat_id, target=target.display_name)
-                return f"{target.display_name} СЂР°Р·РјСѓС‡РµРЅ."
+                return f"{target.display_name} размьючен."
             except Exception as exc:
                 self._log("moderation_unmute_error", chat_id=chat_id, target=target.display_name, error=str(exc))
-                return f"РќРµ СЃРјРѕРіР»Р° СЃРЅСЏС‚СЊ РјСѓС‚: {exc}"
+                return f"Не смогла снять мут: {exc}"
 
-        return "РќРµРёР·РІРµСЃС‚РЅРѕРµ РґРµР№СЃС‚РІРёРµ РјРѕРґРµСЂР°С†РёРё."
+        return "Неизвестное действие модерации."
 
     async def _tool_create_poll(self, chat_id: int, args: dict[str, Any]) -> str:
         question = str(args.get("question") or "").strip()[:300]
@@ -507,13 +532,13 @@ class AIService:
         allows_multiple_answers = bool(args.get("allows_multiple_answers", False))
 
         if not question:
-            return "РќРµ СЃРјРѕРіР»Р° СЃРѕР·РґР°С‚СЊ РѕРїСЂРѕСЃ: РїСѓСЃС‚РѕР№ РІРѕРїСЂРѕСЃ."
+            return "Не смогла создать опрос: пустой вопрос."
         if not isinstance(options, list):
-            return "РќРµ СЃРјРѕРіР»Р° СЃРѕР·РґР°С‚СЊ РѕРїСЂРѕСЃ: РІР°СЂРёР°РЅС‚С‹ РґРѕР»Р¶РЅС‹ Р±С‹С‚СЊ СЃРїРёСЃРєРѕРј."
+            return "Не смогла создать опрос: варианты должны быть списком."
 
         safe_options = [str(option).strip()[:100] for option in options if str(option).strip()]
         if len(safe_options) < 2:
-            return "РќРµ СЃРјРѕРіР»Р° СЃРѕР·РґР°С‚СЊ РѕРїСЂРѕСЃ: РЅСѓР¶РЅРѕ РјРёРЅРёРјСѓРј 2 РІР°СЂРёР°РЅС‚Р°."
+            return "Не смогла создать опрос: нужно минимум 2 варианта."
 
         try:
             await self.bot.send_poll(
@@ -531,14 +556,16 @@ class AIService:
                 is_anonymous=is_anonymous,
                 allows_multiple_answers=allows_multiple_answers,
             )
-            return "РћРїСЂРѕСЃ СЃРѕР·РґР°РЅ."
+            return "Опрос создан."
         except Exception as exc:
             self._log("create_poll_error", chat_id=chat_id, error=str(exc), question=question)
-            return f"РќРµ СЃРјРѕРіР»Р° СЃРѕР·РґР°С‚СЊ РѕРїСЂРѕСЃ: {exc}"
+            return f"Не смогла создать опрос: {exc}"
 
     def _resolve_target_user(self, chat_id: int, sender: Sender, target_name: str) -> ChatUser | None:
         normalized = (target_name or "").strip().lower()
-        aliases = {"СЏ", "me", "РјРѕР№", "РјРЅРµ", sender.display_name.lower(), sender.first_name.lower()}
+        aliases = {"я", "me", "мой", "мне", sender.display_name.lower(), sender.first_name.lower()}
+        if sender.username:
+            aliases.add(f"@{sender.username.lower()}")
         if normalized in aliases:
             return self.db.get_or_create_user(chat_id, sender)
         return self.db.search_user(chat_id, target_name)
@@ -560,18 +587,18 @@ class AIService:
     def _adjust_mood(self, chat_id: int, reply: str) -> None:
         lowered = reply.lower()
         delta = 0
-        if any(word in lowered for word in ["Р»СЋР±Р»СЋ", "РјРёР»Р°СЏ", "СѓРјРЅРёС†Р°", "СЃРѕР»РЅС‹С€РєРѕ", "С…РѕСЂРѕС€", "РєСЂР°СЃР°РІР°"]):
+        if any(word in lowered for word in ["люблю", "милая", "умница", "солнышко", "хорош", "красава"]):
             delta += 2
-        if any(word in lowered for word in ["Р±РµСЃРёС€СЊ", "РґСѓСЂР°Рє", "РёРґРёРѕС‚", "РЅР°С…СѓР№", "Р·Р°РµР±Р°Р»"]):
+        if any(word in lowered for word in ["бесишь", "дурак", "идиот", "нахуй", "заебал"]):
             delta -= 2
         self.moods[chat_id] = max(0, min(100, self.moods[chat_id] + delta))
 
     def _adjust_mood_from_user_message(self, chat_id: int, user_text: str) -> None:
         lowered = user_text.lower()
         delta = 0
-        if any(word in lowered for word in ["СЃРїР°СЃРёР±Рѕ", "РѕР±РѕР¶Р°СЋ", "Р»СЋР±Р»СЋ", "СѓРјРЅРёС†Р°", "РєСЂР°СЃР°РІР°"]):
+        if any(word in lowered for word in ["спасибо", "обожаю", "люблю", "умница", "красава"]):
             delta += 4
-        if any(word in lowered for word in ["С…СѓРµРІРѕ", "С…СѓС‘РІРѕ", "С‚СѓРї", "РіР»СѓРї", "РёРґРёРѕС‚", "РЅР°С…СѓР№", "РїРёР·Рґ", "РµР±Р°", "РїРѕС€Р»Р°"]):
+        if any(word in lowered for word in ["хуево", "хуёво", "туп", "глуп", "идиот", "нахуй", "пизд", "еба", "пошла"]):
             delta -= 6
         self.moods[chat_id] = max(0, min(100, self.moods[chat_id] + delta))
 
@@ -582,12 +609,12 @@ class AIService:
 
         bot_name = re.escape(self.settings.bot_name)
         cleaned = re.sub(rf"^(?:{bot_name}\s*:\s*)+", "", cleaned, flags=re.IGNORECASE).strip()
-        cleaned = re.sub(r"^\s*РЅРµР№СЂРѕРЅРёРєР°\s*:\s*", "", cleaned, flags=re.IGNORECASE).strip()
+        cleaned = re.sub(r"^\s*нейроника\s*:\s*", "", cleaned, flags=re.IGNORECASE).strip()
         cleaned = re.sub(r"\s{2,}", " ", cleaned)
 
         if self._is_hostile_user_text(user_text):
             cleaned = re.sub(
-                r"(?:\s*(?:Рђ|РќСѓ Р°|Р)\s+Сѓ\s+С‚РµР±СЏ\s+РєР°Рє.*|\s*РљР°Рє\s+Сѓ\s+С‚РµР±СЏ.*|\s*Р§РµРј\s+Р·Р°РЅСЏС‚.*|\s*Р§С‚Рѕ\s+РєРѕРЅРєСЂРµС‚РЅРѕ\s+РёРЅС‚РµСЂРµСЃСѓРµС‚\??)\s*$",
+                r"(?:\s*(?:А|Ну а|И)\s+у\s+тебя\s+как.*|\s*Как\s+у\s+тебя.*|\s*Чем\s+занят.*|\s*Что\s+конкретно\s+интересует\??)\s*$",
                 "",
                 cleaned,
                 flags=re.IGNORECASE,
@@ -604,16 +631,16 @@ class AIService:
     def _strip_soft_phrases(self, content: str) -> str:
         cleaned = content
         soft_phrases = [
-            "СЂР°РґРѕСЃС‚СЊ РјРѕСЏ",
-            "Р·Р°СЏС†",
-            "РґРµСЂР·РєРёР№ Р·Р°СЏС†",
-            "РјР°РіРёСЏ",
-            "СЃСЋСЂРїСЂРёР·Р°Рј",
-            "СЃСЋСЂРїСЂРёР·С‹",
-            "РјР°Р»РѕР№",
-            "Р·РѕР»РѕС‚С†Рµ",
-            "РјРёР»С‹Р№",
-            "РјРёР»Р°СЏ",
+            "радость моя",
+            "заяц",
+            "дерзкий заяц",
+            "магия",
+            "сюрпризам",
+            "сюрпризы",
+            "малой",
+            "золотце",
+            "милый",
+            "милая",
         ]
         for phrase in soft_phrases:
             cleaned = re.sub(rf"\b{re.escape(phrase)}\b", "", cleaned, flags=re.IGNORECASE)
@@ -624,33 +651,120 @@ class AIService:
     def _looks_too_soft(self, content: str) -> bool:
         lowered = content.lower()
         soft_markers = [
-            "СЂР°РґРѕСЃС‚СЊ РјРѕСЏ",
-            "Р·Р°СЏС†",
-            "РјР°РіРёСЏ",
-            "СЃСЋСЂРїСЂРёР·",
-            "РЅРµ РѕСЃС‚Р°РІР»СЏС‚СЊ С‚РµР±СЏ СЂР°РІРЅРѕРґСѓС€РЅС‹Рј",
-            "РїСЂРёРіРѕС‚РѕРІСЊСЃСЏ",
-            "РєР°Рє С‚Р°Рј РґРµР»Р°",
+            "радость моя",
+            "заяц",
+            "магия",
+            "сюрприз",
+            "не оставлять тебя равнодушным",
+            "приготовься",
+            "как там дела",
         ]
         return any(marker in lowered for marker in soft_markers)
 
     def _is_hostile_user_text(self, user_text: str) -> bool:
         lowered = user_text.lower()
         hostile_tokens = [
-            "С…СѓРµРІРѕ",
-            "С…СѓС‘РІРѕ",
-            "С‚СѓРї",
-            "РіР»СѓРї",
-            "РёРґРёРѕС‚",
-            "РґСѓСЂР°",
-            "РіР»СѓРїР°СЏ РіРѕР»РѕРІР°",
-            "РЅР°С…СѓР№",
-            "РїРёР·Рґ",
-            "РµР±Р°",
-            "РїРѕС€Р»Р°",
-            "РѕС‚РІРµС‡Р°РµС€СЊ РєР°Рє-С‚Рѕ",
+            "хуево",
+            "хуёво",
+            "туп",
+            "глуп",
+            "идиот",
+            "дура",
+            "глупая голова",
+            "нахуй",
+            "пизд",
+            "еба",
+            "пошла",
+            "отвечаешь как-то",
         ]
         return any(token in lowered for token in hostile_tokens)
+
+    def _is_media_marker(self, user_text: str) -> bool:
+        return user_text.strip().lower().startswith("[media:")
+
+    def _remember_bot_reply(self, chat_id: int, reply: str) -> None:
+        normalized = self._normalize_reply_key(reply)
+        if not normalized:
+            return
+        self.recent_bot_replies[chat_id].append(normalized)
+
+    def _normalize_reply_key(self, text: str) -> str:
+        key = text.strip().lower()
+        key = re.sub(r"\s+", " ", key)
+        key = re.sub(r"[^\w\s]", "", key, flags=re.UNICODE)
+        key = re.sub(r"\s{2,}", " ", key).strip()
+        return key
+
+    def _is_repetitive_reply(self, chat_id: int, reply: str) -> bool:
+        key = self._normalize_reply_key(reply)
+        if len(key) < 8:
+            return False
+        for previous in self.recent_bot_replies[chat_id]:
+            if key == previous:
+                return True
+            if len(key) > 20 and len(previous) > 20:
+                if SequenceMatcher(None, key, previous).ratio() >= 0.94:
+                    return True
+        return False
+
+    async def _ensure_non_repetitive_reply(
+        self,
+        chat_id: int,
+        messages: list[dict[str, Any]],
+        sender_name: str,
+        user_text: str,
+        content: str,
+    ) -> str:
+        if not self._is_repetitive_reply(chat_id, content):
+            return content
+
+        self._log("repetition_detected", chat_id=chat_id, content=content[:160])
+        retry = await self._retry_repetitive_reply(
+            messages=messages,
+            sender_name=sender_name,
+            user_text=user_text,
+            previous_reply=content,
+        )
+        if retry and not self._is_repetitive_reply(chat_id, retry):
+            self._log("repetition_fixed", chat_id=chat_id, retry=retry[:160])
+            return retry
+
+        self._log("repetition_keep_original", chat_id=chat_id)
+        return content
+
+    async def _retry_repetitive_reply(
+        self,
+        *,
+        messages: list[dict[str, Any]],
+        sender_name: str,
+        user_text: str,
+        previous_reply: str,
+    ) -> str:
+        retry_messages = [
+            *messages,
+            {
+                "role": "user",
+                "content": (
+                    f"{sender_name}: Дай новый ответ на сообщение '{user_text}', "
+                    f"но не повторяй прошлую формулировку: '{previous_reply}'. "
+                    "Ответ должен быть коротким и живым."
+                ),
+            },
+        ]
+
+        try:
+            response = await self.client.chat.completions.create(
+                model=self.settings.ai_model,
+                messages=retry_messages,
+                temperature=max(self.settings.ai_temperature, 0.9),
+                max_tokens=min(self.settings.ai_max_tokens, 140),
+            )
+            message = response.choices[0].message
+            raw_text = self._coerce_model_content(message.content)
+            return self._finalize_reply(raw_text, user_text=user_text)
+        except Exception as exc:
+            self._log("repetition_retry_error", error=str(exc))
+            return ""
 
     def _coerce_model_content(self, content: Any) -> str:
         if isinstance(content, str):
@@ -692,4 +806,3 @@ class AIService:
         except Exception as exc:
             self._log("empty_reply_retry_error", error=str(exc))
             return ""
-
