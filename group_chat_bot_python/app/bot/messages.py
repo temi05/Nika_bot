@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import re
+from io import BytesIO
 from datetime import datetime
 
 from aiogram import Bot, Router
@@ -153,6 +155,10 @@ def build_messages_router(bot: Bot, settings: Settings, db: SupabaseDB, ai: AISe
 
         raw_text = message.text or message.caption or ""
         ai_input_text = _build_ai_input_text(message, raw_text)
+        if ai_input_text:
+            reply_context = _build_reply_context(message.reply_to_message)
+            if reply_context:
+                ai_input_text = f"{reply_context}\n\n{ai_input_text}"
         text = raw_text.strip()
         db.store_message_author(message.chat.id, message.message_id, sender.user_id)
 
@@ -267,6 +273,14 @@ def build_messages_router(bot: Bot, settings: Settings, db: SupabaseDB, ai: AISe
                     print(f"[AI:flush_memory_error] chat_id={message.chat.id} error={exc}")
             reply = None
             if should_reply:
+                image_data_urls = []
+                if settings.ai_vision_enabled:
+                    image_data_urls = await _build_ai_image_inputs(
+                        bot,
+                        message,
+                        max_images=max(0, settings.ai_vision_max_images),
+                        max_bytes=max(0, settings.ai_vision_max_bytes),
+                    )
                 async with ChatActionSender.typing(bot=bot, chat_id=message.chat.id):
                     reply = await ai.generate_reply(
                         message.chat.id,
@@ -276,6 +290,7 @@ def build_messages_router(bot: Bot, settings: Settings, db: SupabaseDB, ai: AISe
                         is_mentioned,
                         caller_is_admin,
                         is_private_chat=is_private_chat,
+                        image_data_urls=image_data_urls,
                     )
             if reply:
                 await message.reply(reply)
@@ -354,32 +369,136 @@ def _should_grant_xp(message: Message, sender) -> bool:
 
 def _build_ai_input_text(message: Message, raw_text: str) -> str:
     text = (raw_text or "").strip()
+    media = _describe_message_media(message)
 
+    if media:
+        lines = [
+            "<current_message>",
+            f"type: {media}",
+            "note: это медиа-сообщение, не обычный текст; учитывай тип медиа и подпись, если она есть.",
+        ]
+        if text:
+            lines.append(f"caption: {text}")
+        lines.append("</current_message>")
+        return "\n".join(lines)
+
+    if not text:
+        return ""
+
+    return "\n".join(["<current_message>", "type: text", f"text: {text}", "</current_message>"])
+
+
+def _build_reply_context(reply: Message | None) -> str:
+    if not reply:
+        return ""
+
+    reply_sender = get_sender_data(reply)
+    reply_text = (reply.text or reply.caption or "").strip()
+    reply_media = _describe_message_media(reply)
+
+    lines = [
+        "<reply_context>",
+        f"author: {reply_sender.display_name}",
+    ]
+    if reply_media:
+        lines.append(f"type: {reply_media}")
+        lines.append("note: пользователь отвечает именно на это медиа-сообщение.")
+        if reply_text:
+            lines.append(f"caption: {reply_text}")
+    elif reply_text:
+        lines.append("type: text")
+        lines.append(f"text: {reply_text[:700]}")
+    else:
+        lines.append("type: unknown")
+        lines.append("note: пользователь ответил на сообщение без доступного текста.")
+    lines.append("</reply_context>")
+    return "\n".join(lines)
+
+
+def _describe_message_media(message: Message) -> str:
     if message.sticker:
-        parts = ["[media:sticker"]
+        details = ["sticker"]
         if message.sticker.emoji:
-            parts.append(f"emoji={message.sticker.emoji}")
+            details.append(f"emoji={message.sticker.emoji}")
         if message.sticker.set_name:
-            parts.append(f"set={message.sticker.set_name}")
-        marker = " ".join(parts) + "]"
-        return f"{marker} {text}".strip()
-
+            details.append(f"set={message.sticker.set_name}")
+        if message.sticker.is_animated:
+            details.append("animated=true")
+        if message.sticker.is_video:
+            details.append("video=true")
+        return " ".join(details)
     if message.photo:
-        return f"[media:photo] {text}".strip()
+        return "photo"
     if message.video:
-        return f"[media:video] {text}".strip()
+        return "video"
     if message.animation:
-        return f"[media:animation] {text}".strip()
+        return "animation"
     if message.voice:
-        return f"[media:voice] {text}".strip()
+        return "voice"
     if message.video_note:
-        return f"[media:video_note] {text}".strip()
+        return "video_note"
     if message.audio:
-        return f"[media:audio] {text}".strip()
+        return "audio"
     if message.document:
         file_name = (message.document.file_name or "").strip()
-        if file_name:
-            return f"[media:document name={file_name}] {text}".strip()
-        return f"[media:document] {text}".strip()
+        return f"document name={file_name}" if file_name else "document"
+    return ""
 
-    return text
+
+async def _build_ai_image_inputs(bot: Bot, message: Message, *, max_images: int, max_bytes: int) -> list[str]:
+    if max_images <= 0 or max_bytes <= 0:
+        return []
+
+    image_specs: list[tuple[str, str]] = []
+    current = _image_file_spec(message)
+    if current:
+        image_specs.append(current)
+    if message.reply_to_message:
+        replied = _image_file_spec(message.reply_to_message)
+        if replied:
+            image_specs.append(replied)
+
+    data_urls: list[str] = []
+    for file_id, mime_type in image_specs[:max_images]:
+        data_url = await _download_telegram_image_as_data_url(bot, file_id, mime_type, max_bytes=max_bytes)
+        if data_url:
+            data_urls.append(data_url)
+    return data_urls
+
+
+def _image_file_spec(message: Message) -> tuple[str, str] | None:
+    if message.photo:
+        return message.photo[-1].file_id, "image/jpeg"
+
+    if message.sticker:
+        if not message.sticker.is_animated and not message.sticker.is_video:
+            return message.sticker.file_id, "image/webp"
+        thumbnail = getattr(message.sticker, "thumbnail", None)
+        if thumbnail:
+            return thumbnail.file_id, "image/jpeg"
+
+    if message.document and (message.document.mime_type or "").startswith("image/"):
+        return message.document.file_id, message.document.mime_type or "image/jpeg"
+
+    return None
+
+
+async def _download_telegram_image_as_data_url(bot: Bot, file_id: str, mime_type: str, *, max_bytes: int) -> str | None:
+    try:
+        file_info = await bot.get_file(file_id)
+        if file_info.file_size and file_info.file_size > max_bytes:
+            print(f"[AI:vision_skip] reason=file_too_large size={file_info.file_size}")
+            return None
+
+        buffer = BytesIO()
+        await bot.download_file(file_info.file_path, destination=buffer)
+        payload = buffer.getvalue()
+        if not payload or len(payload) > max_bytes:
+            print(f"[AI:vision_skip] reason=download_too_large size={len(payload)}")
+            return None
+
+        encoded = base64.b64encode(payload).decode("ascii")
+        return f"data:{mime_type};base64,{encoded}"
+    except Exception as exc:
+        print(f"[AI:vision_download_error] error={exc}")
+        return None

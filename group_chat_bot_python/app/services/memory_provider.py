@@ -144,6 +144,55 @@ def _looks_memory_worthy_message(message: str) -> bool:
     return True
 
 
+def _is_memory_artifact(text: str) -> bool:
+    normalized = re.sub(r"\s+", " ", (text or "").strip()).casefold()
+    if not normalized:
+        return True
+    artifact_markers = [
+        "summary participants:",
+        "participants:",
+        "summary:",
+        "status",
+        "low-confidence fallback memory",
+    ]
+    if any(normalized.startswith(marker) for marker in artifact_markers):
+        return True
+    return normalized in {"summary", "participants", "status", "facts"}
+
+
+def _clean_memory_items(items: list[str]) -> list[str]:
+    cleaned: list[str] = []
+    for item in items:
+        value = (item or "").strip()
+        if not value or _is_memory_artifact(value):
+            continue
+        cleaned.append(value)
+    return cleaned
+
+
+def _clean_lightrag_context(context: str) -> str:
+    lines: list[str] = []
+    skip_section = False
+    for raw_line in (context or "").splitlines():
+        line = raw_line.strip()
+        lowered = line.casefold()
+        if not line:
+            skip_section = False
+            continue
+        if lowered.startswith("participants:") or lowered in {"summary", "status"}:
+            skip_section = True
+            continue
+        if lowered.startswith("summary:") or lowered.startswith("low-confidence fallback memory"):
+            skip_section = True
+            continue
+        if skip_section and not lowered.startswith("- "):
+            continue
+        if _is_memory_artifact(line):
+            continue
+        lines.append(line)
+    return "\n".join(lines).strip()
+
+
 async def _extract_memories_with_client(
     client: AsyncOpenAI | None,
     settings: Settings,
@@ -276,9 +325,9 @@ class DatabaseMemoryProvider(BaseMemoryProvider):
 
         recent_facts = self.db.get_recent_memories(chat_id, limit=4)
         context = format_memory_context(
-            profile_facts=list(dict.fromkeys(profile_facts))[:4],
-            topic_facts=list(dict.fromkeys(topic_facts))[: self.settings.memory_retrieval_limit],
-            recent_facts=list(dict.fromkeys(recent_facts))[:4],
+            profile_facts=_clean_memory_items(list(dict.fromkeys(profile_facts)))[:4],
+            topic_facts=_clean_memory_items(list(dict.fromkeys(topic_facts)))[: self.settings.memory_retrieval_limit],
+            recent_facts=_clean_memory_items(list(dict.fromkeys(recent_facts)))[:4],
         )
         self._log("retrieve", chat_id=chat_id, tokens=tokens, has_context=bool(context))
         return context
@@ -369,9 +418,9 @@ class LightRAGMemoryProvider(BaseMemoryProvider):
         try:
             data = await self._request("POST", "/query", payload)
             if isinstance(data.get("context"), str):
-                return data["context"]
+                return _clean_lightrag_context(data["context"])
             if isinstance(data.get("response"), str):
-                return data["response"]
+                return _clean_lightrag_context(data["response"])
         except Exception as exc:
             print(f"[MEMORY:lightrag_error] error={exc}")
         return ""

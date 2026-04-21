@@ -76,12 +76,14 @@ class AIService:
         mentioned: bool,
         caller_is_admin: bool = False,
         is_private_chat: bool = False,
+        image_data_urls: list[str] | None = None,
     ) -> str | None:
         if not user_text:
             self._log("skip", reason="empty_text", chat_id=chat_id)
             return None
 
-        direct_reply = await self._maybe_handle_direct_action(chat_id, sender, user_text)
+        plain_user_text = self._extract_current_plain_text(user_text)
+        direct_reply = await self._maybe_handle_direct_action(chat_id, sender, plain_user_text)
         if direct_reply:
             self.remember_message(chat_id, Sender(user_id=0, first_name=self.settings.bot_name), direct_reply)
             self._remember_bot_reply(chat_id, direct_reply)
@@ -111,7 +113,7 @@ class AIService:
             if not addressed and is_media_message:
                 self._log("skip", reason="media_without_mention", chat_id=chat_id)
                 return None
-            if not addressed and len(user_text.strip()) < self.settings.ai_min_message_len:
+            if not addressed and len(plain_user_text.strip()) < self.settings.ai_min_message_len:
                 self._log("skip", reason="too_short_in_group", chat_id=chat_id)
                 return None
             if not addressed and self._group_reply_cooldown_active(chat_id):
@@ -125,20 +127,20 @@ class AIService:
             reply_to_bot=reply_to_bot,
             mentioned=mentioned,
             caller_is_admin=caller_is_admin,
-            user_text=user_text[:200],
+            user_text=plain_user_text[:200],
         )
 
         self.persona.observe_user_message(
             chat_id,
             sender.user_id,
-            user_text,
+            plain_user_text,
             reply_to_bot=reply_to_bot,
             mentioned=mentioned,
         )
-        self._adjust_mood_from_user_message(chat_id, user_text)
+        self._adjust_mood_from_user_message(chat_id, plain_user_text)
         persona_state = self.persona.bump_exchange(chat_id, sender.user_id)
 
-        memory_text = await self.memory.get_relevant_facts(chat_id, user_text, sender.display_name)
+        memory_text = await self.memory.get_relevant_facts(chat_id, plain_user_text, sender.display_name)
         self._log("context", chat_id=chat_id, memory_found=bool(memory_text), exchanges=persona_state.get("exchanges"))
 
         system_prompt = build_character_system_prompt(
@@ -152,15 +154,16 @@ class AIService:
             compact_prompt=self.settings.ai_compact_prompt,
         )
 
+        images = list(image_data_urls or [])
         history = list(self.chat_buffers[chat_id])[-self.settings.ai_history_lines :]
         current_line = f"{sender.display_name}: {user_text}"
         messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
         messages.extend({"role": "user", "content": line} for line in history)
         if not history or history[-1] != current_line:
-            messages.append({"role": "user", "content": current_line})
+            messages.append({"role": "user", "content": self._build_current_user_content(current_line, images)})
 
         try:
-            use_tools = len(user_text.strip()) >= 8
+            use_tools = len(plain_user_text.strip()) >= 8 and not images
             for round_index in range(3):
                 request_kwargs: dict[str, Any] = {
                     "model": self.settings.ai_model,
@@ -179,7 +182,7 @@ class AIService:
                 if tool_calls:
                     if not self._tool_calls_have_valid_json(tool_calls):
                         self._log("tool_calls_invalid_json", chat_id=chat_id, count=len(tool_calls))
-                        return self._fallback_for_unclear_input(user_text)
+                        return self._fallback_for_unclear_input(plain_user_text)
 
                     assistant_message: dict[str, Any] = {
                         "role": "assistant",
@@ -227,7 +230,7 @@ class AIService:
                             chat_id=chat_id,
                             messages=messages,
                             sender_name=sender.display_name,
-                            user_text=user_text,
+                            user_text=plain_user_text,
                             content=rescued,
                         )
                         self.remember_message(chat_id, Sender(user_id=0, first_name=self.settings.bot_name), rescued)
@@ -243,7 +246,7 @@ class AIService:
                     chat_id=chat_id,
                     messages=messages,
                     sender_name=sender.display_name,
-                    user_text=user_text,
+                    user_text=plain_user_text,
                     content=content,
                 )
                 self.remember_message(chat_id, Sender(user_id=0, first_name=self.settings.bot_name), content)
@@ -254,6 +257,18 @@ class AIService:
                 return content
         except Exception as exc:
             self._log("error", chat_id=chat_id, error=str(exc))
+            if images:
+                fallback = await self._retry_text_only_after_vision_error(
+                    messages=messages,
+                    user_text=plain_user_text,
+                    error=str(exc),
+                )
+                if fallback:
+                    self.remember_message(chat_id, Sender(user_id=0, first_name=self.settings.bot_name), fallback)
+                    self._remember_bot_reply(chat_id, fallback)
+                    self._adjust_mood(chat_id, fallback)
+                    self._mark_group_reply(chat_id, is_private_chat=is_private_chat)
+                    return fallback
             return "Упс, зависла на ответе. Напиши ещё раз."
         self._log("fallback_after_rounds", chat_id=chat_id)
         return "Сделала всё, что смогла. Уточни, что именно нужно."
@@ -441,6 +456,52 @@ class AIService:
         if len(user_text.strip()) <= 5:
             return "Я тут. Только дай мне чуть больше, чем один звук, и я нормально отвечу."
         return "Я не разобрала команду. Напиши чуть конкретнее, и я подхвачу."
+
+    def _build_current_user_content(self, text: str, image_data_urls: list[str]) -> str | list[dict[str, Any]]:
+        if not image_data_urls:
+            return text
+        content: list[dict[str, Any]] = [{"type": "text", "text": text}]
+        for data_url in image_data_urls:
+            content.append({"type": "image_url", "image_url": {"url": data_url}})
+        return content
+
+    def _strip_images_from_messages(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        cleaned_messages: list[dict[str, Any]] = []
+        for message in messages:
+            content = message.get("content")
+            if isinstance(content, list):
+                text_parts: list[str] = []
+                for item in content:
+                    if isinstance(item, dict) and item.get("type") == "text":
+                        text = item.get("text")
+                        if isinstance(text, str) and text.strip():
+                            text_parts.append(text.strip())
+                cleaned_messages.append({**message, "content": "\n".join(text_parts)})
+            else:
+                cleaned_messages.append(message)
+        return cleaned_messages
+
+    async def _retry_text_only_after_vision_error(
+        self,
+        *,
+        messages: list[dict[str, Any]],
+        user_text: str,
+        error: str,
+    ) -> str:
+        self._log("vision_text_fallback_start", error=error[:240])
+        try:
+            response = await self.client.chat.completions.create(
+                model=self.settings.ai_model,
+                messages=self._strip_images_from_messages(messages),
+                temperature=self.settings.ai_temperature,
+                max_tokens=self.settings.ai_max_tokens,
+            )
+            message = response.choices[0].message
+            raw_text = self._coerce_model_content(message.content)
+            return self._finalize_reply(raw_text, user_text=user_text)
+        except Exception as exc:
+            self._log("vision_text_fallback_error", error=str(exc))
+            return ""
 
     def _tool_user_lookup(self, chat_id: int, sender: Sender, args: dict[str, Any]) -> str:
         action = str(args.get("action") or "").lower()
@@ -677,11 +738,17 @@ class AIService:
         cleaned = content.strip()
         if not cleaned:
             return ""
+        if self._looks_like_memory_artifact(cleaned):
+            self._log("memory_artifact_reply_blocked", content=cleaned[:180])
+            return "\u042f \u0447\u0443\u0442\u044c \u043d\u0435 \u0432\u044b\u0434\u0430\u043b\u0430 \u0441\u043b\u0443\u0436\u0435\u0431\u043d\u0443\u044e \u043f\u0430\u043c\u044f\u0442\u044c \u0432\u043c\u0435\u0441\u0442\u043e \u043e\u0442\u0432\u0435\u0442\u0430. \u041f\u043e\u0432\u0442\u043e\u0440\u0438 \u0441\u043e\u043e\u0431\u0449\u0435\u043d\u0438\u0435, \u0438 \u044f \u043e\u0442\u0432\u0435\u0447\u0443 \u043d\u043e\u0440\u043c\u0430\u043b\u044c\u043d\u043e."
 
         bot_name = re.escape(self.settings.bot_name)
         cleaned = re.sub(rf"^(?:{bot_name}\s*:\s*)+", "", cleaned, flags=re.IGNORECASE).strip()
         cleaned = re.sub(r"^\s*нейроника\s*:\s*", "", cleaned, flags=re.IGNORECASE).strip()
         cleaned = re.sub(r"\s{2,}", " ", cleaned)
+        if self._looks_like_memory_artifact(cleaned):
+            self._log("memory_artifact_reply_blocked", content=cleaned[:180])
+            return "\u042f \u0447\u0443\u0442\u044c \u043d\u0435 \u0432\u044b\u0434\u0430\u043b\u0430 \u0441\u043b\u0443\u0436\u0435\u0431\u043d\u0443\u044e \u043f\u0430\u043c\u044f\u0442\u044c \u0432\u043c\u0435\u0441\u0442\u043e \u043e\u0442\u0432\u0435\u0442\u0430. \u041f\u043e\u0432\u0442\u043e\u0440\u0438 \u0441\u043e\u043e\u0431\u0449\u0435\u043d\u0438\u0435, \u0438 \u044f \u043e\u0442\u0432\u0435\u0447\u0443 \u043d\u043e\u0440\u043c\u0430\u043b\u044c\u043d\u043e."
 
         if self._is_hostile_user_text(user_text):
             cleaned = re.sub(
@@ -747,6 +814,19 @@ class AIService:
             cleaned = cleaned[: last_sentence_end + 1].strip()
         return cleaned
 
+    def _looks_like_memory_artifact(self, content: str) -> bool:
+        normalized = re.sub(r"\s+", " ", content.strip()).casefold()
+        artifact_prefixes = (
+            "summary participants:",
+            "summary:",
+            "participants:",
+            "status",
+            "facts:",
+        )
+        if normalized.startswith(artifact_prefixes):
+            return True
+        return bool(re.fullmatch(r"(summary|participants|status|facts)(\s+.*)?", normalized))
+
     def _looks_too_soft(self, content: str) -> bool:
         lowered = content.lower()
         soft_markers = [
@@ -779,7 +859,20 @@ class AIService:
         return any(token in lowered for token in hostile_tokens)
 
     def _is_media_marker(self, user_text: str) -> bool:
-        return user_text.strip().lower().startswith("[media:")
+        normalized = user_text.strip().lower()
+        if normalized.startswith("[media:"):
+            return True
+        if "<current_message>" not in normalized:
+            return False
+        return not bool(re.search(r"(?m)^type:\s*text\s*$", normalized))
+
+    def _extract_current_plain_text(self, user_text: str) -> str:
+        caption_match = re.search(r"(?m)^(?:caption|text):\s*(.+)$", user_text)
+        if caption_match:
+            return caption_match.group(1).strip()
+        if "<current_message>" in user_text:
+            return ""
+        return user_text.strip()
 
     def _remember_bot_reply(self, chat_id: int, reply: str) -> None:
         normalized = self._normalize_reply_key(reply)

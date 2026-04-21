@@ -36,6 +36,9 @@ class Settings(BaseSettings):
     ai_compact_prompt: bool = Field(default=True, alias="AI_COMPACT_PROMPT")
     ai_group_cooldown_seconds: int = Field(default=12, alias="AI_GROUP_COOLDOWN_SECONDS")
     ai_min_message_len: int = Field(default=4, alias="AI_MIN_MESSAGE_LEN")
+    ai_vision_enabled: bool = Field(default=True, alias="AI_VISION_ENABLED")
+    ai_vision_max_images: int = Field(default=2, alias="AI_VISION_MAX_IMAGES")
+    ai_vision_max_bytes: int = Field(default=4_000_000, alias="AI_VISION_MAX_BYTES")
     bot_personality_mode: str = Field(default="hard", alias="BOT_PERSONALITY_MODE")
 
     memory_model: str | None = Field(default=None, alias="MEMORY_MODEL")
