@@ -77,8 +77,22 @@ class AIService:
         caller_is_admin: bool = False,
         is_private_chat: bool = False,
     ) -> str | None:
-        if not self.client or not user_text:
-            self._log("skip", reason="no_client_or_empty_text", chat_id=chat_id)
+        if not user_text:
+            self._log("skip", reason="empty_text", chat_id=chat_id)
+            return None
+        if not self.client:
+            self._log("skip", reason="no_client", chat_id=chat_id)
+            return "Я сейчас без доступа к модели. Попробуй чуть позже."
+        if not self.settings.effective_ai_api_key:
+            self._log("skip", reason="no_api_key", chat_id=chat_id)
+            return "Я сейчас без доступа к модели. Попробуй чуть позже."
+
+        if not self.settings.ai_model:
+            self._log("skip", reason="no_ai_model", chat_id=chat_id)
+            return "Модель ответа не настроена."
+
+        if not self.settings.effective_ai_base_url:
+            self._log("skip", reason="no_base_url", chat_id=chat_id)
             return None
 
         addressed = mentioned or reply_to_bot
@@ -232,8 +246,9 @@ class AIService:
                 return content
         except Exception as exc:
             self._log("error", chat_id=chat_id, error=str(exc))
-            return None
-        return None
+            return "Упс, зависла на ответе. Напиши ещё раз."
+        self._log("fallback_after_rounds", chat_id=chat_id)
+        return "Сделала всё, что смогла. Уточни, что именно нужно."
 
     async def _maybe_handle_direct_action(self, chat_id: int, user_text: str) -> str | None:
         poll_request = self._extract_poll_request(user_text)

@@ -160,12 +160,14 @@ def build_messages_router(bot: Bot, settings: Settings, db: SupabaseDB, ai: AISe
             return
 
         user = db.get_or_create_user(message.chat.id, sender)
-        updated_user, level_up = db.apply_message_xp(user)
-        if level_up and updated_user:
-            await message.answer(
-                f"🎉 <b>{escape_html(sender.display_name)}</b> апнул <b>{updated_user.level}</b> уровень!",
-                parse_mode="HTML",
-            )
+        should_grant_xp = _should_grant_xp(message, sender)
+        if should_grant_xp:
+            updated_user, level_up = db.apply_message_xp(user)
+            if level_up and updated_user:
+                await message.answer(
+                    f"🎉 <b>{escape_html(sender.display_name)}</b> апнул <b>{updated_user.level}</b> уровень!",
+                    parse_mode="HTML",
+                )
 
         if text:
             settings_row = db.get_chat_settings(message.chat.id)
@@ -224,19 +226,30 @@ def build_messages_router(bot: Bot, settings: Settings, db: SupabaseDB, ai: AISe
                 await message.answer("\n".join(lines), parse_mode="HTML")
             db.last_birthday_check[message.chat.id] = today_key
 
-        me = await bot.get_me()
-        
+        bot_username = settings.bot_username
+        bot_id = None
+        try:
+            me = await bot.get_me()
+            bot_id = me.id
+            bot_username = me.username or bot_username
+        except Exception as exc:
+            print(f"[BOT:get_me_error] chat_id={message.chat.id} error={exc}")
+
         # Более гибкая проверка имени: реагируем и на полное имя, и на короткое "Ника"
-        is_mentioned = _message_mentions_bot(text, settings.bot_name, me.username)
-            
+        is_mentioned = _message_mentions_bot(text, settings.bot_name, bot_username)
+
         is_reply_to_bot = False
         if message.reply_to_message and message.reply_to_message.from_user:
-            is_reply_to_bot = (message.reply_to_message.from_user.id == me.id)
+            if bot_id is not None:
+                is_reply_to_bot = message.reply_to_message.from_user.id == bot_id
+            elif bot_username:
+                reply_username = (message.reply_to_message.from_user.username or "").lower()
+                is_reply_to_bot = reply_username == bot_username.lower()
 
         # ЛОГИ ДЛЯ ОТЛАДКИ (появятся в Render)
         print(f"🔍 [DEBUG] Msg from {sender.display_name}: mentioned={is_mentioned}, reply_to_bot={is_reply_to_bot}")
         if is_reply_to_bot:
-            print(f"   └ Bot ID: {me.id}, Reply to User ID: {message.reply_to_message.from_user.id}")
+            print(f"   └ Bot ID: {bot_id}, Reply to User ID: {message.reply_to_message.from_user.id}")
 
         if ai_input_text:
             caller_is_admin = await _message_sender_is_admin(bot, message, sender)
@@ -313,7 +326,44 @@ def _message_mentions_bot(text: str, bot_name: str, username: str | None) -> boo
     if not name:
         return False
 
-    return bool(re.search(rf"(^|\W){re.escape(name)}($|\W)", normalized, flags=re.IGNORECASE))
+    aliases: set[str] = {name}
+    name_tokens = [token for token in re.split(r"[\s_\-]+", name) if token]
+    if len(name_tokens) > 1:
+        aliases.update(token for token in name_tokens if len(token) >= 4)
+
+    if name.startswith("нейро") and len(name) > 5:
+        short = name.replace("нейро", "", 1).strip()
+        if len(short) >= 3:
+            aliases.add(short)
+
+    for alias in aliases:
+        if re.search(rf"(^|\W){re.escape(alias)}($|\W)", normalized, flags=re.IGNORECASE):
+            return True
+
+    return False
+
+
+def _should_grant_xp(message: Message, sender) -> bool:
+    if sender.is_bot:
+        return False
+    if message.sender_chat:
+        # Сообщения "от имени канала/анон-админа" не привязываем к XP,
+        # чтобы опыт не улетал в не-человеческие профили.
+        return False
+
+    has_meaningful_content = bool(
+        (message.text or "").strip()
+        or (message.caption or "").strip()
+        or message.sticker
+        or message.photo
+        or message.video
+        or message.animation
+        or message.voice
+        or message.video_note
+        or message.audio
+        or message.document
+    )
+    return has_meaningful_content
 
 
 def _build_ai_input_text(message: Message, raw_text: str) -> str:
