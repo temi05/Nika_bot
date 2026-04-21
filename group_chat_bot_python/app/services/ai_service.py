@@ -80,6 +80,16 @@ class AIService:
         if not user_text:
             self._log("skip", reason="empty_text", chat_id=chat_id)
             return None
+
+        direct_reply = await self._maybe_handle_direct_action(chat_id, sender, user_text)
+        if direct_reply:
+            self.remember_message(chat_id, Sender(user_id=0, first_name=self.settings.bot_name), direct_reply)
+            self._remember_bot_reply(chat_id, direct_reply)
+            self._adjust_mood(chat_id, direct_reply)
+            self._mark_group_reply(chat_id, is_private_chat=is_private_chat)
+            self._log("direct_action_reply", chat_id=chat_id, reply=direct_reply[:200])
+            return direct_reply
+
         if not self.client:
             self._log("skip", reason="no_client", chat_id=chat_id)
             return "Я сейчас без доступа к модели. Попробуй чуть позже."
@@ -117,15 +127,6 @@ class AIService:
             caller_is_admin=caller_is_admin,
             user_text=user_text[:200],
         )
-
-        direct_reply = await self._maybe_handle_direct_action(chat_id, user_text)
-        if direct_reply:
-            self.remember_message(chat_id, Sender(user_id=0, first_name=self.settings.bot_name), direct_reply)
-            self._remember_bot_reply(chat_id, direct_reply)
-            self._adjust_mood(chat_id, direct_reply)
-            self._mark_group_reply(chat_id, is_private_chat=is_private_chat)
-            self._log("direct_action_reply", chat_id=chat_id, reply=direct_reply[:200])
-            return direct_reply
 
         self.persona.observe_user_message(
             chat_id,
@@ -250,7 +251,14 @@ class AIService:
         self._log("fallback_after_rounds", chat_id=chat_id)
         return "Сделала всё, что смогла. Уточни, что именно нужно."
 
-    async def _maybe_handle_direct_action(self, chat_id: int, user_text: str) -> str | None:
+    async def _maybe_handle_direct_action(self, chat_id: int, sender: Sender, user_text: str) -> str | None:
+        memory_text = self._extract_memory_request(user_text)
+        if memory_text:
+            user = self.db.get_or_create_user(chat_id, sender)
+            self.db.append_ai_note(user, memory_text)
+            self._log("direct_memory_saved", chat_id=chat_id, sender=sender.display_name, text=memory_text[:160])
+            return f"Запомнила: {memory_text}"
+
         poll_request = self._extract_poll_request(user_text)
         if not poll_request:
             return None
@@ -259,6 +267,29 @@ class AIService:
         if "Опрос создан." in result:
             return "Сделала опрос. Голосуйте."
         return f"Не получилось сделать опрос: {result}"
+
+    def _extract_memory_request(self, user_text: str) -> str | None:
+        text = user_text.strip()
+        if not text:
+            return None
+
+        bot_names = [self.settings.bot_name]
+        if self.settings.bot_username:
+            bot_names.append(f"@{self.settings.bot_username}")
+        for name in filter(None, bot_names):
+            text = re.sub(rf"^\s*{re.escape(name)}\s*[,;:\-–—]?\s*", "", text, flags=re.IGNORECASE)
+
+        match = re.search(
+            r"(?is)\b(?:запомни|запиши|сохрани|remember)\b\s*(?:,?\s*(?:что|это|себе|that))?\s*[:\-–—]?\s*(.+)",
+            text,
+        )
+        if not match:
+            return None
+
+        memory_text = re.sub(r"\s+", " ", match.group(1)).strip(" .")
+        if len(memory_text) < 4:
+            return None
+        return memory_text[:300]
 
     def _extract_poll_request(self, user_text: str) -> dict[str, Any] | None:
         lowered = user_text.lower()

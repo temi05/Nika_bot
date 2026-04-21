@@ -123,12 +123,15 @@ def create_app() -> FastAPI:
         if request.headers.get("x-telegram-bot-api-secret-token") != settings.webhook_secret_token:
             raise HTTPException(status_code=403, detail="Invalid secret token")
 
-        payload = await request.json()
-        if payload.get("message_reaction"):
-            await handle_message_reaction(payload["message_reaction"], db)
+        try:
+            payload = await request.json()
+            if payload.get("message_reaction"):
+                await handle_message_reaction(payload["message_reaction"], db)
 
-        update = Update.model_validate(payload, context={"bot": bot})
-        await dispatcher.feed_update(bot, update)
+            update = Update.model_validate(payload, context={"bot": bot})
+            await dispatcher.feed_update(bot, update)
+        except Exception as exc:
+            print(f"[WEBHOOK:error] error={exc}")
         return {"ok": True}
 
     return app

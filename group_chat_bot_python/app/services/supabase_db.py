@@ -47,6 +47,22 @@ class SupabaseDB:
     def _memory_sync_queue(self):
         return self.client.table("memory_sync_queue")
 
+    def _safe_execute(self, query_builder, *, fallback=None, context: str = ""):
+        """
+        Execute Supabase request with one retry to survive transient 502/HTML gateway responses.
+        """
+        last_error = None
+        for attempt in range(2):
+            try:
+                return query_builder.execute()
+            except Exception as exc:
+                last_error = exc
+                if attempt == 0:
+                    time.sleep(0.2)
+                    continue
+        print(f"[DB:error] context={context} error={last_error}")
+        return fallback
+
     def _user_from_row(self, row: dict[str, Any]) -> ChatUser:
         return ChatUser(
             id=row["id"],
@@ -98,15 +114,12 @@ class SupabaseDB:
         )
 
     def get_or_create_user(self, chat_id: int, sender: Sender) -> ChatUser:
-        response = (
-            self._users()
-            .select("*")
-            .eq("chat_id", chat_id)
-            .eq("user_id", sender.user_id)
-            .limit(1)
-            .execute()
+        response = self._safe_execute(
+            self._users().select("*").eq("chat_id", chat_id).eq("user_id", sender.user_id).limit(1),
+            fallback=None,
+            context=f"get_or_create_user.select chat_id={chat_id} user_id={sender.user_id}",
         )
-        if response.data:
+        if response and response.data:
             return self.reset_expired_warns(self._user_from_row(response.data[0]))
 
         payload = {
@@ -122,36 +135,59 @@ class SupabaseDB:
             "bio": "",
             "ai_notes": "",
         }
-        created = self._users().insert(payload).execute()
-        return self._user_from_row(created.data[0])
+        created = self._safe_execute(
+            self._users().insert(payload),
+            fallback=None,
+            context=f"get_or_create_user.insert chat_id={chat_id} user_id={sender.user_id}",
+        )
+        if created and created.data:
+            return self._user_from_row(created.data[0])
+        return ChatUser(
+            id=0,
+            chat_id=chat_id,
+            user_id=sender.user_id,
+            first_name=sender.first_name or "Unknown",
+            username=sender.username,
+        )
 
     def get_user_by_platform_id(self, chat_id: int, user_id: int) -> ChatUser | None:
-        response = (
-            self._users()
-            .select("*")
-            .eq("chat_id", chat_id)
-            .eq("user_id", user_id)
-            .limit(1)
-            .execute()
+        response = self._safe_execute(
+            self._users().select("*").eq("chat_id", chat_id).eq("user_id", user_id).limit(1),
+            fallback=None,
+            context=f"get_user_by_platform_id chat_id={chat_id} user_id={user_id}",
         )
-        if not response.data:
+        if not response or not response.data:
             return None
         return self.reset_expired_warns(self._user_from_row(response.data[0]))
 
     def update_user(self, db_id: int, updates: dict[str, Any]) -> ChatUser | None:
         payload = dict(updates)
         try:
-            result = self._users().update(payload).eq("id", db_id).execute()
+            result = self._safe_execute(
+                self._users().update(payload).eq("id", db_id),
+                fallback=None,
+                context=f"update_user db_id={db_id}",
+            )
+            if result is None:
+                return None
         except APIError as exc:
             # Backward compatibility: some deployments do not yet have `last_warn_at`.
             # Retry once without that field so runtime does not crash on moderation events.
             if "last_warn_at" in payload and "last_warn_at" in str(exc):
                 payload.pop("last_warn_at", None)
-                result = self._users().update(payload).eq("id", db_id).execute()
+                result = self._safe_execute(
+                    self._users().update(payload).eq("id", db_id),
+                    fallback=None,
+                    context=f"update_user.retry_without_last_warn_at db_id={db_id}",
+                )
             else:
-                raise
+                print(f"[DB:error] context=update_user db_id={db_id} error={exc}")
+                return None
+        except Exception as exc:
+            print(f"[DB:error] context=update_user db_id={db_id} error={exc}")
+            return None
 
-        if not result.data:
+        if not result or not result.data:
             return None
         return self._user_from_row(result.data[0])
 
@@ -175,6 +211,8 @@ class SupabaseDB:
         return user
 
     def apply_message_xp(self, user: ChatUser) -> tuple[ChatUser | None, bool]:
+        if user.id <= 0:
+            return user, False
         now_ms = int(time.time() * 1000)
         if now_ms - user.last_message_time < 60_000:
             return user, False
@@ -232,46 +270,80 @@ class SupabaseDB:
         }
 
     def get_top_users(self, chat_id: int, limit: int = 10) -> list[ChatUser]:
-        response = (
-            self._users()
-            .select("*")
-            .eq("chat_id", chat_id)
-            .order("level", desc=True)
-            .order("xp", desc=True)
-            .limit(limit)
-            .execute()
+        response = self._safe_execute(
+            self._users().select("*").eq("chat_id", chat_id).order("level", desc=True).order("xp", desc=True).limit(limit),
+            fallback=None,
+            context=f"get_top_users chat_id={chat_id}",
         )
+        if not response:
+            return []
         return [self.reset_expired_warns(self._user_from_row(row)) for row in response.data or []]
 
     def get_all_users(self, chat_id: int) -> list[ChatUser]:
-        response = self._users().select("*").eq("chat_id", chat_id).limit(300).execute()
+        response = self._safe_execute(
+            self._users().select("*").eq("chat_id", chat_id).limit(300),
+            fallback=None,
+            context=f"get_all_users chat_id={chat_id}",
+        )
+        if not response:
+            return []
         return [self.reset_expired_warns(self._user_from_row(row)) for row in response.data or []]
 
     def get_chat_settings(self, chat_id: int) -> ChatSettings:
-        response = self._chats().select("*").eq("chat_id", chat_id).limit(1).execute()
-        if response.data:
+        response = self._safe_execute(
+            self._chats().select("*").eq("chat_id", chat_id).limit(1),
+            fallback=None,
+            context=f"get_chat_settings.select chat_id={chat_id}",
+        )
+        if response and response.data:
             row = response.data[0]
             return ChatSettings(chat_id=chat_id, link_filter_enabled=bool(row.get("link_filter_enabled", True)))
 
-        created = self._chats().insert(
-            {"chat_id": chat_id, "link_filter_enabled": self.settings.link_filter_default}
-        ).execute()
-        row = created.data[0]
-        return ChatSettings(chat_id=chat_id, link_filter_enabled=bool(row.get("link_filter_enabled", True)))
+        created = self._safe_execute(
+            self._chats().insert(
+                {"chat_id": chat_id, "link_filter_enabled": self.settings.link_filter_default}
+            ),
+            fallback=None,
+            context=f"get_chat_settings.insert chat_id={chat_id}",
+        )
+        if created and created.data:
+            row = created.data[0]
+            return ChatSettings(chat_id=chat_id, link_filter_enabled=bool(row.get("link_filter_enabled", True)))
+
+        # Safe fallback when DB is temporarily unavailable.
+        return ChatSettings(chat_id=chat_id, link_filter_enabled=self.settings.link_filter_default)
 
     def update_chat_settings(self, chat_id: int, **updates: Any) -> bool:
-        self._chats().update(updates).eq("chat_id", chat_id).execute()
-        return True
+        result = self._safe_execute(
+            self._chats().update(updates).eq("chat_id", chat_id),
+            fallback=None,
+            context=f"update_chat_settings chat_id={chat_id}",
+        )
+        return bool(result)
 
     def get_bad_words(self, chat_id: int) -> list[str]:
-        response = self._bad_words().select("word").eq("chat_id", chat_id).execute()
+        response = self._safe_execute(
+            self._bad_words().select("word").eq("chat_id", chat_id),
+            fallback=None,
+            context=f"get_bad_words chat_id={chat_id}",
+        )
+        if not response:
+            return []
         return [row["word"] for row in response.data or []]
 
     def add_bad_word(self, chat_id: int, word: str) -> None:
-        self._bad_words().insert({"chat_id": chat_id, "word": word.lower()}).execute()
+        self._safe_execute(
+            self._bad_words().insert({"chat_id": chat_id, "word": word.lower()}),
+            fallback=None,
+            context=f"add_bad_word chat_id={chat_id}",
+        )
 
     def remove_bad_word(self, chat_id: int, word: str) -> None:
-        self._bad_words().delete().eq("chat_id", chat_id).eq("word", word.lower()).execute()
+        self._safe_execute(
+            self._bad_words().delete().eq("chat_id", chat_id).eq("word", word.lower()),
+            fallback=None,
+            context=f"remove_bad_word chat_id={chat_id}",
+        )
 
     def set_bio(self, user: ChatUser, bio: str) -> ChatUser | None:
         clean_bio = bio[:100]
@@ -320,7 +392,13 @@ class SupabaseDB:
 
     def search_user(self, chat_id: int, query: str) -> ChatUser | None:
         normalized = normalize_search_text(query).replace("@", "")
-        response = self._users().select("*").eq("chat_id", chat_id).limit(100).execute()
+        response = self._safe_execute(
+            self._users().select("*").eq("chat_id", chat_id).limit(100),
+            fallback=None,
+            context=f"search_user chat_id={chat_id}",
+        )
+        if not response:
+            return None
         candidates = response.data or []
         if not normalized:
             return None
@@ -406,7 +484,7 @@ class SupabaseDB:
         if len(authors) > 1000:
             for key in list(authors.keys())[:-1000]:
                 authors.pop(key, None)
-        try:
+        self._safe_execute(
             self._message_logs().upsert(
                 {
                     "chat_id": chat_id,
@@ -414,130 +492,156 @@ class SupabaseDB:
                     "user_id": user_id,
                 },
                 on_conflict="chat_id,message_id",
-            ).execute()
-        except Exception:
-            pass
+            ),
+            fallback=None,
+            context=f"store_message_author chat_id={chat_id} message_id={message_id}",
+        )
 
     def get_message_author(self, chat_id: int, message_id: int) -> int | None:
         cached = self.message_authors.get(chat_id, {}).get(message_id)
         if cached:
             return cached
-        try:
-            response = (
-                self._message_logs()
-                .select("user_id")
-                .eq("chat_id", chat_id)
-                .eq("message_id", message_id)
-                .limit(1)
-                .execute()
-            )
-            if response.data:
-                user_id = int(response.data[0]["user_id"])
-                self.message_authors.setdefault(chat_id, {})[message_id] = user_id
-                return user_id
-        except Exception:
-            pass
+        response = self._safe_execute(
+            self._message_logs().select("user_id").eq("chat_id", chat_id).eq("message_id", message_id).limit(1),
+            fallback=None,
+            context=f"get_message_author chat_id={chat_id} message_id={message_id}",
+        )
+        if response and response.data:
+            user_id = int(response.data[0]["user_id"])
+            self.message_authors.setdefault(chat_id, {})[message_id] = user_id
+            return user_id
         return None
 
     def store_memory(self, chat_id: int, memory: MemoryRecord) -> None:
-        self._knowledge().insert(
-            {
-                "chat_id": chat_id,
-                "fact": memory.fact,
-                "fact_type": memory.source,
-                "confidence": memory.confidence,
-                "status": "confirmed",
-                "meta": memory.meta or {},
-                "last_seen_at": datetime.now(timezone.utc).isoformat(),
-            }
-        ).execute()
+        self._safe_execute(
+            self._knowledge().insert(
+                {
+                    "chat_id": chat_id,
+                    "fact": memory.fact,
+                    "fact_type": memory.source,
+                    "confidence": memory.confidence,
+                    "status": "confirmed",
+                    "meta": memory.meta or {},
+                    "last_seen_at": datetime.now(timezone.utc).isoformat(),
+                }
+            ),
+            fallback=None,
+            context=f"store_memory chat_id={chat_id}",
+        )
 
     def memory_exists(self, chat_id: int, fact: str) -> bool:
-        rows = (
-            self._knowledge()
-            .select("id")
-            .eq("chat_id", chat_id)
-            .eq("fact", fact)
-            .limit(1)
-            .execute()
+        rows = self._safe_execute(
+            self._knowledge().select("id").eq("chat_id", chat_id).eq("fact", fact).limit(1),
+            fallback=None,
+            context=f"memory_exists chat_id={chat_id}",
         )
-        return bool(rows.data)
+        return bool(rows and rows.data)
 
     def search_memory(self, chat_id: int, query: str, limit: int = 5) -> list[str]:
         if not query.strip():
             return []
-        rows = (
+        rows = self._safe_execute(
             self._knowledge()
             .select("fact,last_seen_at")
             .eq("chat_id", chat_id)
             .ilike("fact", f"%{query}%")
             .order("last_seen_at", desc=True)
-            .limit(limit)
-            .execute()
+            .limit(limit),
+            fallback=None,
+            context=f"search_memory chat_id={chat_id}",
         )
+        if not rows:
+            return []
         return [row["fact"] for row in rows.data or []]
 
     def get_recent_memories(self, chat_id: int, limit: int = 5) -> list[str]:
-        rows = (
-            self._knowledge()
-            .select("fact,last_seen_at")
-            .eq("chat_id", chat_id)
-            .order("last_seen_at", desc=True)
-            .limit(limit)
-            .execute()
+        rows = self._safe_execute(
+            self._knowledge().select("fact,last_seen_at").eq("chat_id", chat_id).order("last_seen_at", desc=True).limit(limit),
+            fallback=None,
+            context=f"get_recent_memories chat_id={chat_id}",
         )
+        if not rows:
+            return []
         return [row["fact"] for row in rows.data or []]
 
     def get_all_user_facts(self, chat_id: int, user_name: str, limit: int = 10) -> list[str]:
-        rows = (
-            self._knowledge()
-            .select("fact")
-            .eq("chat_id", chat_id)
-            .ilike("fact", f"%{user_name}%")
-            .limit(limit)
-            .execute()
+        rows = self._safe_execute(
+            self._knowledge().select("fact").eq("chat_id", chat_id).ilike("fact", f"%{user_name}%").limit(limit),
+            fallback=None,
+            context=f"get_all_user_facts chat_id={chat_id}",
         )
+        if not rows:
+            return []
         return [row["fact"] for row in rows.data or []]
 
     def get_persona_state(self, chat_id: int, user_id: int) -> dict[str, Any] | None:
-        response = self._persona().select("*").eq("chat_id", chat_id).eq("user_id", user_id).limit(1).execute()
-        return response.data[0] if response.data else None
+        response = self._safe_execute(
+            self._persona().select("*").eq("chat_id", chat_id).eq("user_id", user_id).limit(1),
+            fallback=None,
+            context=f"get_persona_state chat_id={chat_id} user_id={user_id}",
+        )
+        return response.data[0] if response and response.data else None
 
     def upsert_persona_state(self, chat_id: int, user_id: int, payload: dict[str, Any]) -> None:
         row = {"chat_id": chat_id, "user_id": user_id, **payload, "updated_at": datetime.now(timezone.utc).isoformat()}
         try:
-            self._persona().upsert(row).execute()
+            result = self._safe_execute(
+                self._persona().upsert(row),
+                fallback=None,
+                context=f"upsert_persona_state chat_id={chat_id} user_id={user_id}",
+            )
+            if result is None:
+                return
         except APIError as exc:
             message = str(exc)
             if "respect" not in message:
-                raise
+                print(f"[DB:error] context=upsert_persona_state error={exc}")
+                return
 
             legacy_row = dict(row)
             legacy_row.pop("respect", None)
-            self._persona().upsert(legacy_row).execute()
+            self._safe_execute(
+                self._persona().upsert(legacy_row),
+                fallback=None,
+                context=f"upsert_persona_state.legacy chat_id={chat_id} user_id={user_id}",
+            )
 
     def insert_reminder(self, chat_id: int, user_id: int, user_name: str, text: str, trigger_time: datetime) -> Reminder | None:
-        result = self._reminders().insert(
-            {
-                "chat_id": chat_id,
-                "user_id": user_id,
-                "user_name": user_name,
-                "text": text,
-                "trigger_time": trigger_time.astimezone(timezone.utc).isoformat(),
-                "is_sent": False,
-            }
-        ).execute()
-        if not result.data:
+        result = self._safe_execute(
+            self._reminders().insert(
+                {
+                    "chat_id": chat_id,
+                    "user_id": user_id,
+                    "user_name": user_name,
+                    "text": text,
+                    "trigger_time": trigger_time.astimezone(timezone.utc).isoformat(),
+                    "is_sent": False,
+                }
+            ),
+            fallback=None,
+            context=f"insert_reminder chat_id={chat_id} user_id={user_id}",
+        )
+        if not result or not result.data:
             return None
         return self._reminder_from_row(result.data[0])
 
     def get_due_reminders(self) -> list[Reminder]:
         now = datetime.now(timezone.utc).isoformat()
-        response = self._reminders().select("*").eq("is_sent", False).lte("trigger_time", now).execute()
+        response = self._safe_execute(
+            self._reminders().select("*").eq("is_sent", False).lte("trigger_time", now),
+            fallback=None,
+            context="get_due_reminders",
+        )
+        if not response:
+            return []
         return [self._reminder_from_row(row) for row in response.data or []]
 
     def mark_reminder_sent(self, reminder_id: int) -> None:
-        self._reminders().update({"is_sent": True}).eq("id", reminder_id).execute()
+        self._safe_execute(
+            self._reminders().update({"is_sent": True}).eq("id", reminder_id),
+            fallback=None,
+            context=f"mark_reminder_sent id={reminder_id}",
+        )
 
     def enqueue_memory_sync(
         self,
@@ -547,69 +651,100 @@ class SupabaseDB:
         provider: str,
         workspace: str | None,
     ) -> MemorySyncJob | None:
-        result = self._memory_sync_queue().insert(
-            {
-                "chat_id": chat_id,
-                "transcript": transcript,
-                "participants": participants,
-                "provider": provider,
-                "workspace": workspace,
-                "status": "pending",
-                "attempts": 0,
-                "next_attempt_at": datetime.now(timezone.utc).isoformat(),
-                "last_error": None,
-            }
-        ).execute()
-        if not result.data:
+        result = self._safe_execute(
+            self._memory_sync_queue().insert(
+                {
+                    "chat_id": chat_id,
+                    "transcript": transcript,
+                    "participants": participants,
+                    "provider": provider,
+                    "workspace": workspace,
+                    "status": "pending",
+                    "attempts": 0,
+                    "next_attempt_at": datetime.now(timezone.utc).isoformat(),
+                    "last_error": None,
+                }
+            ),
+            fallback=None,
+            context=f"enqueue_memory_sync chat_id={chat_id}",
+        )
+        if not result or not result.data:
             return None
         return self._memory_sync_job_from_row(result.data[0])
 
     def get_due_memory_sync_jobs(self, provider: str, limit: int = 10) -> list[MemorySyncJob]:
         now = datetime.now(timezone.utc).isoformat()
-        response = (
+        response = self._safe_execute(
             self._memory_sync_queue()
             .select("*")
             .eq("provider", provider)
             .eq("status", "pending")
             .lte("next_attempt_at", now)
             .order("created_at")
-            .limit(limit)
-            .execute()
+            .limit(limit),
+            fallback=None,
+            context=f"get_due_memory_sync_jobs provider={provider}",
         )
+        if not response:
+            return []
         return [self._memory_sync_job_from_row(row) for row in response.data or []]
 
     def mark_memory_sync_done(self, job_id: int) -> None:
-        self._memory_sync_queue().update(
-            {
-                "status": "done",
-                "last_error": None,
-                "updated_at": datetime.now(timezone.utc).isoformat(),
-            }
-        ).eq("id", job_id).execute()
+        self._safe_execute(
+            self._memory_sync_queue()
+            .update(
+                {
+                    "status": "done",
+                    "last_error": None,
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+            .eq("id", job_id),
+            fallback=None,
+            context=f"mark_memory_sync_done id={job_id}",
+        )
 
     def reschedule_memory_sync_job(self, job_id: int, attempts: int, next_attempt_at: datetime, error: str) -> None:
-        self._memory_sync_queue().update(
-            {
-                "attempts": attempts,
-                "next_attempt_at": next_attempt_at.astimezone(timezone.utc).isoformat(),
-                "last_error": error[:1000],
-                "updated_at": datetime.now(timezone.utc).isoformat(),
-            }
-        ).eq("id", job_id).execute()
+        self._safe_execute(
+            self._memory_sync_queue()
+            .update(
+                {
+                    "attempts": attempts,
+                    "next_attempt_at": next_attempt_at.astimezone(timezone.utc).isoformat(),
+                    "last_error": error[:1000],
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+            .eq("id", job_id),
+            fallback=None,
+            context=f"reschedule_memory_sync_job id={job_id}",
+        )
 
     def mark_memory_sync_failed(self, job_id: int, attempts: int, error: str) -> None:
-        self._memory_sync_queue().update(
-            {
-                "status": "failed",
-                "attempts": attempts,
-                "last_error": error[:1000],
-                "updated_at": datetime.now(timezone.utc).isoformat(),
-            }
-        ).eq("id", job_id).execute()
+        self._safe_execute(
+            self._memory_sync_queue()
+            .update(
+                {
+                    "status": "failed",
+                    "attempts": attempts,
+                    "last_error": error[:1000],
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+            .eq("id", job_id),
+            fallback=None,
+            context=f"mark_memory_sync_failed id={job_id}",
+        )
 
     def get_memory_sync_stats(self, provider: str) -> dict[str, int]:
-        response = self._memory_sync_queue().select("status").eq("provider", provider).limit(5000).execute()
+        response = self._safe_execute(
+            self._memory_sync_queue().select("status").eq("provider", provider).limit(5000),
+            fallback=None,
+            context=f"get_memory_sync_stats provider={provider}",
+        )
         stats = {"pending": 0, "done": 0, "failed": 0}
+        if not response:
+            return stats
         for row in response.data or []:
             status = row.get("status") or "pending"
             if status in stats:

@@ -101,6 +101,37 @@ def _build_filtered_fallback_document(transcript: str, participants: list[str], 
     return "\n\n".join(sections)
 
 
+def _build_fallback_extracted_memories(transcript: str, participants: list[str], bot_name: str) -> dict[str, Any]:
+    facts: list[dict[str, Any]] = []
+    bot_markers = {bot_name.casefold(), f"@{bot_name.casefold()}"}
+
+    for raw_line in transcript.splitlines():
+        line = raw_line.strip()
+        if not line or ": " not in line:
+            continue
+        speaker, message = line.split(": ", 1)
+        message = re.sub(r"^\[media:[^\]]+\]\s*", "", message, flags=re.IGNORECASE).strip()
+        if not message or speaker.casefold() in bot_markers:
+            continue
+        if not _looks_memory_worthy_message(message):
+            continue
+        facts.append(
+            {
+                "fact": f"{speaker}: {message[:180]}",
+                "source": "fallback_user_signal",
+                "confidence": 0.72,
+                "entities": [speaker],
+                "tags": ["fallback"],
+            }
+        )
+        if len(facts) >= 6:
+            break
+
+    if not facts:
+        return {}
+    return {"summary": "", "facts": facts, "participants": participants}
+
+
 def _looks_memory_worthy_message(message: str) -> bool:
     normalized = message.strip()
     lowered = normalized.casefold()
@@ -184,6 +215,8 @@ class DatabaseMemoryProvider(BaseMemoryProvider):
             return
 
         extracted = await self._extract_memories(compact, participants)
+        if not extracted:
+            extracted = _build_fallback_extracted_memories(compact, participants, self.settings.bot_name)
         stored = 0
 
         summary = extracted.get("summary", "").strip()
