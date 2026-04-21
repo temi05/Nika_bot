@@ -249,6 +249,7 @@ class AIService:
                     user_text=plain_user_text,
                     content=content,
                 )
+                content = self._maybe_attach_cookie_reward(chat_id, sender, plain_user_text, content)
                 self.remember_message(chat_id, Sender(user_id=0, first_name=self.settings.bot_name), content)
                 self._remember_bot_reply(chat_id, content)
                 self._adjust_mood(chat_id, content)
@@ -314,30 +315,56 @@ class AIService:
         return memory_text[:300]
 
     def _extract_poll_request(self, user_text: str) -> dict[str, Any] | None:
-        lowered = user_text.lower()
-        if not any(keyword in lowered for keyword in ["опрос", "голосован", "poll"]):
+        text = re.sub(r"\s+", " ", (user_text or "").strip())
+        if not text or "<" in text or ">" in text:
             return None
 
-        body = user_text.split(":", 1)[1].strip() if ":" in user_text else user_text
-        body = re.sub(r"(?i)\b(сделай|создай|запусти|устрой|делаем)\b", "", body).strip()
-        body = re.sub(r"(?i)\b(опрос|голосование|poll)\b", "", body).strip(" .,-")
+        bot_names = [self.settings.bot_name]
+        if self.settings.bot_username:
+            bot_names.append(f"@{self.settings.bot_username}")
+        for name in filter(None, bot_names):
+            text = re.sub(rf"^\s*{re.escape(name)}\s*[,;:\-–—]?\s*", "", text, flags=re.IGNORECASE)
+
+        poll_words = {"\u043e\u043f\u0440\u043e\u0441", "\u0433\u043e\u043b\u043e\u0441\u043e\u0432\u0430\u043d\u0438\u0435", "poll"}
+        lead_words = {
+            "\u0441\u0434\u0435\u043b\u0430\u0439",
+            "\u0441\u043e\u0437\u0434\u0430\u0439",
+            "\u0437\u0430\u043f\u0443\u0441\u0442\u0438",
+            "\u0443\u0441\u0442\u0440\u043e\u0439",
+            "\u0434\u0435\u043b\u0430\u0435\u043c",
+            "make",
+            "create",
+            "start",
+        }
+        words = [word.strip(" ,.:;!?-–—").casefold() for word in text.split()]
+        if not words:
+            return None
+        poll_index = 1 if words[0] in lead_words else 0
+        if poll_index >= len(words) or words[poll_index] not in poll_words:
+            return None
+
+        lowered = text.lower()
+        body = text.split(":", 1)[1].strip() if ":" in text else " ".join(text.split()[poll_index + 1 :]).strip()
+        body = body.strip(" .,-")
 
         options: list[str] = []
         if "," in body:
             options = [part.strip() for part in body.split(",") if part.strip()]
         elif ";" in body:
             options = [part.strip() for part in body.split(";") if part.strip()]
-        elif re.search(r"(?i)\s+или\s+", body):
-            options = [part.strip() for part in re.split(r"(?i)\s+или\s+", body) if part.strip()]
+        else:
+            or_pattern = r"(?i)\s+\u0438\u043b\u0438\s+"
+            if re.search(or_pattern, body):
+                options = [part.strip() for part in re.split(or_pattern, body) if part.strip()]
 
         if len(options) < 2:
             return None
 
-        question = "Что выбираем?"
-        if "кто" in lowered:
-            question = "Кто победит?"
-        elif "лучше" in lowered:
-            question = "Что лучше?"
+        question = "\u0427\u0442\u043e \u0432\u044b\u0431\u0438\u0440\u0430\u0435\u043c?"
+        if "\u043a\u0442\u043e" in lowered:
+            question = "\u041a\u0442\u043e \u043f\u043e\u0431\u0435\u0434\u0438\u0442?"
+        elif "\u043b\u0443\u0447\u0448\u0435" in lowered:
+            question = "\u0427\u0442\u043e \u043b\u0443\u0447\u0448\u0435?"
 
         return {
             "question": question,
@@ -400,7 +427,11 @@ class AIService:
                 "type": "function",
                 "function": {
                     "name": "create_poll",
-                    "description": "Create a Telegram poll in current chat.",
+                    "description": (
+                        "Create a Telegram poll in the current chat. Use it when the user explicitly asks for a poll, "
+                        "or when the user's current message clearly presents a choice with 2-6 short options. "
+                        "Never build a poll from reply_context, your previous reply, profile summaries, or random sentence fragments."
+                    ),
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -668,9 +699,12 @@ class AIService:
         if not isinstance(options, list):
             return "Не смогла создать опрос: варианты должны быть списком."
 
-        safe_options = [str(option).strip()[:100] for option in options if str(option).strip()]
+        safe_options = self._sanitize_poll_options(options)
         if len(safe_options) < 2:
             return "Не смогла создать опрос: нужно минимум 2 варианта."
+        if self._looks_like_bad_poll(question, safe_options):
+            self._log("create_poll_rejected", chat_id=chat_id, question=question, options=safe_options)
+            return "Не стала делать опрос: варианты похожи на обрывки текста, а не на нормальный выбор."
 
         try:
             await self.bot.send_poll(
@@ -692,6 +726,87 @@ class AIService:
         except Exception as exc:
             self._log("create_poll_error", chat_id=chat_id, error=str(exc), question=question)
             return f"Не смогла создать опрос: {exc}"
+
+    def _sanitize_poll_options(self, options: list[Any]) -> list[str]:
+        safe_options: list[str] = []
+        seen: set[str] = set()
+        for option in options:
+            value = re.sub(r"\s+", " ", str(option or "")).strip(" .,-:;")
+            if not value:
+                continue
+            value = value[:100]
+            key = value.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            safe_options.append(value)
+        return safe_options[:10]
+
+    def _looks_like_bad_poll(self, question: str, options: list[str]) -> bool:
+        normalized_question = re.sub(r"\s+", " ", question.strip()).casefold()
+        if self._looks_like_memory_artifact(normalized_question):
+            return True
+
+        bad_markers = ("<reply_context>", "<current_message>", "author:", "type:", "text:", "caption:")
+        joined = " ".join(options).casefold()
+        if any(marker in joined for marker in bad_markers):
+            return True
+
+        long_options = sum(1 for option in options if len(option) > 60)
+        sentence_options = sum(1 for option in options if re.search(r"[.!?].{8,}", option))
+        comma_options = sum(1 for option in options if "," in option and len(option) > 30)
+        if long_options >= 2 or sentence_options >= 1 or comma_options >= 2:
+            return True
+
+        weak_tokens = {
+            "видимо",
+            "выкладывай",
+            "участник чата",
+            "что-то конкретное",
+            "просто решил",
+            "нормальный вопрос",
+            "тема",
+        }
+        weak_hits = sum(1 for option in options if option.casefold() in weak_tokens or len(option) < 2)
+        return weak_hits >= 2
+
+    def _maybe_attach_cookie_reward(self, chat_id: int, sender: Sender, user_text: str, reply: str) -> str:
+        if not self._message_deserves_cookie(user_text):
+            return reply
+        if not self.db.can_adjust_reputation(0, sender.user_id, cooldown_seconds=180):
+            return reply
+
+        user = self.db.get_or_create_user(chat_id, sender)
+        updated = self.db.update_user(user.id, {"reputation": user.reputation + 1})
+        if not updated:
+            return reply
+
+        self._log("auto_cookie_reward", chat_id=chat_id, target=sender.display_name, reputation=updated.reputation)
+        if "\U0001f36a" in reply or "печен" in reply.casefold():
+            return reply
+        return f"{reply}\n\n\U0001f36a И печеньку держи, момент был годный."
+
+    def _message_deserves_cookie(self, user_text: str) -> bool:
+        text = re.sub(r"\s+", " ", (user_text or "").strip()).casefold()
+        if len(text) < 3:
+            return False
+        positive_markers = {
+            "\u0441\u043f\u0430\u0441\u0438\u0431\u043e",
+            "\u0441\u043f\u0441",
+            "\u043a\u0440\u0430\u0441\u0430\u0432\u0430",
+            "\u0445\u0430\u0440\u043e\u0448",
+            "\u0445\u043e\u0440\u043e\u0448",
+            "\u0431\u0430\u0437\u0430",
+            "\u0433\u0435\u043d\u0438\u0430\u043b\u044c\u043d\u043e",
+            "\u0441\u043c\u0435\u0448\u043d\u043e",
+            "\u0443\u0433\u0430\u0440",
+            "\u0442\u043e\u043f",
+            "\u0441\u0438\u043b\u044c\u043d\u043e",
+            "\u0432\u0430\u0439\u0431",
+        }
+        if any(marker in text for marker in positive_markers):
+            return True
+        return bool(re.search(r"(^|\s)(\+1|\+\+|👍|🔥|❤️|😂|🤣)($|\s)", text))
 
     def _resolve_target_user(self, chat_id: int, sender: Sender, target_name: str) -> ChatUser | None:
         normalized = (target_name or "").strip().lower()
@@ -867,10 +982,17 @@ class AIService:
         return not bool(re.search(r"(?m)^type:\s*text\s*$", normalized))
 
     def _extract_current_plain_text(self, user_text: str) -> str:
-        caption_match = re.search(r"(?m)^(?:caption|text):\s*(.+)$", user_text)
-        if caption_match:
-            return caption_match.group(1).strip()
-        if "<current_message>" in user_text:
+        current_match = re.search(r"(?is)<current_message>\s*(.*?)\s*</current_message>", user_text)
+        if current_match:
+            current_block = current_match.group(1)
+            caption_match = re.search(r"(?m)^caption:\s*(.+)$", current_block)
+            if caption_match:
+                return caption_match.group(1).strip()
+            text_match = re.search(r"(?m)^text:\s*(.+)$", current_block)
+            if text_match:
+                return text_match.group(1).strip()
+            return ""
+        if "<reply_context>" in user_text:
             return ""
         return user_text.strip()
 

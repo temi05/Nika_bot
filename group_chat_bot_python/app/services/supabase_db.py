@@ -470,7 +470,7 @@ class SupabaseDB:
         store[command_name] = now
         return True, 0
 
-    def can_adjust_reputation(self, actor_id: int, target_id: int, cooldown_seconds: int = 60) -> bool:
+    def can_adjust_reputation(self, actor_id: int, target_id: int, cooldown_seconds: int = 20) -> bool:
         key = f"{actor_id}_{target_id}"
         now = time.time()
         if now - self.reaction_cooldowns.get(key, 0.0) < cooldown_seconds:

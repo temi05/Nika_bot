@@ -155,6 +155,7 @@ def build_messages_router(bot: Bot, settings: Settings, db: SupabaseDB, ai: AISe
 
         raw_text = message.text or message.caption or ""
         ai_input_text = _build_ai_input_text(message, raw_text)
+        memory_input_text = ai_input_text
         if ai_input_text:
             reply_context = _build_reply_context(message.reply_to_message)
             if reply_context:
@@ -266,7 +267,7 @@ def build_messages_router(bot: Bot, settings: Settings, db: SupabaseDB, ai: AISe
                 or should_reply
             )
             if should_capture_memory:
-                ai.remember_message(message.chat.id, sender, ai_input_text)
+                ai.remember_message(message.chat.id, sender, memory_input_text)
                 try:
                     await ai.flush_passive_memory(message.chat.id)
                 except Exception as exc:
@@ -351,11 +352,24 @@ def _word_in_text(text: str, word: str) -> bool:
 
 
 def _reputation_delta(text: str) -> int:
-    positive = {"+", "спасибо", "👍", "спс"}
-    negative = {"-", "👎", "фу"}
-    if text in positive:
+    normalized = re.sub(r"\s+", " ", (text or "").strip()).casefold()
+    positive_exact = {"+", "+1", "++", "\U0001f44d", "\u0441\u043f\u0441", "\u0441\u043f\u0430\u0441\u0438\u0431\u043e"}
+    negative_exact = {"-", "-1", "\U0001f44e", "\u0444\u0443"}
+    positive_markers = {
+        "\u0441\u043f\u0430\u0441\u0438\u0431\u043e",
+        "\u0441\u043f\u0441",
+        "\u043a\u0440\u0430\u0441\u0430\u0432\u0430",
+        "\u0445\u043e\u0440\u043e\u0448",
+        "\u0431\u0430\u0437\u0430",
+        "\u0442\u043e\u043f",
+        "\u0441\u0438\u043b\u044c\u043d\u043e",
+        "\u0433\u043e\u0434\u043d\u043e",
+        "\u0440\u0435\u0441\u043f\u0435\u043a\u0442",
+    }
+    negative_markers = {"\u0444\u0443", "\u043a\u0440\u0438\u043d\u0436", "\u043c\u0438\u043d\u0443\u0441"}
+    if normalized in positive_exact or any(marker in normalized for marker in positive_markers):
         return 1
-    if text in negative:
+    if normalized in negative_exact or any(marker in normalized for marker in negative_markers):
         return -1
     return 0
 
