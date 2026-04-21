@@ -160,20 +160,27 @@ class AIService:
             messages.append({"role": "user", "content": current_line})
 
         try:
+            use_tools = len(user_text.strip()) >= 8
             for round_index in range(3):
-                response = await self.client.chat.completions.create(
-                    model=self.settings.ai_model,
-                    messages=messages,
-                    tools=self._tool_definitions(),
-                    tool_choice="auto",
-                    temperature=self.settings.ai_temperature,
-                    max_tokens=self.settings.ai_max_tokens,
-                )
+                request_kwargs: dict[str, Any] = {
+                    "model": self.settings.ai_model,
+                    "messages": messages,
+                    "temperature": self.settings.ai_temperature,
+                    "max_tokens": self.settings.ai_max_tokens,
+                }
+                if use_tools:
+                    request_kwargs["tools"] = self._tool_definitions()
+                    request_kwargs["tool_choice"] = "auto"
+                response = await self.client.chat.completions.create(**request_kwargs)
                 message = response.choices[0].message
                 tool_calls = list(message.tool_calls or [])
                 self._log("model_response", chat_id=chat_id, round=round_index + 1, tool_calls=len(tool_calls))
 
                 if tool_calls:
+                    if not self._tool_calls_have_valid_json(tool_calls):
+                        self._log("tool_calls_invalid_json", chat_id=chat_id, count=len(tool_calls))
+                        return self._fallback_for_unclear_input(user_text)
+
                     assistant_message: dict[str, Any] = {
                         "role": "assistant",
                         "content": message.content or "",
@@ -416,6 +423,24 @@ class AIService:
         if tool_name == "create_poll":
             return await self._tool_create_poll(chat_id, args)
         return "Неизвестный инструмент."
+
+    def _tool_calls_have_valid_json(self, tool_calls: list[Any]) -> bool:
+        for call in tool_calls:
+            try:
+                json.loads(call.function.arguments or "{}")
+            except (AttributeError, json.JSONDecodeError, TypeError):
+                self._log(
+                    "tool_args_invalid_preflight",
+                    tool=getattr(getattr(call, "function", None), "name", None),
+                    raw_arguments=getattr(getattr(call, "function", None), "arguments", None),
+                )
+                return False
+        return True
+
+    def _fallback_for_unclear_input(self, user_text: str) -> str:
+        if len(user_text.strip()) <= 5:
+            return "Я тут. Только дай мне чуть больше, чем один звук, и я нормально отвечу."
+        return "Я не разобрала команду. Напиши чуть конкретнее, и я подхвачу."
 
     def _tool_user_lookup(self, chat_id: int, sender: Sender, args: dict[str, Any]) -> str:
         action = str(args.get("action") or "").lower()
@@ -667,6 +692,8 @@ class AIService:
             ).strip(" -,.!?")
 
         cleaned = self._enforce_personality_mode(cleaned, user_text=user_text)
+        cleaned = self._soften_personal_attacks(cleaned)
+        cleaned = self._trim_incomplete_tail(cleaned)
         return cleaned
 
     def _enforce_personality_mode(self, content: str, *, user_text: str) -> str:
@@ -693,6 +720,32 @@ class AIService:
         cleaned = re.sub(r"\s{2,}", " ", cleaned)
         cleaned = re.sub(r"\s+([,!.?])", r"\1", cleaned)
         return cleaned.strip(" ,")
+
+    def _soften_personal_attacks(self, content: str) -> str:
+        replacements = {
+            "Тупишь?": "Не поняла заход.",
+            "тупишь?": "не поняла заход.",
+            "решил меня побесить?": "зашел без контекста?",
+            "без твоих": "без этих",
+            "у меня времени на твои обрывки нет": "дай полную мысль, и я отвечу нормально",
+        }
+        cleaned = content
+        for bad, better in replacements.items():
+            cleaned = cleaned.replace(bad, better)
+        cleaned = re.sub(r"\b(?:идиот|дурак|тупой|тупая)\b", "человек-загадка", cleaned, flags=re.IGNORECASE)
+        return cleaned.strip()
+
+    def _trim_incomplete_tail(self, content: str) -> str:
+        cleaned = content.strip()
+        if not cleaned:
+            return ""
+        dangling_markers = ["«", '"', "“", "„", "(", "["]
+        last_sentence_end = max(cleaned.rfind("."), cleaned.rfind("!"), cleaned.rfind("?"))
+        if any(cleaned.endswith(marker) for marker in dangling_markers) and last_sentence_end > 10:
+            cleaned = cleaned[: last_sentence_end + 1].strip()
+        if cleaned.count("«") > cleaned.count("»") and last_sentence_end > 10:
+            cleaned = cleaned[: last_sentence_end + 1].strip()
+        return cleaned
 
     def _looks_too_soft(self, content: str) -> bool:
         lowered = content.lower()
