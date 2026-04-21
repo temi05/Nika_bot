@@ -2,14 +2,12 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import datetime, timedelta, timezone
 from typing import Any
 
-import httpx
 from openai import AsyncOpenAI
 
 from app.config import Settings
-from app.models import MemoryRecord, MemorySyncJob
+from app.models import MemoryRecord
 from app.services.prompt_builders import build_memory_extraction_messages, format_memory_context
 from app.services.supabase_db import SupabaseDB
 
@@ -30,106 +28,6 @@ def _parse_json_content(content: str) -> dict[str, Any]:
         if not match:
             raise
         return json.loads(match.group(0))
-
-
-def _render_memory_document(extracted: dict[str, Any], participants: list[str]) -> str:
-    if not isinstance(extracted, dict):
-        return ""
-
-    summary = str(extracted.get("summary") or "").strip()
-    facts = [item for item in (extracted.get("facts") or []) if isinstance(item, dict)]
-    fact_lines: list[str] = []
-    for item in facts[:8]:
-        fact = str(item.get("fact") or "").strip()
-        if not fact:
-            continue
-        source = str(item.get("source") or "memory").strip() or "memory"
-        confidence = item.get("confidence")
-        entities = [str(entity).strip() for entity in (item.get("entities") or []) if str(entity).strip()]
-        tags = [str(tag).strip() for tag in (item.get("tags") or []) if str(tag).strip()]
-
-        line = f"- [{source}] {fact}"
-        if confidence is not None:
-            line += f" (confidence={confidence})"
-        if entities:
-            line += f" | entities: {', '.join(entities[:5])}"
-        if tags:
-            line += f" | tags: {', '.join(tags[:5])}"
-        fact_lines.append(line)
-
-    sections: list[str] = []
-    if participants:
-        sections.append("Participants: " + ", ".join(participants))
-    if summary:
-        sections.append("Summary:\n" + summary)
-    if fact_lines:
-        sections.append("Facts:\n" + "\n".join(fact_lines))
-    return "\n\n".join(section for section in sections if section).strip()
-
-
-def _build_filtered_fallback_document(transcript: str, participants: list[str], bot_name: str) -> str:
-    highlights: list[str] = []
-    bot_markers = {bot_name.casefold(), f"@{bot_name.casefold()}"}
-
-    for raw_line in transcript.splitlines():
-        line = raw_line.strip()
-        if not line or ": " not in line:
-            continue
-        speaker, message = line.split(": ", 1)
-        if not message:
-            continue
-        # Keep useful captions from media messages, but skip pure media markers.
-        message = re.sub(r"^\[media:[^\]]+\]\s*", "", message, flags=re.IGNORECASE).strip()
-        if not message:
-            continue
-        if speaker.casefold() in bot_markers:
-            continue
-        if not _looks_memory_worthy_message(message):
-            continue
-        highlights.append(f"- [user_signal] {speaker}: {message[:180]}")
-        if len(highlights) >= 6:
-            break
-
-    if not highlights:
-        return ""
-
-    sections = []
-    if participants:
-        sections.append("Participants: " + ", ".join(participants))
-    sections.append("Summary:\nLow-confidence fallback memory built from user-only highlights.")
-    sections.append("Facts:\n" + "\n".join(highlights))
-    return "\n\n".join(sections)
-
-
-def _build_fallback_extracted_memories(transcript: str, participants: list[str], bot_name: str) -> dict[str, Any]:
-    facts: list[dict[str, Any]] = []
-    bot_markers = {bot_name.casefold(), f"@{bot_name.casefold()}"}
-
-    for raw_line in transcript.splitlines():
-        line = raw_line.strip()
-        if not line or ": " not in line:
-            continue
-        speaker, message = line.split(": ", 1)
-        message = re.sub(r"^\[media:[^\]]+\]\s*", "", message, flags=re.IGNORECASE).strip()
-        if not message or speaker.casefold() in bot_markers:
-            continue
-        if not _looks_memory_worthy_message(message):
-            continue
-        facts.append(
-            {
-                "fact": f"{speaker}: {message[:180]}",
-                "source": "fallback_user_signal",
-                "confidence": 0.72,
-                "entities": [speaker],
-                "tags": ["fallback"],
-            }
-        )
-        if len(facts) >= 6:
-            break
-
-    if not facts:
-        return {}
-    return {"summary": "", "facts": facts, "participants": participants}
 
 
 def _looks_memory_worthy_message(message: str) -> bool:
@@ -170,71 +68,12 @@ def _clean_memory_items(items: list[str]) -> list[str]:
     return cleaned
 
 
-def _clean_lightrag_context(context: str) -> str:
-    lines: list[str] = []
-    skip_section = False
-    for raw_line in (context or "").splitlines():
-        line = raw_line.strip()
-        lowered = line.casefold()
-        if not line:
-            skip_section = False
-            continue
-        if lowered.startswith("participants:") or lowered in {"summary", "status"}:
-            skip_section = True
-            continue
-        if lowered.startswith("summary:") or lowered.startswith("low-confidence fallback memory"):
-            skip_section = True
-            continue
-        if skip_section and not lowered.startswith("- "):
-            continue
-        if _is_memory_artifact(line):
-            continue
-        lines.append(line)
-    return "\n".join(lines).strip()
-
-
-async def _extract_memories_with_client(
-    client: AsyncOpenAI | None,
-    settings: Settings,
-    transcript: str,
-    participants: list[str],
-    log_fn,
-) -> dict[str, Any]:
-    if not client:
-        log_fn("extract_skipped", reason="no_client")
-        return {}
-
-    try:
-        messages = build_memory_extraction_messages(
-            bot_name=settings.bot_name,
-            transcript=transcript,
-            participants=participants,
-        )
-        response = await client.chat.completions.create(
-            model=settings.effective_memory_model,
-            messages=messages,
-            temperature=0.2,
-            max_tokens=900,
-        )
-        content = (response.choices[0].message.content or "").strip()
-        payload = _parse_json_content(content)
-        if isinstance(payload, dict):
-            log_fn("extract_ok", facts=len(payload.get("facts") or []))
-            return payload
-    except Exception as exc:
-        log_fn("extract_error", error=str(exc))
-    return {}
-
-
 class BaseMemoryProvider:
     async def save_transcript(self, chat_id: int, transcript: str, participants: list[str]) -> None:
         raise NotImplementedError
 
     async def get_relevant_facts(self, chat_id: int, user_message: str, user_name: str) -> str:
         raise NotImplementedError
-
-    async def flush_pending_queue(self) -> None:
-        return None
 
     async def health(self) -> dict:
         return {"healthy": True}
@@ -265,7 +104,9 @@ class DatabaseMemoryProvider(BaseMemoryProvider):
 
         extracted = await self._extract_memories(compact, participants)
         if not extracted:
-            extracted = _build_fallback_extracted_memories(compact, participants, self.settings.bot_name)
+            # fallback: выбираем достаточно длинные и осмысленные строки
+            extracted = self._build_fallback_extracted(compact, participants)
+
         stored = 0
 
         summary = extracted.get("summary", "").strip()
@@ -333,144 +174,62 @@ class DatabaseMemoryProvider(BaseMemoryProvider):
         return context
 
     async def _extract_memories(self, transcript: str, participants: list[str]) -> dict[str, Any]:
-        return await _extract_memories_with_client(self.client, self.settings, transcript, participants, self._log)
+        if not self.client:
+            self._log("extract_skipped", reason="no_client")
+            return {}
 
-
-class LightRAGMemoryProvider(BaseMemoryProvider):
-    def __init__(self, settings: Settings, db: SupabaseDB) -> None:
-        self.settings = settings
-        self.db = db
-        self.base_url = settings.lightrag_base_url.rstrip("/")
-        self.client = (
-            AsyncOpenAI(
-                api_key=settings.effective_ai_api_key,
-                base_url=settings.effective_ai_base_url,
-                timeout=settings.ai_timeout_seconds,
+        try:
+            messages = build_memory_extraction_messages(
+                bot_name=self.settings.bot_name,
+                transcript=transcript,
+                participants=participants,
             )
-            if settings.memory_extraction_enabled and settings.effective_ai_api_key
-            else None
-        )
-
-    def _log(self, event: str, **kwargs: Any) -> None:
-        details = " ".join(f"{key}={value!r}" for key, value in kwargs.items())
-        print(f"[MEMORY:{event}] {details}".strip())
-
-    async def _request(self, method: str, path: str, json: dict | None = None) -> dict:
-        headers = {"Accept": "application/json"}
-        if self.settings.lightrag_api_key:
-            headers["X-API-Key"] = self.settings.lightrag_api_key
-        async with httpx.AsyncClient(timeout=self.settings.lightrag_timeout_seconds) as client:
-            response = await client.request(method, f"{self.base_url}{path}", json=json, headers=headers)
-            response.raise_for_status()
-            return response.json()
-
-    async def save_transcript(self, chat_id: int, transcript: str, participants: list[str]) -> None:
-        compact = _compact_transcript(transcript)
-        if not compact:
-            return
-        document = await self._build_memory_document(compact, participants)
-        if not document:
-            self._log("skip_queue", chat_id=chat_id, participants=participants, reason="no_clean_document")
-            return
-
-        job = self.db.enqueue_memory_sync(
-            chat_id=chat_id,
-            transcript=document,
-            participants=participants,
-            provider="lightrag",
-            workspace=self.settings.lightrag_workspace,
-        )
-        if not job:
-            print(f"[MEMORY:lightrag_queue_error] chat_id={chat_id} error='enqueue_failed'")
-            return
-
-        try:
-            await self._deliver_sync_job(job)
-            self.db.mark_memory_sync_done(job.id)
-            print(f"[MEMORY:lightrag_sync_done] job_id={job.id} chat_id={chat_id} mode='inline'")
-        except Exception as exc:
-            self._schedule_retry(job, exc)
-
-    async def flush_pending_queue(self) -> None:
-        jobs = self.db.get_due_memory_sync_jobs("lightrag", limit=self.settings.memory_sync_batch_size)
-        if not jobs:
-            return
-
-        for job in jobs:
-            try:
-                await self._deliver_sync_job(job)
-                self.db.mark_memory_sync_done(job.id)
-                print(f"[MEMORY:lightrag_sync_done] job_id={job.id} chat_id={job.chat_id} mode='worker'")
-            except Exception as exc:
-                self._schedule_retry(job, exc)
-
-    async def get_relevant_facts(self, chat_id: int, user_message: str, user_name: str) -> str:
-        payload = {
-            "query": f"{user_name}: {user_message}",
-            "mode": self.settings.lightrag_query_mode,
-            "only_need_context": True,
-            "include_references": True,
-            "include_chunk_content": True,
-        }
-        if self.settings.lightrag_workspace:
-            payload["workspace"] = self.settings.lightrag_workspace
-
-        try:
-            data = await self._request("POST", "/query", payload)
-            if isinstance(data.get("context"), str):
-                return _clean_lightrag_context(data["context"])
-            if isinstance(data.get("response"), str):
-                return _clean_lightrag_context(data["response"])
-        except Exception as exc:
-            print(f"[MEMORY:lightrag_error] error={exc}")
-        return ""
-
-    async def health(self) -> dict:
-        stats = self.db.get_memory_sync_stats("lightrag")
-        try:
-            data = await self._request("GET", "/health")
-            return {"healthy": True, "upstream": data, "queue": stats}
-        except Exception as exc:
-            return {"healthy": False, "error": str(exc), "queue": stats}
-
-    async def _deliver_sync_job(self, job: MemorySyncJob) -> None:
-        payload = {"text": job.transcript}
-        if job.workspace:
-            payload["workspace"] = job.workspace
-        await self._request("POST", "/documents/text", payload)
-
-    async def _build_memory_document(self, transcript: str, participants: list[str]) -> str:
-        extracted = await _extract_memories_with_client(self.client, self.settings, transcript, participants, self._log)
-        document = _render_memory_document(extracted, participants)
-        if document:
-            return document
-        return _build_filtered_fallback_document(transcript, participants, self.settings.bot_name)
-
-    def _schedule_retry(self, job: MemorySyncJob, exc: Exception) -> None:
-        attempts = job.attempts + 1
-        error_text = str(exc)
-        if attempts >= self.settings.memory_sync_max_attempts:
-            self.db.mark_memory_sync_failed(job.id, attempts, error_text)
-            print(
-                "[MEMORY:lightrag_sync_failed] "
-                f"job_id={job.id} chat_id={job.chat_id} attempts={attempts} error={error_text}"
+            response = await self.client.chat.completions.create(
+                model=self.settings.effective_memory_model,
+                messages=messages,
+                temperature=0.2,
+                max_tokens=900,
             )
-            return
+            content = (response.choices[0].message.content or "").strip()
+            payload = _parse_json_content(content)
+            if isinstance(payload, dict):
+                self._log("extract_ok", facts=len(payload.get("facts") or []))
+                return payload
+        except Exception as exc:
+            self._log("extract_error", error=str(exc))
+        return {}
 
-        delay = min(
-            self.settings.memory_sync_retry_max_seconds,
-            self.settings.memory_sync_retry_base_seconds * (2 ** max(attempts - 1, 0)),
-        )
-        next_attempt_at = datetime.now(timezone.utc) + timedelta(seconds=delay)
-        self.db.reschedule_memory_sync_job(job.id, attempts, next_attempt_at, error_text)
-        print(
-            "[MEMORY:lightrag_sync_retry] "
-            f"job_id={job.id} chat_id={job.chat_id} attempts={attempts} "
-            f"retry_in={delay}s error={error_text}"
-        )
+    def _build_fallback_extracted(self, transcript: str, participants: list[str]) -> dict[str, Any]:
+        """Простой fallback без LLM: берём осмысленные пользовательские строки."""
+        bot_markers = {self.settings.bot_name.casefold(), f"@{self.settings.bot_name.casefold()}"}
+        facts: list[dict[str, Any]] = []
+
+        for raw_line in transcript.splitlines():
+            line = raw_line.strip()
+            if not line or ": " not in line:
+                continue
+            speaker, message = line.split(": ", 1)
+            message = re.sub(r"^\[media:[^\]]+\]\s*", "", message, flags=re.IGNORECASE).strip()
+            if not message or speaker.casefold() in bot_markers:
+                continue
+            if not _looks_memory_worthy_message(message):
+                continue
+            facts.append(
+                {
+                    "fact": f"{speaker}: {message[:180]}",
+                    "source": "fallback_user_signal",
+                    "confidence": 0.72,
+                    "entities": [speaker],
+                    "tags": ["fallback"],
+                }
+            )
+            if len(facts) >= 6:
+                break
+
+        if not facts:
+            return {}
+        return {"summary": "", "facts": facts, "participants": participants}
 
 
 def build_memory_provider(settings: Settings, db: SupabaseDB) -> BaseMemoryProvider:
-    if settings.memory_provider.lower() == "lightrag":
-        return LightRAGMemoryProvider(settings, db)
     return DatabaseMemoryProvider(settings, db)

@@ -57,7 +57,8 @@ class AIService:
         self._log("remember", chat_id=chat_id, sender=sender.display_name, text=rendered[:160])
 
     async def flush_passive_memory(self, chat_id: int) -> None:
-        if len(self.chat_buffers[chat_id]) < 25:
+        # Сбрасываем при 20 сообщениях — быстрее фиксируем паттерны
+        if len(self.chat_buffers[chat_id]) < 20:
             return
 
         transcript = "\n".join(self.chat_buffers[chat_id])
@@ -834,11 +835,12 @@ class AIService:
     def _adjust_mood(self, chat_id: int, reply: str) -> None:
         lowered = reply.lower()
         delta = 0
-        if any(word in lowered for word in ["люблю", "милая", "умница", "солнышко", "хорош", "красава"]):
-            delta += 2
-        if any(word in lowered for word in ["бесишь", "дурак", "идиот", "нахуй", "заебал"]):
-            delta -= 2
-        self.moods[chat_id] = max(0, min(100, self.moods[chat_id] + delta))
+        if any(word in lowered for word in ["люблю", "умница", "солнышко", "хорош", "красава"]):
+            delta += 3
+        if any(word in lowered for word in ["бесишь", "нахуй", "заебал", "достал"]):
+            delta -= 3
+        if delta:
+            self.moods[chat_id] = max(10, min(100, self.moods[chat_id] + delta))
 
     def _adjust_mood_from_user_message(self, chat_id: int, user_text: str) -> None:
         lowered = user_text.lower()
@@ -885,6 +887,7 @@ class AIService:
 
     def _strip_soft_phrases(self, content: str) -> str:
         cleaned = content
+        # Удаляем обращения и мягкие вставки, портящие жёсткий характер
         soft_phrases = [
             "радость моя",
             "заяц",
@@ -896,6 +899,9 @@ class AIService:
             "золотце",
             "милый",
             "милая",
+            "солнышко",
+            "котик",
+            "лапочка",
         ]
         for phrase in soft_phrases:
             cleaned = re.sub(rf"\b{re.escape(phrase)}\b", "", cleaned, flags=re.IGNORECASE)

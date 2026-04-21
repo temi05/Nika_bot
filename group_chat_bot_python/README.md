@@ -1,49 +1,34 @@
-# Python Bot Rewrite
+# NeuroNika Python Bot
 
-Python-версия бота живет отдельно от старого Node.js-бота и рассчитана на webhook-режим через FastAPI + aiogram.
+Python-версия бота. FastAPI + aiogram 3, webhook-режим, Supabase как единственная база.
 
-## Что уже есть
+## Что есть
 
-- `aiogram` 3 + `FastAPI`
-- webhook на `/bot<TELEGRAM_BOT_TOKEN>`
+- `aiogram` 3 + `FastAPI`, webhook на `/bot<TELEGRAM_BOT_TOKEN>`
 - автопопытка `setWebhook` при старте
-- `Supabase` как база
-- память через `database` или `LightRAG`
+- `Supabase` — пользователи, память, настройки, заметки, напоминания
 - AI-ответы с character prompt, tool-use и персонификацией по пользователям
-- AI memory extraction: диалог режется в summary + факты, а не просто валится сырым логом
+- AI-извлечение памяти: диалог режется в summary + факты
 - опросы, профиль, заметки, печеньки, варны, мут и размут через tools
 
 ## Prompt Architecture
 
-Промпты в этом проекте лучше писать не на "языке программирования", а как структурированные текстовые инструкции.
+- `app/services/prompt_builders.py` — character/system prompt и memory extraction prompt  
+- `app/services/ai_service.py` — orchestration, tools, direct poll handling, logging  
+- `app/services/memory_provider.py` — извлечение и сборка памяти в Supabase  
 
-Практический вариант для этого репозитория:
-
-- сам prompt писать обычным естественным языком;
-- для характера и чата использовать русский, потому что сам бот живет в русском Telegram-контексте;
-- Python использовать только как слой сборки prompt-шаблонов и подстановки runtime-контекста.
-
-Режим характера теперь можно менять через env:
+Режим характера задаётся через env:
 
 ```env
 BOT_PERSONALITY_MODE=hard
 ```
 
 Режимы:
-
 - `normal` — дерзкая, но относительно аккуратная
-- `hard` — уверенная, колкая, с уместным матом и нажимом
-- `insane` — максимально наглая, жёсткая и доминирующая версия
-
-Где это лежит сейчас:
-
-- `app/services/prompt_builders.py` — character/system prompt и memory extraction prompt
-- `app/services/ai_service.py` — orchestration, tools, direct poll handling, logging
-- `app/services/memory_provider.py` — извлечение и сборка памяти
+- `hard` — уверенная, колкая, с нажимом (по умолчанию)
+- `insane` — максимально наглая и доминирующая версия
 
 ## Memory Tuning
-
-Новые env-поля для качества памяти:
 
 ```env
 MEMORY_MODEL=
@@ -54,17 +39,13 @@ MEMORY_RETRIEVAL_LIMIT=6
 MEMORY_CAPTURE_ALL_MESSAGES=false
 ```
 
-Идея такая:
-
-- `AI_MODEL` отвечает за диалог
-- `MEMORY_MODEL` можно задать отдельно, если хочешь вынести память на другой более дешевый или более точный модельный слой
-- `MEMORY_FACT_MIN_CONFIDENCE` режет мусорные факты
-- `MEMORY_RETRIEVAL_LIMIT` контролирует, сколько тематической памяти бот тащит в prompt
-- `MEMORY_CAPTURE_ALL_MESSAGES=false` сохраняет память только по сообщениям, на которые бот реально отвечает (экономит токены в фоне)
+- `AI_MODEL` — диалог
+- `MEMORY_MODEL` — можно задать отдельный более дешевый/точный слой
+- `MEMORY_FACT_MIN_CONFIDENCE` — фильтрует мусорные факты
+- `MEMORY_RETRIEVAL_LIMIT` — сколько фактов тащить в prompt
+- `MEMORY_CAPTURE_ALL_MESSAGES=false` — память только по ответам бота (экономит токены)
 
 ## Cost Tuning
-
-Если бот тратит слишком много токенов, начни с этих env:
 
 ```env
 AI_MAX_TOKENS=220
@@ -73,14 +54,6 @@ AI_COMPACT_PROMPT=true
 AI_GROUP_COOLDOWN_SECONDS=12
 AI_MIN_MESSAGE_LEN=4
 ```
-
-Что это даёт:
-
-- меньше длина ответа (`AI_MAX_TOKENS`);
-- меньше истории уходит в каждый запрос (`AI_HISTORY_LINES`);
-- короче системный prompt (`AI_COMPACT_PROMPT`);
-- в группе бот не отвечает на каждую реплику подряд (`AI_GROUP_COOLDOWN_SECONDS`);
-- короткий шум в группе не триггерит LLM без явного упоминания (`AI_MIN_MESSAGE_LEN`).
 
 ## Run Local
 
@@ -97,11 +70,7 @@ Start command:
 uvicorn main:app --host 0.0.0.0 --port $PORT
 ```
 
-Recommended health check:
-
-```text
-/health
-```
+Health check: `/health`
 
 Minimal env:
 
@@ -114,44 +83,8 @@ WEBHOOK_SECRET_TOKEN=some-long-random-string
 OPENAI_API_KEY=...
 ```
 
-## LightRAG
+## Supabase tables
 
-Для внешнего LightRAG:
-
-```env
-MEMORY_PROVIDER=lightrag
-LIGHTRAG_BASE_URL=https://your-lightrag-service.onrender.com
-LIGHTRAG_QUERY_MODE=hybrid
-LIGHTRAG_WORKSPACE=telegram-bot
-MEMORY_SYNC_BATCH_SIZE=5
-MEMORY_SYNC_RETRY_BASE_SECONDS=30
-MEMORY_SYNC_RETRY_MAX_SECONDS=1800
-MEMORY_SYNC_MAX_ATTEMPTS=20
-```
-
-### Durable LightRAG Queue
-
-Если `LightRAG` спит или временно отдаёт `502`, память теперь не теряется:
-
-- transcript сначала пишется в `Supabase` как job в очереди;
-- бот пробует отправить его сразу;
-- если upstream недоступен, job остаётся `pending` и ретраится в фоне;
-- после успеха job помечается как `done`, после слишком многих неудач — как `failed`.
-
-Перед включением `MEMORY_PROVIDER=lightrag` создай таблицу очереди в Supabase:
-
-```sql
--- файл: supabase/memory_sync_queue.sql
-```
-
-Для постоянного учёта реакций и авторов сообщений также нужна таблица:
-
-```sql
--- файл: supabase/message_logs.sql
-```
-
-Для persona-state и новых полей отношений выполни:
-
-```sql
--- файл: supabase/bot_persona_state.sql
-```
+Необходимые таблицы создаются SQL-скриптами в папке `supabase/`:
+- `supabase/message_logs.sql`
+- `supabase/bot_persona_state.sql`
