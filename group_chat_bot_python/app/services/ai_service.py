@@ -997,6 +997,10 @@ class AIService:
             text_match = re.search(r"(?m)^text:\s*(.+)$", current_block)
             if text_match:
                 return text_match.group(1).strip()
+            # Для медиа без text/caption — берём тип как контекст
+            type_match = re.search(r"(?m)^type:\s*(.+)$", current_block)
+            if type_match:
+                return f"[{type_match.group(1).strip()}]"
             return ""
         if "<reply_context>" in user_text:
             return ""
