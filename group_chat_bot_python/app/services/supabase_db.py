@@ -139,7 +139,18 @@ class SupabaseDB:
         return self.reset_expired_warns(self._user_from_row(response.data[0]))
 
     def update_user(self, db_id: int, updates: dict[str, Any]) -> ChatUser | None:
-        result = self._users().update(updates).eq("id", db_id).execute()
+        payload = dict(updates)
+        try:
+            result = self._users().update(payload).eq("id", db_id).execute()
+        except APIError as exc:
+            # Backward compatibility: some deployments do not yet have `last_warn_at`.
+            # Retry once without that field so runtime does not crash on moderation events.
+            if "last_warn_at" in payload and "last_warn_at" in str(exc):
+                payload.pop("last_warn_at", None)
+                result = self._users().update(payload).eq("id", db_id).execute()
+            else:
+                raise
+
         if not result.data:
             return None
         return self._user_from_row(result.data[0])
