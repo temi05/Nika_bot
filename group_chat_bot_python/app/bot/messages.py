@@ -235,7 +235,7 @@ def build_messages_router(bot: Bot, settings: Settings, db: SupabaseDB, ai: AISe
         except Exception as exc:
             print(f"[BOT:get_me_error] chat_id={message.chat.id} error={exc}")
 
-        # Более гибкая проверка имени: реагируем и на полное имя, и на короткое "Ника"
+        # Реагируем только на полное имя бота и @username
         is_mentioned = _message_mentions_bot(text, settings.bot_name, bot_username)
 
         is_reply_to_bot = False
@@ -326,21 +326,7 @@ def _message_mentions_bot(text: str, bot_name: str, username: str | None) -> boo
     if not name:
         return False
 
-    aliases: set[str] = {name}
-    name_tokens = [token for token in re.split(r"[\s_\-]+", name) if token]
-    if len(name_tokens) > 1:
-        aliases.update(token for token in name_tokens if len(token) >= 4)
-
-    if name.startswith("нейро") and len(name) > 5:
-        short = name.replace("нейро", "", 1).strip()
-        if len(short) >= 3:
-            aliases.add(short)
-
-    for alias in aliases:
-        if re.search(rf"(^|\W){re.escape(alias)}($|\W)", normalized, flags=re.IGNORECASE):
-            return True
-
-    return False
+    return bool(re.search(rf"(^|\W){re.escape(name)}($|\W)", normalized, flags=re.IGNORECASE))
 
 
 def _should_grant_xp(message: Message, sender) -> bool:
