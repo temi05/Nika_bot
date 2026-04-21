@@ -293,9 +293,57 @@ def build_messages_router(bot: Bot, settings: Settings, db: SupabaseDB, ai: AISe
                         image_data_urls=image_data_urls,
                     )
             if reply:
-                await message.reply(reply)
+                await _send_ai_reply(bot, message, reply)
 
     return router
+
+
+async def _send_ai_reply(bot: Bot, message: Message, reply: str) -> None:
+    text = (reply or "").strip()
+    if not text:
+        return
+
+    chunks = _split_telegram_text(text)
+    for index, chunk in enumerate(chunks):
+        try:
+            if index == 0:
+                await message.reply(chunk)
+            else:
+                await bot.send_message(message.chat.id, chunk)
+        except Exception as exc:
+            print(
+                "[AI:telegram_send_error] "
+                f"chat_id={message.chat.id} message_id={message.message_id} "
+                f"chunk={index + 1}/{len(chunks)} error={exc}"
+            )
+            try:
+                await bot.send_message(message.chat.id, chunk)
+            except Exception as fallback_exc:
+                print(
+                    "[AI:telegram_send_fallback_error] "
+                    f"chat_id={message.chat.id} message_id={message.message_id} "
+                    f"chunk={index + 1}/{len(chunks)} error={fallback_exc}"
+                )
+
+
+def _split_telegram_text(text: str, limit: int = 4000) -> list[str]:
+    if len(text) <= limit:
+        return [text]
+
+    chunks: list[str] = []
+    remaining = text
+    while remaining:
+        if len(remaining) <= limit:
+            chunks.append(remaining)
+            break
+        split_at = remaining.rfind("\n", 0, limit)
+        if split_at < limit // 2:
+            split_at = remaining.rfind(" ", 0, limit)
+        if split_at < limit // 2:
+            split_at = limit
+        chunks.append(remaining[:split_at].strip())
+        remaining = remaining[split_at:].strip()
+    return [chunk for chunk in chunks if chunk]
 
 
 def _word_in_text(text: str, word: str) -> bool:
