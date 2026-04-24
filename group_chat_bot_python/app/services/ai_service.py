@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import random
 import re
 from collections import defaultdict, deque
 from datetime import datetime, timedelta
@@ -55,6 +56,62 @@ class AIService:
         rendered = f"{sender.display_name}: {text}"
         self.chat_buffers[chat_id].append(rendered)
         self._log("remember", chat_id=chat_id, sender=sender.display_name, text=rendered[:160])
+
+    async def generate_cookie_gift_message(
+        self,
+        chat_id: int,
+        sender_name: str,
+        receiver_name: str,
+        amount: int,
+    ) -> str:
+        """Генерирует умное сообщение при передаче печенек с помощью AI"""
+        if not self.client:
+            # Fallback если нет AI
+            return self._fallback_cookie_message(sender_name, receiver_name, amount)
+
+        # Получаем контекст из чата
+        recent_messages = list(self.chat_buffers[chat_id])[-10:]
+        context = "\n".join(recent_messages) if recent_messages else "Нет истории сообщений"
+
+        prompt = f"""Ты - {self.settings.bot_name}, игривый и умный бот в Telegram группе.
+
+Контекст последних сообщений в чате:
+{context}
+
+Пользователь {sender_name} передал {amount} печенек пользователю {receiver_name}.
+
+Сгенерируй короткое (1-2 предложения), игривое и персонализированное сообщение о передаче печенек. 
+Учитывай контекст чата и характер взаимодействия между пользователями.
+Если есть что-то особенное в контексте - используй это.
+
+Только сообщение, без описания действий."""
+
+        try:
+            response = await self.client.chat.completions.create(
+                model=self.settings.ai_model,
+                messages=[
+                    {"role": "system", "content": prompt},
+                ],
+                max_tokens=100,
+                temperature=0.8,
+            )
+            message = response.choices[0].message.content
+            if message and message.strip():
+                return message.strip()
+        except Exception as e:
+            self._log("cookie_gift_error", error=str(e))
+
+        return self._fallback_cookie_message(sender_name, receiver_name, amount)
+
+    def _fallback_cookie_message(self, sender_name: str, receiver_name: str, amount: int) -> str:
+        """Генерирует простое сообщение без AI"""
+        messages = [
+            f"🍪 {sender_name} передал {amount} печенек {receiver_name}!",
+            f"🎁 {sender_name} поощрил(а) {receiver_name} {amount} печенками!",
+            f"✨ {sender_name} поделился(ась) печеньками с {receiver_name}!",
+            f"💝 {sender_name} сделал(а) приятное {receiver_name} — {amount} печенек!",
+        ]
+        return random.choice(messages)
 
     async def flush_passive_memory(self, chat_id: int) -> None:
         if len(self.chat_buffers[chat_id]) < 20:

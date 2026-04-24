@@ -25,20 +25,28 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
     async def help_command(message: Message) -> None:
         text = (
             "<b>Главное меню бота</b>\n\n"
+            "<b>Профиль:</b>\n"
             "/me — профиль\n"
             "/top — топ активных\n"
             "/daily — ежедневный бонус\n"
-            "/bio &lt;текст&gt; — обновить био\n"
+            "/bio <текст> — обновить био\n"
             "/mybirthday DD.MM[.YYYY] — день рождения\n"
             "/notes [@user] — заметки ИИ\n"
             "/mood — настроение бота\n"
-            "/linkfilter [on|off] — фильтр ссылок\n"
+            "/linkfilter [on|off] — фильтр ссылок\n\n"
+            "<b>Магазин:</b>\n"
             "/shop — магазин печенек\n"
             "/buy 1|2 — купить уровень или снять варны\n"
-            "/give &lt;число&gt; — передать печеньки в реплае\n"
-            "/kto &lt;текст&gt; — выбрать, кто...\n"
-            "/remind &lt;10m|2h|18:30&gt; &lt;текст&gt; — напоминание\n"
-            "/ban, /unban, /banword, /unbanword, /listwords — админ-команды"
+            "/give <число> — передать печеньки в реплае\n\n"
+            "<b>Развлечения:</b>\n"
+            "/rp <действие> — RP-команды (обнять, поцеловать и др.)\n"
+            "/kto <текст> — выбрать, кто...\n"
+            "/remind <10m|2h|18:30> <текст> — напоминание\n\n"
+            "<b>Обратная связь:</b>\n"
+            "/feedback new <категория> <текст> — создать обращение\n"
+            "/feedback list — мои обращения\n\n"
+            "<b>Админ:</b>\n"
+            "/ban, /unban, /banword, /unbanword, /listwords"
         )
         await message.answer(text, parse_mode="HTML")
 
@@ -231,11 +239,15 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
         if not db.transfer_cookies(sender, receiver, amount):
             await message.answer("Не удалось передать печеньки.")
             return
-        await message.answer(
-            f"🍪 <b>{escape_html(sender.display_name)}</b> передал {amount} печенек "
-            f"<b>{escape_html(receiver.display_name)}</b>.",
-            parse_mode="HTML",
+
+        # Генерируем умное сообщение с помощью AI
+        gift_message = await ai.generate_cookie_gift_message(
+            message.chat.id,
+            sender.display_name,
+            receiver.display_name,
+            amount,
         )
+        await message.answer(gift_message, parse_mode="HTML")
 
     @router.message(Command("kto"))
     async def kto_command(message: Message, command: CommandObject) -> None:

@@ -41,6 +41,9 @@ class SupabaseDB:
     def _reminders(self):
         return self.client.table("reminders")
 
+    def _feedback(self):
+        return self.client.table("bot_feedback")
+
     def _persona(self):
         return self.client.table("bot_persona_state")
 
@@ -630,3 +633,68 @@ class SupabaseDB:
 
     def pop_verification(self, user_id: int) -> VerificationChallenge | None:
         return self.pending_verifications.pop(user_id, None)
+
+    # === Feedback (предложения и жалобы) ===
+
+    def create_feedback(self, chat_id: int, user_id: int, user_name: str, category: str, text: str) -> int | None:
+        result = self._safe_execute(
+            self._feedback().insert(
+                {
+                    "chat_id": chat_id,
+                    "user_id": user_id,
+                    "user_name": user_name,
+                    "category": category,
+                    "text": text,
+                    "status": "pending",
+                }
+            ),
+            fallback=None,
+            context=f"create_feedback chat_id={chat_id}",
+        )
+        if result and result.data:
+            return result.data[0]["id"]
+        return None
+
+    def get_user_feedbacks(self, chat_id: int, user_id: int) -> list[dict[str, Any]]:
+        response = self._safe_execute(
+            self._feedback()
+            .select("id,category,text,status,response,created_at")
+            .eq("chat_id", chat_id)
+            .eq("user_id", user_id)
+            .order("created_at", desc=True)
+            .limit(20),
+            fallback=None,
+            context=f"get_user_feedbacks chat_id={chat_id} user_id={user_id}",
+        )
+        if not response or not response.data:
+            return []
+        return [
+            {
+                "id": row["id"],
+                "category": row["category"],
+                "text": row["text"],
+                "status": row["status"],
+                "response": row.get("response"),
+            }
+            for row in response.data
+        ]
+
+    def cancel_feedback(self, chat_id: int, user_id: int, feedback_id: int) -> bool:
+        result = self._safe_execute(
+            self._feedback()
+            .update({"status": "cancelled"})
+            .eq("id", feedback_id)
+            .eq("chat_id", chat_id)
+            .eq("user_id", user_id)
+            .eq("status", "pending"),
+            fallback=None,
+            context=f"cancel_feedback id={feedback_id}",
+        )
+        return bool(result and result.data)
+
+    def add_reputation(self, user: ChatUser, amount: int) -> ChatUser | None:
+        """Добавить или отнять репутацию (печеньки)"""
+        new_rep = user.reputation + amount
+        if new_rep < 0:
+            new_rep = 0
+        return self.update_user(user.id, {"reputation": new_rep})

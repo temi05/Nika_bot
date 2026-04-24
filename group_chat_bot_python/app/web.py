@@ -10,6 +10,8 @@ from fastapi import FastAPI, HTTPException, Request
 from app.bot.admin import build_admin_router
 from app.bot.commands import build_commands_router
 from app.bot.messages import build_messages_router
+from app.bot.rp_commands import build_rp_router
+from app.bot.feedback import build_feedback_router
 from app.config import get_settings
 from app.services.ai_service import AIService
 from app.services.memory_provider import build_memory_provider
@@ -29,6 +31,8 @@ def create_app() -> FastAPI:
     dispatcher.include_router(build_admin_router(bot, db))
     dispatcher.include_router(build_commands_router(db, settings.bot_name, ai_service))
     dispatcher.include_router(build_messages_router(bot, settings, db, ai_service))
+    dispatcher.include_router(build_rp_router(db))
+    dispatcher.include_router(build_feedback_router(db))
 
     reminder_task: asyncio.Task | None = None
 
