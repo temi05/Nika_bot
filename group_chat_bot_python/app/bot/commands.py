@@ -636,7 +636,7 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
             await message.answer(f"❌ Недостаточно печенек! У тебя всего: <b>{sender.reputation}</b> 🍪")
             return
 
-        # Снимаем ставку и берем 1% в джекпот
+        # Налог в джекпот
         chat_settings = db.get_chat_settings(message.chat.id)
         current_jackpot = chat_settings.casino_jackpot
         tax = max(1, bet // 100)
@@ -644,24 +644,25 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
         db.update_chat_settings(message.chat.id, casino_jackpot=current_jackpot + tax)
         current_jackpot += tax
 
-        # Старая добрая анимация
-        frames = [
-            f"🎰 <b>ИГРОК: {escape_html(sender.display_name)}</b>\n💰 Ставка: <code>{bet}</code> 🍪\n🏆 Джекпот: <code>{current_jackpot}</code>\n\n[ 🎲 | 🎲 | 🎲 ]",
-            f"🎰 <b>ИГРОК: {escape_html(sender.display_name)}</b>\n💰 Ставка: <code>{bet}</code> 🍪\n🏆 Джекпот: <code>{current_jackpot}</code>\n\n[ 🍒 | 🍋 | 🍇 ]",
-            f"🎰 <b>ИГРОК: {escape_html(sender.display_name)}</b>\n💰 Ставка: <code>{bet}</code> 🍪\n🏆 Джекпот: <code>{current_jackpot}</code>\n\n[ 🍋 | 🍇 | 🔔 ]",
-            f"🎰 <b>ИГРОК: {escape_html(sender.display_name)}</b>\n💰 Ставка: <code>{bet}</code> 🍪\n🏆 Джекпот: <code>{current_jackpot}</code>\n\n[ 🍇 | 🔔 | 🍉 ]",
-        ]
-        
-        msg = await message.answer(frames[0], parse_mode="HTML")
-        for frame in frames[1:]:
-            await asyncio.sleep(0.4)
-            await msg.edit_text(frame, parse_mode="HTML")
-        await asyncio.sleep(0.5)
-
-        # Вычисляем результат
+        # Символы слотов
         symbols = ["🍒", "🍋", "🍇", "🍉", "🔔", "💎", "🎰"]
         r1, r2, r3 = random.choice(symbols), random.choice(symbols), random.choice(symbols)
         
+        # Анимация "Саспенс"
+        msg = await message.answer(f"🎰 <b>ИГРОК: {escape_html(sender.display_name)}</b>\n💰 Ставка: <code>{bet}</code> 🍪\n🏆 Джекпот: <code>{current_jackpot}</code>\n\n[ 🎲 | 🎲 | 🎲 ]", parse_mode="HTML")
+        await asyncio.sleep(0.5)
+        
+        await msg.edit_text(f"🎰 <b>ИГРОК: {escape_html(sender.display_name)}</b>\n💰 Ставка: <code>{bet}</code> 🍪\n🏆 Джекпот: <code>{current_jackpot}</code>\n\n[ {r1} | 🎲 | 🎲 ]", parse_mode="HTML")
+        await asyncio.sleep(0.5)
+        
+        await msg.edit_text(f"🎰 <b>ИГРОК: {escape_html(sender.display_name)}</b>\n💰 Ставка: <code>{bet}</code> 🍪\n🏆 Джекпот: <code>{current_jackpot}</code>\n\n[ {r1} | {r2} | 🎲 ]", parse_mode="HTML")
+        
+        # Если первые два совпали, делаем паузу длиннее - интрига!
+        if r1 == r2:
+            await asyncio.sleep(1.2)
+        else:
+            await asyncio.sleep(0.5)
+
         final_symbols = f" [ {r1} | {r2} | {r3} ] "
         result_text = ""
         win_total = 0
@@ -713,8 +714,6 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
 
         await msg.edit_text(final_msg, reply_markup=keyboard, parse_mode="HTML")
 
-
-
     @router.callback_query(F.data.startswith("dice_double_"))
     async def casino_double_callback(query: CallbackQuery) -> None:
         parts = query.data.split("_")
@@ -753,19 +752,12 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
             await query.answer("💀 Потрачено", show_alert=True)
 
     def _get_rank_name(level: int) -> str:
-        if level >= 50:
-            return "Легенда"
-        if level >= 30:
-            return "Элита"
-        if level >= 20:
-            return "Мастер"
-        if level >= 10:
-            return "Опытный"
-        if level >= 5:
-            return "Активный"
+        if level >= 50: return "Легенда"
+        if level >= 30: return "Элита"
+        if level >= 20: return "Мастер"
+        if level >= 10: return "Опытный"
+        if level >= 5: return "Активный"
         return "Новичок"
-
-
 
     def _get_tower_multiplier(floor: int) -> float:
         multipliers = [1.0, 1.2, 1.5, 2.0, 3.0, 5.0, 10.0, 25.0, 50.0, 100.0]
@@ -773,16 +765,15 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
         if floor > 10: return 100.0
         return multipliers[floor-1]
 
-    # --- ИГРА: БАШНЯ ФОРТУНЫ (ULTIMATE WEATHER VERSION) ---
-    
+    # --- ИГРА: БАШНЯ ФОРТУНЫ (COMPACT & DYNAMIC VERSION) ---
     _tower_locks = {}
 
     @router.message(Command("tower", "башня", "climb"))
     async def tower_command(message: Message, command: CommandObject) -> None:
         if not command.args or not command.args.strip().isdigit():
             await message.answer(
-                "🏰 <b>Башня Фортуны: ULTIMATE</b>\n\n"
-                "🛡 <b>Пороги:</b> 5 эт. (30%), 8 эт. (60%)\n"
+                "🏰 <b>Башня Фортуны</b>\n\n"
+                "🛡 <b>Чекпоинты:</b> 5 эт. (сохранение 30%), 8 эт. (60%)\n"
                 "Использование: <code>/tower <ставка></code>", 
                 parse_mode="HTML"
             )
@@ -805,22 +796,20 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
             await message.answer(f"❌ Недостаточно печенек! У тебя: {sender.reputation} 🍪")
             return
 
-        # Рандомная погода
         weathers = [
-            {"name": "☀️ Солнечно", "chance_mod": 0, "reward_mod": 1.0, "desc": "Обычное восхождение."},
-            {"name": "🌫 Туман", "chance_mod": 0.05, "reward_mod": 1.3, "desc": "Множители скрыты, но награда +30%!"},
-            {"name": "🌪 Шторм", "chance_mod": -0.15, "reward_mod": 1.7, "desc": "Трудно лезть, но награда x1.7!"},
-            {"name": "🌈 Радуга", "chance_mod": 0.1, "reward_mod": 0.9, "desc": "Легкий подъем, но награда -10%."}
+            {"name": "☀️ Ясно", "chance_mod": 0, "reward_mod": 1.0},
+            {"name": "🌫 Туман", "chance_mod": -0.05, "reward_mod": 1.2},
+            {"name": "🌪 Буря", "chance_mod": -0.15, "reward_mod": 1.5},
+            {"name": "🌈 Попутный ветер", "chance_mod": 0.1, "reward_mod": 0.9}
         ]
         weather = random.choice(weathers)
         
         db.update_user(sender.id, {"reputation": sender.reputation - bet})
-        await _show_tower(message, floor=1, bet=bet, user_id=sender.user_id, is_new=True, weather=weather)
+        await _show_tower(message, floor=1, bet=bet, user_id=sender.user_id, is_new=True, weather=weather, event_msg="Ты у подножия башни.")
 
     @router.callback_query(F.data.startswith("tower_"))
     async def tower_callback(query: CallbackQuery) -> None:
         parts = query.data.split("_")
-        # tower_{action}_{floor}_{bet}_{user_id}_{weather_idx}
         action = parts[1]
         floor = int(parts[2])
         bet = int(parts[3])
@@ -828,10 +817,10 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
         weather_idx = int(parts[5]) if len(parts) > 5 else 0
         
         weathers = [
-            {"name": "☀️ Солнечно", "chance_mod": 0, "reward_mod": 1.0},
-            {"name": "🌫 Туман", "chance_mod": 0.05, "reward_mod": 1.3},
-            {"name": "🌪 Шторм", "chance_mod": -0.15, "reward_mod": 1.7},
-            {"name": "🌈 Радуга", "chance_mod": 0.1, "reward_mod": 0.9}
+            {"name": "☀️ Ясно", "chance_mod": 0, "reward_mod": 1.0},
+            {"name": "🌫 Туман", "chance_mod": -0.05, "reward_mod": 1.2},
+            {"name": "🌪 Буря", "chance_mod": -0.15, "reward_mod": 1.5},
+            {"name": "🌈 Попутный ветер", "chance_mod": 0.1, "reward_mod": 0.9}
         ]
         weather = weathers[weather_idx]
 
@@ -855,36 +844,47 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
             db.update_user(sender.id, {"reputation": sender.reputation + win})
             
             await query.message.edit_text(
-                f"🎉 <b>ЗАБРАЛ ПРИЗ!</b>\n\n"
+                f"🎉 <b>ТЫ ЗАБРАЛ ПРИЗ!</b>\n\n"
                 f"👤 Игрок: <b>{escape_html(sender.display_name)}</b>\n"
-                f"🌤 Погода: <b>{weather['name']}</b>\n"
-                f"🪜 Этажей: <b>{floor}</b>\n"
+                f"🪜 Достигнут этаж: <b>{floor}</b>\n"
                 f"💰 Выигрыш: <b>{win} 🍪</b>\n\n"
                 f"📈 Баланс: <b>{sender.reputation + win}</b> 🍪",
                 parse_mode="HTML"
             )
-            await query.answer("💰 Кошелек пополнен!")
+            await query.answer("💰 Приз в кармане!")
             
         elif action == "up":
             chances = [1.0, 0.9, 0.85, 0.8, 0.75, 0.7, 0.6, 0.5, 0.4, 0.3]
             base_chance = chances[floor-1] if floor <= len(chances) else 0.2
             success_chance = max(0.1, base_chance + weather["chance_mod"])
             
+            # Случайные события (Random Encounters)
+            event_msg = ""
+            if random.random() < 0.15: # 15% шанс на особое событие
+                events = [
+                    ("🎁 Нашел старую заначку! (+10 🍪)", lambda u: db.update_user(u.id, {"reputation": u.reputation + 10})),
+                    ("🪤 Наступил на ловушку! (-5 🍪)", lambda u: db.update_user(u.id, {"reputation": max(0, u.reputation - 5)})),
+                    ("🔮 Загадочная аура...", lambda u: None)
+                ]
+                ev_text, ev_action = random.choice(events)
+                event_msg = ev_text
+                ev_action(sender)
+
             if random.random() < success_chance:
                 new_floor = floor + 1
                 if new_floor > 10:
                     multiplier = _get_tower_multiplier(10) * weather["reward_mod"]
                     win = int(bet * multiplier)
                     db.update_user(sender.id, {"reputation": sender.reputation + win})
-                    await query.message.edit_text(f"🏆 <b>ВЕРШИНА БАШНИ!</b> (x{multiplier:.1f})\n💰 Твой куш: {win} 🍪", parse_mode="HTML")
+                    await query.message.edit_text(f"🏆 <b>ТЫ ПОКОРИЛ ВЕРШИНУ БАШНИ!</b> (x{multiplier:.1f})\n💰 Твой куш: {win} 🍪", parse_mode="HTML")
                     return
 
                 try:
-                    await _show_tower(query.message, floor=new_floor, bet=bet, user_id=original_user_id, is_new=False, weather=weather)
-                    await query.answer("✅ Поднялся!")
+                    await _show_tower(query.message, floor=new_floor, bet=bet, user_id=original_user_id, is_new=False, weather=weather, event_msg=event_msg)
+                    await query.answer("✅ Успешный подъем!")
                 except Exception: pass
             else:
-                # Пороги
+                # Чекпоинты
                 safe_win = 0
                 mult = _get_tower_multiplier(floor) * weather["reward_mod"]
                 if floor >= 8: safe_win = int(bet * mult * 0.6)
@@ -894,53 +894,50 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
                     db.update_user(sender.id, {"reputation": sender.reputation + safe_win})
 
                 await query.message.edit_text(
-                    f"💀 <b>ОШИБКА!</b>\n"
+                    f"💀 <b>ТЫ СОРВАЛСЯ ВНИЗ!</b>\n\n"
                     f"👤 Игрок: <b>{escape_html(sender.display_name)}</b>\n"
-                    f"🪜 Сорвался на {floor + 1} этаже.\n"
-                    f"🛡 Сработала страховка: {safe_win} 🍪\n"
+                    f"🪜 Упал на <b>{floor + 1}</b> этаже.\n"
+                    f"🛡 Сработала страховка: <b>{safe_win}</b> 🍪\n\n"
                     f"📈 Баланс: <b>{sender.reputation + safe_win}</b> 🍪",
                     parse_mode="HTML"
                 )
                 await query.answer("💥 БА-БАХ!", show_alert=True)
 
-    async def _show_tower(msg: Message, floor: int, bet: int, user_id: int, is_new: bool, weather: dict) -> None:
+    async def _show_tower(msg: Message, floor: int, bet: int, user_id: int, is_new: bool, weather: dict, event_msg: str = "") -> None:
         multiplier = _get_tower_multiplier(floor) * weather["reward_mod"]
-        
-        weathers_list = ["☀️ Солнечно", "🌫 Туман", "🌪 Шторм", "🌈 Радуга"]
-        w_idx = 0
-        try: w_idx = weathers_list.index(weather["name"])
-        except: pass
+        weathers_list = ["☀️ Ясно", "🌫 Туман", "🌪 Буря", "🌈 Попутный ветер"]
+        w_idx = weathers_list.index(weather["name"]) if weather["name"] in weathers_list else 0
 
+        # Компактный Радар (показываем только 3 этажа)
         tower_lines = []
-        for i in range(10, 0, -1):
+        for i in range(min(10, floor + 1), max(0, floor - 2), -1):
             m = _get_tower_multiplier(i) * weather["reward_mod"]
-            # В тумане множители скрыты
             m_text = f"x{m:.1f}" if weather["name"] != "🌫 Туман" or i <= floor else "x???"
             
-            if i == floor: line = f"🔥 <b>[{i:02}] {m_text} 🚩 ТЫ ТУТ</b>"
-            elif i < floor: line = f"✅ <code>[{i:02}] {m_text}</code>"
-            else: 
-                prefix = "🪜"
-                if i == 10: prefix = "💎"
-                elif i == 8: prefix = "🥈"
-                elif i == 5: prefix = "🥉"
+            if i == floor:
+                line = f"▶️ <b>[{i:02}] {m_text} 🏃 ТЫ ТУТ</b>"
+            elif i < floor:
+                line = f"✅ <code>[{i:02}] {m_text}</code>"
+            else:
+                prefix = "🪜" if i not in (5, 8, 10) else ("🥉" if i==5 else "🥈" if i==8 else "💎")
                 line = f"{prefix} <code>[{i:02}] {m_text}</code>"
             tower_lines.append(line)
 
         progress = "▰" * floor + "▱" * (10 - floor)
+        event_block = f"\n<i>{event_msg}</i>\n" if event_msg else ""
+        
         text = (
-            f"🏰 <b>БАШНЯ ФОРТУНЫ: ULTIMATE</b>\n"
+            f"🏰 <b>БАШНЯ ФОРТУНЫ</b>\n"
             f"🌤 Погода: <b>{weather['name']}</b>\n"
-            f"<code>{progress}</code> {floor}/10\n\n"
+            f"<code>{progress}</code> {floor}/10\n"
+            f"{event_block}\n"
             + "\n".join(tower_lines) + "\n\n" +
-            f"💰 Ставка: <code>{bet}</code> 🍪\n"
-            f"💵 Куш: <b>{int(bet * multiplier)} 🍪</b>\n"
-            f"<i>Поднимаемся или забираем?</i>"
+            f"💰 Ставка: <code>{bet}</code> 🍪 | 💵 Текущий куш: <b>{int(bet * multiplier)} 🍪</b>\n"
         )
         
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [
-                InlineKeyboardButton(text="⏫ ВВЕРХ", callback_data=f"tower_up_{floor}_{bet}_{user_id}_{w_idx}"),
+                InlineKeyboardButton(text="⏫ ЛЕЗТЬ ДАЛЬШЕ", callback_data=f"tower_up_{floor}_{bet}_{user_id}_{w_idx}"),
                 InlineKeyboardButton(text="💰 ЗАБРАТЬ", callback_data=f"tower_take_{floor}_{bet}_{user_id}_{w_idx}")
             ]
         ])
