@@ -83,6 +83,8 @@ class SupabaseDB:
             last_daily_claim=row.get("last_daily_claim"),
             last_warn_at=row.get("last_warn_at"),
             flavor=row.get("flavor"),
+            debt=int(row.get("debt") or 0),
+            last_loan_at=row.get("last_loan_at"),
         )
 
     def _reminder_from_row(self, row: dict[str, Any]) -> Reminder:
@@ -117,6 +119,7 @@ class SupabaseDB:
             "last_message_time": 0,
             "bio": "",
             "ai_notes": "",
+            "debt": 0,
         }
         created = self._safe_execute(
             self._users().insert(payload),
@@ -204,8 +207,9 @@ class SupabaseDB:
     def apply_message_xp(self, user: ChatUser) -> tuple[ChatUser | None, bool]:
         if user.id <= 0:
             return user, False
-        now_ms = int(time.time() * 1000)
-        if now_ms - user.last_message_time < 60_000:
+        now = int(time.time())
+        # Кулдаун 60 секунд на получение опыта
+        if now - user.last_message_time < 60:
             return user, False
 
         gained = random.randint(15, 25)
@@ -216,9 +220,21 @@ class SupabaseDB:
             level += 1
             level_up = True
 
+        # Проверка долга и штрафы
+        if user.debt > 0 and user.last_loan_at:
+            try:
+                loan_time = datetime.fromisoformat(user.last_loan_at.replace("Z", "+00:00"))
+                if datetime.now(timezone.utc) - loan_time > timedelta(days=1):
+                    # Если долгу больше 24ч, есть 10% шанс потерять 1 печеньку вместо получения опыта
+                    if random.random() < 0.1:
+                        self.update_user(user.id, {"reputation": max(0, user.reputation - 1)})
+                        return user, False
+            except Exception:
+                pass
+
         updated = self.update_user(
             user.id,
-            {"xp": xp, "level": level, "last_message_time": now_ms},
+            {"xp": xp, "level": level, "last_message_time": now},
         )
         return updated, level_up
 

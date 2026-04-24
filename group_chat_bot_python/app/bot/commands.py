@@ -235,21 +235,96 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
         ok, result = db.purchase_item(user, int(command.args.strip()))
         await message.answer(("✅ " if ok else "❌ ") + result)
 
+    @router.message(Command("loan"))
+    async def loan_command(message: Message, command: CommandObject) -> None:
+        if not message.reply_to_message or not command.args or not command.args.strip().isdigit():
+            await message.answer("🤝 <b>Кредитование</b>\n\nИспользование: <code>/loan &lt;сумма&gt;</code> в ответ на сообщение.\n<i>Вы даете в долг свои печеньки. Долг будет записан на получателя.</i>", parse_mode="HTML")
+            return
+            
+        amount = int(command.args.strip())
+        if amount <= 0:
+            await message.answer("Сумма должна быть больше нуля.")
+            return
+
+        sender_data = get_sender_data(message)
+        target_data = get_sender_data(message.reply_to_message)
+        
+        if sender_data.user_id == target_data.user_id:
+            await message.answer("Давать в долг самому себе — это путь к финансовой свободе, но не здесь.")
+            return
+
+        sender = db.get_or_create_user(message.chat.id, sender_data)
+        target = db.get_or_create_user(message.chat.id, target_data)
+        
+        if sender.reputation < amount:
+            await message.answer(f"❌ У тебя нет столько печенек! Баланс: {sender.reputation}")
+            return
+
+        # Переводим печеньки и записываем долг
+        db.update_user(sender.id, {"reputation": sender.reputation - amount})
+        db.update_user(target.id, {
+            "reputation": target.reputation + amount,
+            "debt": target.debt + amount,
+            "last_loan_at": datetime.now(timezone.utc).isoformat()
+        })
+        
+        await message.answer(
+            f"🤝 <b>Сделка совершена!</b>\n\n"
+            f"{escape_html(sender.display_name)} одолжил <b>{amount} 🍪</b> {escape_html(target.display_name)}.\n"
+            f"⚠️ Долг должен быть возвращен командой <code>/repay</code>.",
+            parse_mode="HTML"
+        )
+
+    @router.message(Command("repay"))
+    async def repay_command(message: Message, command: CommandObject) -> None:
+        sender_data = get_sender_data(message)
+        user = db.get_or_create_user(message.chat.id, sender_data)
+        
+        if user.debt <= 0:
+            await message.answer("✅ У тебя нет активных долгов. Ты чист перед законом!")
+            return
+            
+        amount = user.debt
+        if command.args and command.args.strip().isdigit():
+            amount = min(int(command.args.strip()), user.debt)
+            
+        if user.reputation < amount:
+            await message.answer(f"❌ У тебя недостаточно печенек для погашения долга! Нужно <b>{amount} 🍪</b>, а у тебя {user.reputation} 🍪.")
+            return
+            
+        db.update_user(user.id, {
+            "reputation": user.reputation - amount,
+            "debt": user.debt - amount
+        })
+        
+        await message.answer(
+            f"💰 <b>Долг погашен!</b>\n\n"
+            f"Ты вернул <b>{amount} 🍪</b>. Остаток долга: <b>{user.debt - amount} 🍪</b>.",
+            parse_mode="HTML"
+        )
+
     @router.message(Command("give"))
     async def give_command(message: Message, command: CommandObject) -> None:
         if not message.reply_to_message or not command.args or not command.args.strip().isdigit():
-            await message.answer("Использование: /give &lt;число&gt; в ответ на сообщение.", parse_mode="HTML")
+            await message.answer("🎁 <b>Подарок</b>\n\nИспользование: <code>/give &lt;число&gt;</code> в ответ на сообщение.", parse_mode="HTML")
             return
         amount = int(command.args.strip())
         if amount <= 0:
             await message.answer("Сумма должна быть больше нуля.")
             return
 
-        sender = db.get_or_create_user(message.chat.id, get_sender_data(message))
-        receiver = db.get_or_create_user(message.chat.id, get_sender_data(message.reply_to_message))
-        if not db.transfer_cookies(sender, receiver, amount):
-            await message.answer("Не удалось передать печеньки.")
+        sender_data = get_sender_data(message)
+        receiver_data = get_sender_data(message.reply_to_message)
+        
+        sender = db.get_or_create_user(message.chat.id, sender_data)
+        receiver = db.get_or_create_user(message.chat.id, receiver_data)
+        
+        if sender.reputation < amount:
+            await message.answer(f"❌ У тебя нет столько печенек! Баланс: {sender.reputation}")
             return
+            
+        db.update_user(sender.id, {"reputation": sender.reputation - amount})
+        db.update_user(receiver.id, {"reputation": receiver.reputation + amount})
 
         # Генерируем умное сообщение с помощью AI
         gift_message = await ai.generate_cookie_gift_message(

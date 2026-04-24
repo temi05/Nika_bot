@@ -36,6 +36,8 @@ class ChatUser:
     last_daily_claim: str | None = None
     last_warn_at: str | None = None
     flavor: str | None = None
+    debt: int = 0
+    last_loan_at: str | None = None
 
     @property
     def display_name(self) -> str:
