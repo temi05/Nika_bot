@@ -217,23 +217,3 @@ def build_rp_router(db: SupabaseDB) -> Router:
         await message.answer(result, parse_mode="HTML")
 
     return router
-                return
-            # Списываем печеньки
-            db.add_reputation(sender_user, -cost)
-
-        # Формируем результат
-        if action_name == "шепнуть" and extra_phrase:
-            result = action["template"].format(
-                sender=escape_html(sender.display_name),
-                target=escape_html(target.display_name),
-                phrase=escape_html(extra_phrase),
-            )
-        else:
-            result = action["template"].format(
-                sender=escape_html(sender.display_name),
-                target=escape_html(target.display_name),
-            )
-
-        await message.answer(result, parse_mode="HTML")
-
-    return router
