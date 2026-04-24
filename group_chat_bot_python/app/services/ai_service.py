@@ -90,7 +90,8 @@ class AIService:
             response = await self.client.chat.completions.create(
                 model=self.settings.ai_model,
                 messages=[
-                    {"role": "system", "content": prompt},
+                    {"role": "system", "content": "Ты игривый и умный бот. Генерируй только короткий ответ."},
+                    {"role": "user", "content": prompt},
                 ],
                 max_tokens=100,
                 temperature=0.8,
@@ -203,10 +204,27 @@ class AIService:
         images = list(image_data_urls or [])
         history = list(self.chat_buffers[chat_id])[-self.settings.ai_history_lines :]
         current_line = f"{sender.display_name}: {user_text}"
+        # Combine all history into a single 'user' message to avoid consecutive 'user' roles
+        # which causes BAD_REQUEST on some LLM providers (e.g. Together AI).
         messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
-        messages.extend({"role": "user", "content": line} for line in history)
-        if not history or history[-1] != current_line:
-            messages.append({"role": "user", "content": self._build_current_user_content(current_line, images)})
+        
+        last_history_line = history.pop() if history else ""
+        history_text = "\n".join(history)
+        
+        if images:
+            content: list[dict[str, Any]] = []
+            if history_text:
+                content.append({"type": "text", "text": history_text + "\n\n" + last_history_line})
+            else:
+                content.append({"type": "text", "text": last_history_line})
+                
+            for url in images:
+                content.append({"type": "image_url", "image_url": {"url": url}})
+            messages.append({"role": "user", "content": content})
+        else:
+            final_text = (history_text + "\n" + last_history_line).strip() if history_text else last_history_line.strip()
+            if final_text:
+                messages.append({"role": "user", "content": final_text})
 
         try:
             use_tools = len(plain_user_text.strip()) >= 5 and not images
@@ -962,5 +980,6 @@ class AIService:
             )
             raw_text = self._coerce_model_content(response.choices[0].message.content)
             return self._finalize_reply(raw_text, user_text=user_text)
-        except Exception:
+        except Exception as e:
+            self._log("retry_empty_error", error=str(e))
             return ""
