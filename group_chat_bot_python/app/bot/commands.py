@@ -441,7 +441,6 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
             # Отказать может только тот, у кого просили (текущий query.from_user)
             # Но нам не нужно строго проверять, кто нажал "Отказать", если это не сам проситель.
             # Хотя лучше проверить, что это именно тот, у кого просили.
-            # В данном случае, это просто закрывает запрос.
             await query.message.edit_text("❌ В кредите отказано.")
             return
 
@@ -569,76 +568,47 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
             db.add_reputation(sender, amount)
             await message.answer(f"🤫 <b>УСПЕХ!</b> Ты незаметно стащил <b>{amount} 🍪</b> у {escape_html(target.display_name)}.", parse_mode="HTML")
         else: # Failure
-            loss = random.randint(5, 15)
-            db.add_reputation(sender, -loss)
-            await message.answer(f"🚨 <b>ПОЙМАН!</b> {escape_html(target.display_name)} заметил тебя! Ты позорно бежал, потеряв <b>{loss} 🍪</b>.", parse_mode="HTML")
+            db.add_reputation(sender, -2) # Small penalty for being caught
+            await message.answer(f"🤡 <b>ТЕБЯ ПОЙМАЛИ!</b> {escape_html(sender.display_name)} пытался залезть в карман к {escape_html(target.display_name)}, но споткнулся и выронил 2 🍪.")
 
-    @router.message(Command("setflavor"))
+    @router.message(Command("setflavor", "вкус"))
     async def set_flavor_command(message: Message, command: CommandObject) -> None:
         if not command.args:
-            await message.answer("Использование: /setflavor &lt;твой вкус&gt; (например: шоколадная, с мятой, ванильная)", parse_mode="HTML")
+            await message.answer("🍦 <b>Твой вкус</b>\n\nИспользование: <code>/setflavor &lt;вкус&gt;</code>\nПример: <code>/setflavor Шоколадный</code>", parse_mode="HTML")
             return
         sender = get_sender_data(message)
         user = db.get_or_create_user(message.chat.id, sender)
-        flavor = command.args.strip()
-        db.update_user_flavor(user, flavor)
-        await message.answer(f"✨ Теперь твой вкус: <b>{escape_html(flavor)}</b>", parse_mode="HTML")
+        db.update_user(user.id, {"flavor": command.args.strip()})
+        await message.answer(f"✅ Теперь твой вкус: <b>{escape_html(command.args.strip())}</b>", parse_mode="HTML")
 
-    @router.message(Command("cookie_rain"))
+    @router.message(Command("cookie_rain", "дождь"))
     async def rain_command(message: Message) -> None:
-        if not await is_admin(message.bot, message.chat.id, message.from_user.id):
-             await message.answer("❌ Только админ может вызвать печеньковый дождь!")
-             return
-             
-        users = db.get_active_users(message.chat.id, minutes=60, limit=20)
-        if not users:
-            await message.answer("☁️ В чате слишком тихо для дождя. Никого нет.")
+        if not await is_admin(message):
+            await message.answer("❌ Эта магия доступна только администраторам.")
             return
-            
-        rewarded = []
-        total_cookies = 0
-        total_xp = 0
         
-        # Выбираем одного счастливчика
-        lucky_one = random.choice(users)
+        users = db.get_all_users(message.chat.id)
+        if not users: return
         
+        amount = random.randint(5, 15)
         for u in users:
-            is_lucky = (u.user_id == lucky_one.user_id)
-            c = random.randint(2, 5) if is_lucky else random.randint(1, 2)
-            x = random.randint(100, 250) if is_lucky else random.randint(30, 80)
+            db.update_user(u.id, {"reputation": u.reputation + amount})
             
-            db.add_reputation(u, c)
-            db.add_xp(u, x)
-            
-            total_cookies += c
-            total_xp += x
-            
-            name = u.display_name
-            if is_lucky:
-                name = f"🌟 <b>{escape_html(name)}</b>"
-            else:
-                name = escape_html(name)
-            rewarded.append(name)
-            
-        text = (
-            "🍪🌧 <b>ПЕЧЕНЬКОВЫЙ ДОЖДЬ!</b>\n\n"
-            "Небо затянуло сладкими облаками, и на головы посыпались вкусняшки!\n\n"
-            f"🎁 <b>Участники:</b> {', '.join(rewarded)}\n\n"
-            f"📊 <b>Итого:</b> Раздали <b>{total_cookies} 🍪</b> и <b>{total_xp} XP</b>!"
+        await message.answer(
+            f"🌧 <b>ПЕЧЕНЬКОПАД!</b>\n\n"
+            f"Администратор вызвал бурю! Все активные участники ({len(users)}) получили по <b>{amount} 🍪</b>!",
+            parse_mode="HTML"
         )
-        await message.answer(text, parse_mode="HTML")
 
-    @router.message(Command("whisper"))
+    @router.message(Command("whisper", "шепот"))
     async def whisper_command(message: Message, command: CommandObject) -> None:
-        if not await is_admin(message.bot, message.chat.id, message.from_user.id):
-             return
-             
-        if not command.args:
+        if not await is_admin(message):
+            await message.answer("🤫 Тсс... (Только для админов)")
             return
-            
-        # Отправляем сообщение от имени бота и удаляем команду
+        if not command.args: return
+        
         await message.delete()
-        await message.answer(command.args, parse_mode="HTML")
+        await message.answer(command.args)
 
     @router.message(Command("casino", "gamble", "spin", "казино", "ставка"))
     async def casino_command(message: Message, command: CommandObject) -> None:
@@ -654,7 +624,6 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
         sender_data = get_sender_data(message)
         sender = db.get_or_create_user(message.chat.id, sender_data)
         
-        # Проверка кулдауна (20 секунд на казино)
         allowed, remaining = db.can_use_command(message.chat.id, f"casino_{sender.user_id}", 20)
         if not allowed:
             await message.answer(
@@ -667,14 +636,15 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
             await message.answer(f"❌ Недостаточно печенек! У тебя всего: <b>{sender.reputation}</b> 🍪")
             return
 
-        # Снимаем ставку сразу
-        db.update_user(sender.id, {"reputation": sender.reputation - bet})
-        
-        # Получаем настройки чата для Джекпота
+        # Снимаем ставку и берем 1% в джекпот
         chat_settings = db.get_chat_settings(message.chat.id)
         current_jackpot = chat_settings.casino_jackpot
+        tax = max(1, bet // 100)
+        db.update_user(sender.id, {"reputation": sender.reputation - bet})
+        db.update_chat_settings(message.chat.id, casino_jackpot=current_jackpot + tax)
+        current_jackpot += tax
 
-        # Начальная анимация (более быстрая и яркая)
+        # Старая добрая анимация
         frames = [
             f"🎰 <b>ИГРОК: {escape_html(sender.display_name)}</b>\n💰 Ставка: <code>{bet}</code> 🍪\n🏆 Джекпот: <code>{current_jackpot}</code>\n\n[ 🎲 | 🎲 | 🎲 ]",
             f"🎰 <b>ИГРОК: {escape_html(sender.display_name)}</b>\n💰 Ставка: <code>{bet}</code> 🍪\n🏆 Джекпот: <code>{current_jackpot}</code>\n\n[ 🍒 | 🍋 | 🍇 ]",
@@ -688,66 +658,40 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
             await msg.edit_text(frame, parse_mode="HTML")
         await asyncio.sleep(0.5)
 
-        roll = random.randint(1, 1000)
+        # Вычисляем результат
+        symbols = ["🍒", "🍋", "🍇", "🍉", "🔔", "💎", "🎰"]
+        r1, r2, r3 = random.choice(symbols), random.choice(symbols), random.choice(symbols)
         
-        final_symbols = ""
+        final_symbols = f" [ {r1} | {r2} | {r3} ] "
         result_text = ""
-        multiplier = 0
-        consol_xp = 0
+        win_total = 0
         is_jackpot = False
-        
-        if roll <= 480:
-            final_symbols = " [ 💀 | 🍋 | 🍒 ] "
-            consol_xp = random.randint(2, 5)
-            # Добавляем 10% от ставки в джекпот при проигрыше
-            jackpot_add = max(1, bet // 10)
-            db.update_chat_settings(message.chat.id, casino_jackpot=current_jackpot + jackpot_add)
-            result_text = f"💨 <b>НЕУДАЧА!</b> Ты проиграл. <b>{jackpot_add} 🍪</b> ушло в фонд джекпота!\n<i>(Утешительный приз: +{consol_xp} XP)</i>"
-            multiplier = 0
-        elif roll <= 630:
-            final_symbols = " [ 🍋 | 🍋 | 🍋 ] "
-            result_text = f"🔄 <b>ВОЗВРАТ!</b> Ты остался при своих. Никто не проиграл."
-            multiplier = 1
-        elif roll <= 770:
-            final_symbols = " [ 🍒 | 🍒 | 🍒 ] "
-            result_text = f"✨ <b>МАЛЫЙ ВЫИГРЫШ!</b> Получи <b>{int(bet * 1.5)}</b> 🍪."
-            multiplier = 1.5
-        elif roll <= 870:
-            final_symbols = " [ 🍇 | 🍇 | 🍇 ] "
-            result_text = f"🔥 <b>ХОРОШО!</b> Удвоение ставки: <b>{bet * 2}</b> 🍪."
-            multiplier = 2
-        elif roll <= 930:
-            final_symbols = " [ 🍉 | 🍉 | 🍉 ] "
-            result_text = f"🌟 <b>ОТЛИЧНО!</b> Тройной выигрыш: <b>{bet * 3}</b> 🍪."
-            multiplier = 3
-        elif roll <= 965:
-            final_symbols = " [ 🔔 | 🔔 | 🔔 ] "
-            result_text = f"💥 <b>БИГ ВИН!</b> Пятикратный куш: <b>{bet * 5}</b> 🍪!"
-            multiplier = 5
-        elif roll <= 985:
-            final_symbols = " [ ⭐️ | ⭐️ | ⭐️ ] "
-            result_text = f"🌈 <b>СУПЕР ПРИЗ!</b> Огромные <b>{bet * 10}</b> 🍪!"
-            multiplier = 10
-        elif roll <= 996:
-            final_symbols = " [ 💎 | 💎 | 💎 ] "
-            result_text = f"👑 <b>МЕГА КУШ!</b> Королевские <b>{bet * 20}</b> 🍪!"
-            multiplier = 20
-        else:
-            final_symbols = " [ 🏆 | 🏆 | 🏆 ] "
-            # Выплата джекпота!
-            is_jackpot = True
-            win_total = int(bet * 30) + current_jackpot
-            db.update_chat_settings(message.chat.id, casino_jackpot=0)
-            result_text = f"🌌 <b>ЛЕГЕНДАРНЫЙ ДЖЕКПОТ!!!</b>\n\nТы сорвал куш в <b>{win_total}</b> 🍪! 🎉🍾"
-            multiplier = 0 # Чтобы не считало повторно
-        
-        if is_jackpot:
-            # win_total уже рассчитан выше
-            pass
-        else:
-            win_total = int(bet * multiplier)
+        consol_xp = 0
 
-        new_bal = sender.reputation - bet + win_total
+        if r1 == r2 == r3:
+            if r1 == "🎰":
+                is_jackpot = True
+                win_total = int(bet * 50) + current_jackpot
+                db.update_chat_settings(message.chat.id, casino_jackpot=500)
+                result_text = f"🌌 <b>ЛЕГЕНДАРНЫЙ ДЖЕКПОТ!!!</b>\n\nТы сорвал куш в <b>{win_total}</b> 🍪! 🎉🍾"
+            elif r1 == "💎":
+                win_total = bet * 25
+                result_text = "💎 <b>БРИЛЛИАНТОВЫЙ ВЫИГРЫШ!</b> x25!"
+            elif r1 == "🔔":
+                win_total = bet * 15
+                result_text = "🔔 <b>КОЛОКОЛЬНЫЙ ЗВОН!</b> x15!"
+            else:
+                win_total = bet * 10
+                result_text = "✨ <b>ТРИ В РЯД!</b> Отличный выигрыш x10!"
+        elif r1 == r2 or r2 == r3 or r1 == r3:
+            win_total = int(bet * 1.5)
+            result_text = "🥂 <b>ПАРА!</b> Небольшой выигрыш x1.5"
+        else:
+            win_total = 0
+            consol_xp = random.randint(2, 5)
+            result_text = f"💨 <b>НЕУДАЧА!</b> В следующий раз повезет!\n<i>(Утешительный приз: +{consol_xp} XP)</i>"
+
+        new_bal = (sender.reputation - bet) + win_total
         if win_total > 0:
             db.update_user(sender.id, {"reputation": new_bal})
         else:
@@ -769,6 +713,45 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
 
         await msg.edit_text(final_msg, reply_markup=keyboard, parse_mode="HTML")
 
+
+
+    @router.callback_query(F.data.startswith("dice_double_"))
+    async def casino_double_callback(query: CallbackQuery) -> None:
+        parts = query.data.split("_")
+        user_id = int(parts[2])
+        win_amount = int(parts[3])
+        
+        if query.from_user.id != user_id:
+            await query.answer("❌ Это не твой выигрыш!", show_alert=True)
+            return
+
+        sender = db.get_user_by_platform_id(query.message.chat.id, user_id)
+        if not sender: return
+
+        # Double or nothing logic
+        db.update_user(sender.id, {"reputation": sender.reputation - win_amount}) 
+        
+        if random.random() < 0.45: # 45% chance to double
+            new_win = win_amount * 2
+            db.update_user(sender.id, {"reputation": sender.reputation + new_win})
+            await query.message.edit_text(
+                f"🃏 <b>РИСК ОПРАВДАН!</b>\n\n"
+                f"👤 Игрок: <b>{escape_html(sender.display_name)}</b>\n"
+                f"🔥 Ты удвоил куш: <b>{new_win}</b> 🍪!\n"
+                f"📈 Баланс: <b>{sender.reputation - win_amount + new_win}</b> 🍪",
+                parse_mode="HTML"
+            )
+            await query.answer("💰 Удвоено!")
+        else:
+            await query.message.edit_text(
+                f"🃏 <b>РИСК НЕ ОПРАВДАН...</b>\n\n"
+                f"👤 Игрок: <b>{escape_html(sender.display_name)}</b>\n"
+                f"💀 Ты потерял всё: <b>{win_amount}</b> 🍪\n"
+                f"📉 Баланс: <b>{sender.reputation - win_amount}</b> 🍪",
+                parse_mode="HTML"
+            )
+            await query.answer("💀 Потрачено", show_alert=True)
+
     def _get_rank_name(level: int) -> str:
         if level >= 50:
             return "Легенда"
@@ -784,20 +767,22 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
 
 
 
-    # --- ИГРА: БАШНЯ ФОРТУНЫ (ULTIMATE VERSION) ---
+    def _get_tower_multiplier(floor: int) -> float:
+        multipliers = [1.0, 1.2, 1.5, 2.0, 3.0, 5.0, 10.0, 25.0, 50.0, 100.0]
+        if floor < 1: return 1.0
+        if floor > 10: return 100.0
+        return multipliers[floor-1]
+
+    # --- ИГРА: БАШНЯ ФОРТУНЫ (ULTIMATE WEATHER VERSION) ---
     
-    _tower_locks = {} # Простая защита от спама кликами
+    _tower_locks = {}
 
     @router.message(Command("tower", "башня", "climb"))
     async def tower_command(message: Message, command: CommandObject) -> None:
         if not command.args or not command.args.strip().isdigit():
             await message.answer(
                 "🏰 <b>Башня Фортуны: ULTIMATE</b>\n\n"
-                "Рискни печеньками, поднимаясь по этажам!\n\n"
-                "🛡 <b>Особенности:</b>\n"
-                "• <b>Этаж 5</b> — Бронзовый порог (сохраняешь 30% куша при падении)\n"
-                "• <b>Этаж 8</b> — Серебряный порог (сохраняешь 60% куша при падении)\n"
-                "• <b>Этаж 10</b> — Вершина (x100.0!)\n\n"
+                "🛡 <b>Пороги:</b> 5 эт. (30%), 8 эт. (60%)\n"
                 "Использование: <code>/tower <ставка></code>", 
                 parse_mode="HTML"
             )
@@ -807,44 +792,57 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
         sender_data = get_sender_data(message)
         sender = db.get_or_create_user(message.chat.id, sender_data)
         
-        # Тайм-аут (30 секунд)
         allowed, remaining = db.can_use_command(message.chat.id, f"tower_{sender.user_id}", 30)
         if not allowed:
-            await message.answer(
-                f"⏳ <b>Башня восстанавливается...</b>\n"
-                f"Твои альпинисты отдыхают. Подожди <code>{remaining} сек.</code>",
-                parse_mode="HTML"
-            )
+            await message.answer(f"⏳ Башня на отдыхе. Подожди {remaining} сек.", parse_mode="HTML")
             return
 
         if bet < 5:
-            await message.answer("❌ Минимальная ставка: <b>5 🍪</b>")
+            await message.answer("❌ Минимальная ставка: 5 🍪")
             return
             
         if sender.reputation < bet:
-            await message.answer(f"❌ Недостаточно печенек! У тебя: <b>{sender.reputation}</b> 🍪")
+            await message.answer(f"❌ Недостаточно печенек! У тебя: {sender.reputation} 🍪")
             return
 
+        # Рандомная погода
+        weathers = [
+            {"name": "☀️ Солнечно", "chance_mod": 0, "reward_mod": 1.0, "desc": "Обычное восхождение."},
+            {"name": "🌫 Туман", "chance_mod": 0.05, "reward_mod": 1.3, "desc": "Множители скрыты, но награда +30%!"},
+            {"name": "🌪 Шторм", "chance_mod": -0.15, "reward_mod": 1.7, "desc": "Трудно лезть, но награда x1.7!"},
+            {"name": "🌈 Радуга", "chance_mod": 0.1, "reward_mod": 0.9, "desc": "Легкий подъем, но награда -10%."}
+        ]
+        weather = random.choice(weathers)
+        
         db.update_user(sender.id, {"reputation": sender.reputation - bet})
-        await _show_tower(message, floor=1, bet=bet, user_id=sender.user_id, is_new=True)
+        await _show_tower(message, floor=1, bet=bet, user_id=sender.user_id, is_new=True, weather=weather)
 
     @router.callback_query(F.data.startswith("tower_"))
     async def tower_callback(query: CallbackQuery) -> None:
         parts = query.data.split("_")
-        action = parts[1] # "up" or "take"
+        # tower_{action}_{floor}_{bet}_{user_id}_{weather_idx}
+        action = parts[1]
         floor = int(parts[2])
         bet = int(parts[3])
         original_user_id = int(parts[4])
+        weather_idx = int(parts[5]) if len(parts) > 5 else 0
         
+        weathers = [
+            {"name": "☀️ Солнечно", "chance_mod": 0, "reward_mod": 1.0},
+            {"name": "🌫 Туман", "chance_mod": 0.05, "reward_mod": 1.3},
+            {"name": "🌪 Шторм", "chance_mod": -0.15, "reward_mod": 1.7},
+            {"name": "🌈 Радуга", "chance_mod": 0.1, "reward_mod": 0.9}
+        ]
+        weather = weathers[weather_idx]
+
         if query.from_user.id != original_user_id:
-            await query.answer("❌ Это не твой подъем!", show_alert=True)
+            await query.answer("❌ Не твой подъем!", show_alert=True)
             return
             
-        # Защита от Flood Control (лимит 1.2с между кликами)
         now = time.time()
         lock_key = f"{query.message.chat.id}_{query.message.message_id}"
-        if lock_key in _tower_locks and now - _tower_locks[lock_key] < 1.1:
-            await query.answer("⏳ Слишком быстро! Подожди секунду.", show_alert=False)
+        if lock_key in _tower_locks and now - _tower_locks[lock_key] < 0.8:
+            await query.answer("⏳ Подожди секунду...", show_alert=False)
             return
         _tower_locks[lock_key] = now
 
@@ -852,127 +850,102 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
         if not sender: return
 
         if action == "take":
-            multiplier = _get_tower_multiplier(floor)
+            multiplier = _get_tower_multiplier(floor) * weather["reward_mod"]
             win = int(bet * multiplier)
             db.update_user(sender.id, {"reputation": sender.reputation + win})
             
             await query.message.edit_text(
-                f"🎉 <b>ПОБЕДНОЕ ВОСХОЖДЕНИЕ!</b>\n\n"
+                f"🎉 <b>ЗАБРАЛ ПРИЗ!</b>\n\n"
                 f"👤 Игрок: <b>{escape_html(sender.display_name)}</b>\n"
-                f"🪜 Покорено этажей: <b>{floor}</b>\n"
-                f"💰 Выигрыш: <b>{win} 🍪</b> (x{multiplier})\n\n"
-                f"📈 Твой новый баланс: <b>{sender.reputation + win}</b> 🍪",
+                f"🌤 Погода: <b>{weather['name']}</b>\n"
+                f"🪜 Этажей: <b>{floor}</b>\n"
+                f"💰 Выигрыш: <b>{win} 🍪</b>\n\n"
+                f"📈 Баланс: <b>{sender.reputation + win}</b> 🍪",
                 parse_mode="HTML"
             )
-            await query.answer("💰 Забрал куш!")
+            await query.answer("💰 Кошелек пополнен!")
             
         elif action == "up":
-            # Шанс успеха
             chances = [1.0, 0.9, 0.85, 0.8, 0.75, 0.7, 0.6, 0.5, 0.4, 0.3]
-            success_chance = chances[floor-1] if floor <= len(chances) else 0.2
+            base_chance = chances[floor-1] if floor <= len(chances) else 0.2
+            success_chance = max(0.1, base_chance + weather["chance_mod"])
             
             if random.random() < success_chance:
                 new_floor = floor + 1
-                if new_floor > 10: # Вершина достигнута автоматически?
-                    multiplier = _get_tower_multiplier(10)
+                if new_floor > 10:
+                    multiplier = _get_tower_multiplier(10) * weather["reward_mod"]
                     win = int(bet * multiplier)
                     db.update_user(sender.id, {"reputation": sender.reputation + win})
-                    await query.message.edit_text(
-                         f"🏆 <b>ВЕРШИНА МИРА!</b>\n\n"
-                         f"👤 Игрок: <b>{escape_html(sender.display_name)}</b>\n"
-                         f"🔥 Ты покорил 10-й этаж и сорвал джекпот!\n"
-                         f"💰 Выигрыш: <b>{win} 🍪</b> (x{multiplier})\n\n"
-                         f"📈 Баланс: <b>{sender.reputation + win}</b> 🍪",
-                         parse_mode="HTML"
-                    )
+                    await query.message.edit_text(f"🏆 <b>ВЕРШИНА БАШНИ!</b> (x{multiplier:.1f})\n💰 Твой куш: {win} 🍪", parse_mode="HTML")
                     return
 
                 try:
-                    await _show_tower(query.message, floor=new_floor, bet=bet, user_id=original_user_id, is_new=False)
-                    await query.answer("✅ Этаж пройден!")
-                except Exception as e:
-                    if "retry after" in str(e).lower():
-                        await query.answer("⏳ Telegram просит подождать (Flood Control).", show_alert=True)
+                    await _show_tower(query.message, floor=new_floor, bet=bet, user_id=original_user_id, is_new=False, weather=weather)
+                    await query.answer("✅ Поднялся!")
+                except Exception: pass
             else:
-                # Падение. Проверяем безопасные пороги
+                # Пороги
                 safe_win = 0
-                message_suffix = ""
-                if floor >= 8:
-                    safe_win = int(bet * _get_tower_multiplier(floor) * 0.6)
-                    message_suffix = f"\n🛡 <b>Сработал Серебряный порог!</b> Ты сохранил {safe_win} 🍪"
-                elif floor >= 5:
-                    safe_win = int(bet * _get_tower_multiplier(floor) * 0.3)
-                    message_suffix = f"\n🛡 <b>Сработал Бронзовый порог!</b> Ты сохранил {safe_win} 🍪"
+                mult = _get_tower_multiplier(floor) * weather["reward_mod"]
+                if floor >= 8: safe_win = int(bet * mult * 0.6)
+                elif floor >= 5: safe_win = int(bet * mult * 0.3)
 
                 if safe_win > 0:
                     db.update_user(sender.id, {"reputation": sender.reputation + safe_win})
 
                 await query.message.edit_text(
-                    f"💀 <b>ПАДЕНИЕ С ВЫСОТЫ!</b>\n\n"
+                    f"💀 <b>ОШИБКА!</b>\n"
                     f"👤 Игрок: <b>{escape_html(sender.display_name)}</b>\n"
-                    f"🪜 Ты сорвался на <b>{floor + 1} этаже</b>.\n"
-                    f"📉 Проигрыш: <b>{bet} 🍪</b>{message_suffix}\n\n"
+                    f"🪜 Сорвался на {floor + 1} этаже.\n"
+                    f"🛡 Сработала страховка: {safe_win} 🍪\n"
                     f"📈 Баланс: <b>{sender.reputation + safe_win}</b> 🍪",
                     parse_mode="HTML"
                 )
-                await query.answer("💥 ГРАААХ!", show_alert=True)
+                await query.answer("💥 БА-БАХ!", show_alert=True)
 
-    async def _show_tower(msg: Message, floor: int, bet: int, user_id: int, is_new: bool) -> None:
-        multiplier = _get_tower_multiplier(floor)
-        next_mult = _get_tower_multiplier(floor + 1)
+    async def _show_tower(msg: Message, floor: int, bet: int, user_id: int, is_new: bool, weather: dict) -> None:
+        multiplier = _get_tower_multiplier(floor) * weather["reward_mod"]
         
+        weathers_list = ["☀️ Солнечно", "🌫 Туман", "🌪 Шторм", "🌈 Радуга"]
+        w_idx = 0
+        try: w_idx = weathers_list.index(weather["name"])
+        except: pass
+
         tower_lines = []
         for i in range(10, 0, -1):
-            prefix = ""
-            if i == 10: prefix = "💎"
-            elif i == 8: prefix = "🥈"
-            elif i == 5: prefix = "🥉"
-            else: prefix = "🪜"
+            m = _get_tower_multiplier(i) * weather["reward_mod"]
+            # В тумане множители скрыты
+            m_text = f"x{m:.1f}" if weather["name"] != "🌫 Туман" or i <= floor else "x???"
             
-            if i == floor:
-                line = f"🔥 <b>[{i:02}] x{_get_tower_multiplier(i):<4} 🚩 ТЫ ТУТ</b>"
-            elif i < floor:
-                line = f"✅ <code>[{i:02}] x{_get_tower_multiplier(i):<4}</code>"
-            else:
-                line = f"{prefix} <code>[{i:02}] x{_get_tower_multiplier(i):<4}</code>"
+            if i == floor: line = f"🔥 <b>[{i:02}] {m_text} 🚩 ТЫ ТУТ</b>"
+            elif i < floor: line = f"✅ <code>[{i:02}] {m_text}</code>"
+            else: 
+                prefix = "🪜"
+                if i == 10: prefix = "💎"
+                elif i == 8: prefix = "🥈"
+                elif i == 5: prefix = "🥉"
+                line = f"{prefix} <code>[{i:02}] {m_text}</code>"
             tower_lines.append(line)
 
-        tower_visual = "\n".join(tower_lines)
-        
-        current_win = int(bet * multiplier)
-        next_win = int(bet * next_mult)
-        
-        # Индикатор прогресса
         progress = "▰" * floor + "▱" * (10 - floor)
-
         text = (
             f"🏰 <b>БАШНЯ ФОРТУНЫ: ULTIMATE</b>\n"
+            f"🌤 Погода: <b>{weather['name']}</b>\n"
             f"<code>{progress}</code> {floor}/10\n\n"
-            f"{tower_visual}\n\n"
+            + "\n".join(tower_lines) + "\n\n" +
             f"💰 Ставка: <code>{bet}</code> 🍪\n"
-            f"💵 Текущий куш: <b>{current_win} 🍪</b>\n"
-            f"✨ Сл. этаж: <b>{next_win} 🍪</b>\n\n"
-            f"<i>Выше или забираем?</i>"
+            f"💵 Куш: <b>{int(bet * multiplier)} 🍪</b>\n"
+            f"<i>Поднимаемся или забираем?</i>"
         )
         
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [
-                InlineKeyboardButton(text="⏫ ВВЕРХ", callback_data=f"tower_up_{floor}_{bet}_{user_id}"),
-                InlineKeyboardButton(text="💰 ЗАБРАТЬ", callback_data=f"tower_take_{floor}_{bet}_{user_id}")
+                InlineKeyboardButton(text="⏫ ВВЕРХ", callback_data=f"tower_up_{floor}_{bet}_{user_id}_{w_idx}"),
+                InlineKeyboardButton(text="💰 ЗАБРАТЬ", callback_data=f"tower_take_{floor}_{bet}_{user_id}_{w_idx}")
             ]
         ])
         
-        try:
-            if is_new:
-                await msg.answer(text, reply_markup=kb, parse_mode="HTML")
-            else:
-                await msg.edit_text(text, reply_markup=kb, parse_mode="HTML")
-        except Exception:
-            pass # Игнорируем ошибки при слишком частом обновлении
+        if is_new: await msg.answer(text, reply_markup=kb, parse_mode="HTML")
+        else: await msg.edit_text(text, reply_markup=kb, parse_mode="HTML")
 
-    def _get_tower_multiplier(floor: int) -> float:
-        multipliers = [0, 1.2, 1.8, 2.6, 4.0, 6.5, 10.0, 16.0, 25.0, 45.0, 100.0]
-        if floor < len(multipliers):
-            return multipliers[floor]
-        return multipliers[-1]
     return router
