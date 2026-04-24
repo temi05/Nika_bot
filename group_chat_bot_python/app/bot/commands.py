@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import random
+from datetime import datetime, timezone, timedelta
 
 from aiogram import Router, F
 from aiogram.filters import Command, CommandObject
@@ -23,41 +24,86 @@ from app.utils import (
 def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Router:
     router = Router(name="commands")
 
+    HELP_PAGES = {
+        "main": (
+            "✨ <b>Центр управления NeuroNika</b>\n\n"
+            "Выбери категорию команд ниже, чтобы узнать подробности.\n"
+            "Каждый раздел содержит уникальные функции для взаимодействия!"
+        ),
+        "economy": (
+            "🍪 <b>Экономика и Финансы</b>\n\n"
+            "• <code>/me</code> — Твой профиль и баланс\n"
+            "• <code>/daily</code> — Собрать ежедневные печеньки\n"
+            "• <code>/shop</code> — Магазин улучшений\n"
+            "• <code>/give [сумма]</code> — Подарить печеньки (реплаем)\n"
+            "• <code>/loan [сумма]</code> — Предложить в долг (реплаем)\n"
+            "• <code>/ask_loan [сумма]</code> — Попросить в долг (реплаем)\n"
+            "• <code>/repay [сумма]</code> — Вернуть долг\n"
+            "• <code>/steal</code> — Попробовать украсть (реплаем)\n"
+            "• <code>/top</code> — Рейтинг самых богатых"
+        ),
+        "games": (
+            "🎰 <b>Игры и Развлечения</b>\n\n"
+            "• <code>/casino [ставка]</code> — Премиальный слот-автомат\n"
+            "• <code>/kto [текст]</code> — Рандомный выбор участника\n"
+            "• <code>/remind [время] [текст]</code> — Напоминания\n"
+            "• <code>/rp [действие]</code> — Ролевые взаимодействия"
+        ),
+        "profile": (
+            "👤 <b>Персонализация</b>\n\n"
+            "• <code>/setflavor [вкус]</code> — Твой уникальный вкус\n"
+            "• <code>/bio [текст]</code> — Расскажи о себе\n"
+            "• <code>/mybirthday [дата]</code> — Установи день рождения\n"
+            "• <code>/notes</code> — Твоя история в глазах ИИ"
+        ),
+        "admin": (
+            "🛡 <b>Администрирование</b>\n\n"
+            "• <code>/cookie_rain</code> — Массовая раздача бонусов\n"
+            "• <code>/whisper [текст]</code> — Сообщение от имени бота\n"
+            "• <code>/feedbacks</code> — Управление обращениями\n"
+            "• <code>/ban</code> | <code>/mute</code> — Модерация"
+        ),
+        "support": (
+            "✉️ <b>Обратная связь</b>\n\n"
+            "• <code>/feedback new [кат] [текст]</code> — Написать админам\n"
+            "• <code>/feedback list</code> — Твои активные обращения"
+        )
+    }
+
+    def get_help_keyboard():
+        return InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(text="🍪 Экономика", callback_data="help_economy"),
+                InlineKeyboardButton(text="🎰 Игры", callback_data="help_games")
+            ],
+            [
+                InlineKeyboardButton(text="👤 Профиль", callback_data="help_profile"),
+                InlineKeyboardButton(text="🛡 Админ", callback_data="help_admin")
+            ],
+            [
+                InlineKeyboardButton(text="✉️ Поддержка", callback_data="help_support"),
+                InlineKeyboardButton(text="🏠 Главная", callback_data="help_main")
+            ]
+        ])
+
     @router.message(Command("help"))
     async def help_command(message: Message) -> None:
-        text = (
-            "<b>Главное меню бота</b>\n\n"
-            "<b>Профиль:</b>\n"
-            "/me — профиль\n"
-            "/top — топ активных\n"
-            "/daily — ежедневный бонус\n"
-            "/bio &lt;текст&gt; — обновить био\n"
-            "/mybirthday DD.MM[.YYYY] — день рождения\n"
-            "/setflavor &lt;текст&gt; — изменить свой вкус\n"
-            "/notes [@user] — заметки ИИ\n"
-            "/mood — настроение бота\n"
-            "/linkfilter [on|off] — фильтр ссылок\n\n"
-            "<b>Магазин:</b>\n"
-            "/shop — магазин печенек\n"
-            "/buy 1|2 — купить уровень или снять варны\n"
-            "/give &lt;число&gt; — передать печеньки в реплае\n"
-            "/steal — попытка кражи печенек (в реплае)\n\n"
-            "<b>Развлечения:</b>\n"
-            "/casino &lt;сумма&gt; — крутить рулетку (ставка печеньками)\n"
-            "/rp &lt;действие&gt; — RP-команды (обнять, поцеловать и др.)\n"
-            "/kto &lt;текст&gt; — выбрать, кто...\n"
-            "/remind &lt;10m|2h|18:30&gt; &lt;текст&gt; — напоминание\n\n"
-            "<b>Обратная связь:</b>\n"
-            "/feedback new &lt;категория&gt; &lt;текст&gt; — создать обращение\n"
-            "/feedback list — мои обращения\n\n"
-            "<b>Админ:</b>\n"
-            "/cookie_rain — вызвать дождь печенек\n"
-            "/whisper &lt;текст&gt; — сказать от лица бота\n"
-            "/feedbacks — список всех обращений\n"
-            "/delfeedback &lt;id&gt; — удалить обращение\n"
-            "/ban, /unban, /mute"
+        await message.answer(
+            HELP_PAGES["main"],
+            reply_markup=get_help_keyboard(),
+            parse_mode="HTML"
         )
-        await message.answer(text, parse_mode="HTML")
+
+    @router.callback_query(F.data.startswith("help_"))
+    async def help_callback(query: CallbackQuery) -> None:
+        page = query.data.split("_")[1]
+        if page in HELP_PAGES:
+            await query.message.edit_text(
+                HELP_PAGES[page],
+                reply_markup=get_help_keyboard(),
+                parse_mode="HTML"
+            )
+        await query.answer()
 
     @router.message(Command("me"))
     async def me_command(message: Message, command: CommandObject) -> None:
@@ -238,7 +284,7 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
     @router.message(Command("loan"))
     async def loan_command(message: Message, command: CommandObject) -> None:
         if not message.reply_to_message or not command.args or not command.args.strip().isdigit():
-            await message.answer("🤝 <b>Кредитование</b>\n\nИспользование: <code>/loan &lt;сумма&gt;</code> в ответ на сообщение.\n<i>Вы даете в долг свои печеньки. Долг будет записан на получателя.</i>", parse_mode="HTML")
+            await message.answer("🤝 <b>Кредитование</b>\n\nИспользование: <code>/loan &lt;сумма&gt;</code> в ответ на сообщение.\n<i>Вы предлагаете в долг свои печеньки.</i>", parse_mode="HTML")
             return
             
         amount = int(command.args.strip())
@@ -250,17 +296,58 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
         target_data = get_sender_data(message.reply_to_message)
         
         if sender_data.user_id == target_data.user_id:
-            await message.answer("Давать в долг самому себе — это путь к финансовой свободе, но не здесь.")
+            await message.answer("Давать в долг самому себе нельзя.")
             return
 
         sender = db.get_or_create_user(message.chat.id, sender_data)
-        target = db.get_or_create_user(message.chat.id, target_data)
-        
         if sender.reputation < amount:
-            await message.answer(f"❌ У тебя нет столько печенек! Баланс: {sender.reputation}")
+            await message.answer(f"❌ Недостаточно печенек! Баланс: {sender.reputation}")
             return
 
-        # Переводим печеньки и записываем долг
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(text="✅ Принять", callback_data=f"loan_acc_{amount}_{sender.user_id}_{target_data.user_id}"),
+                InlineKeyboardButton(text="❌ Отклонить", callback_data=f"loan_dec_{target_data.user_id}")
+            ]
+        ])
+
+        await message.answer(
+            f"🤝 {escape_html(sender.display_name)} предлагает вам <b>{amount} 🍪</b> в долг.\n\n"
+            f"Вы согласны принять кредит?",
+            reply_markup=keyboard,
+            parse_mode="HTML"
+        )
+
+    @router.callback_query(F.data.startswith("loan_"))
+    async def loan_callback(query: CallbackQuery) -> None:
+        parts = query.data.split("_")
+        action = parts[1]
+        
+        if action == "dec":
+            target_id = int(parts[2])
+            if query.from_user.id != target_id:
+                await query.answer("Это не вам предложили!", show_alert=True)
+                return
+            await query.message.edit_text("❌ Предложение отклонено.")
+            return
+
+        # loan_acc_{amount}_{sender_id}_{target_id}
+        amount = int(parts[2])
+        sender_id = int(parts[3])
+        target_id = int(parts[4])
+        
+        if query.from_user.id != target_id:
+            await query.answer("Это не вам предложили!", show_alert=True)
+            return
+            
+        sender = db.get_user_by_platform_id(query.message.chat.id, sender_id)
+        target = db.get_user_by_platform_id(query.message.chat.id, target_id)
+        
+        if not sender or sender.reputation < amount:
+            await query.message.edit_text("❌ Ошибка: у отправителя больше нет нужной суммы.")
+            return
+            
+        # Выполняем сделку
         db.update_user(sender.id, {"reputation": sender.reputation - amount})
         db.update_user(target.id, {
             "reputation": target.reputation + amount,
@@ -268,12 +355,91 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
             "last_loan_at": datetime.now(timezone.utc).isoformat()
         })
         
-        await message.answer(
+        await query.message.edit_text(
             f"🤝 <b>Сделка совершена!</b>\n\n"
             f"{escape_html(sender.display_name)} одолжил <b>{amount} 🍪</b> {escape_html(target.display_name)}.\n"
             f"⚠️ Долг должен быть возвращен командой <code>/repay</code>.",
             parse_mode="HTML"
         )
+        await query.answer("Кредит получен!")
+
+    @router.message(Command("ask_loan"))
+    async def ask_loan_command(message: Message, command: CommandObject) -> None:
+        if not message.reply_to_message or not command.args or not command.args.strip().isdigit():
+            await message.answer("🙏 <b>Запрос кредита</b>\n\nИспользование: <code>/ask_loan &lt;сумма&gt;</code> в ответ на сообщение того, у кого просите.", parse_mode="HTML")
+            return
+            
+        amount = int(command.args.strip())
+        if amount <= 0:
+            await message.answer("Сумма должна быть больше нуля.")
+            return
+
+        sender_data = get_sender_data(message)
+        target_data = get_sender_data(message.reply_to_message)
+        
+        if sender_data.user_id == target_data.user_id:
+            await message.answer("Просить в долг у самого себя — это интересно, но бесполезно.")
+            return
+
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(text="🤝 Дать в долг", callback_data=f"aloan_yes_{amount}_{sender_data.user_id}_{target_data.user_id}"),
+                InlineKeyboardButton(text="❌ Отказать", callback_data=f"aloan_no_{sender_data.user_id}")
+            ]
+        ])
+
+        await message.answer(
+            f"🙏 {escape_html(sender_data.display_name)} просит у вас <b>{amount} 🍪</b> в долг.\n\n"
+            f"Вы готовы выручить игрока?",
+            reply_markup=keyboard,
+            parse_mode="HTML"
+        )
+
+    @router.callback_query(F.data.startswith("aloan_"))
+    async def ask_loan_callback(query: CallbackQuery) -> None:
+        parts = query.data.split("_")
+        action = parts[1]
+        
+        if action == "no":
+            original_asker_id = int(parts[2])
+            # Отказать может только тот, у кого просили (текущий query.from_user)
+            # Но нам не нужно строго проверять, кто нажал "Отказать", если это не сам проситель.
+            # Хотя лучше проверить, что это именно тот, у кого просили.
+            # В данном случае, это просто закрывает запрос.
+            await query.message.edit_text("❌ В кредите отказано.")
+            return
+
+        # aloan_yes_{amount}_{asker_id}_{lender_id}
+        amount = int(parts[2])
+        asker_id = int(parts[3])
+        lender_id = int(parts[4])
+        
+        if query.from_user.id != lender_id:
+            await query.answer("Просили не у вас!", show_alert=True)
+            return
+            
+        lender = db.get_user_by_platform_id(query.message.chat.id, lender_id)
+        asker = db.get_user_by_platform_id(query.message.chat.id, asker_id)
+        
+        if not lender or lender.reputation < amount:
+            await query.answer(f"❌ У вас недостаточно печенек! Нужно {amount}, а у вас {lender.reputation if lender else 0}.", show_alert=True)
+            return
+            
+        # Выполняем сделку
+        db.update_user(lender.id, {"reputation": lender.reputation - amount})
+        db.update_user(asker.id, {
+            "reputation": asker.reputation + amount,
+            "debt": asker.debt + amount,
+            "last_loan_at": datetime.now(timezone.utc).isoformat()
+        })
+        
+        await query.message.edit_text(
+            f"🤝 <b>Сделка совершена!</b>\n\n"
+            f"{escape_html(lender.display_name)} выручил <b>{amount} 🍪</b> для {escape_html(asker.display_name)}.\n"
+            f"⚠️ Долг записан и должен быть возвращен командой <code>/repay</code>.",
+            parse_mode="HTML"
+        )
+        await query.answer("Вы дали в долг!")
 
     @router.message(Command("repay"))
     async def repay_command(message: Message, command: CommandObject) -> None:

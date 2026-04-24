@@ -66,13 +66,18 @@ def create_app() -> FastAPI:
         )
         
         commands = [
-            BotCommand(command="help", description="Справка по боту"),
-            BotCommand(command="top", description="Топ по печенькам"),
-            BotCommand(command="stats", description="Статистика чата"),
-            BotCommand(command="casino", description="Крутить рулетку"),
-            BotCommand(command="rp", description="Ролевые команды (RP)"),
-            BotCommand(command="feedback", description="Предложения и жалобы"),
-            BotCommand(command="profile", description="Твой профиль"),
+            BotCommand(command="help", description="✨ Главное меню и помощь"),
+            BotCommand(command="me", description="👤 Мой профиль и баланс"),
+            BotCommand(command="daily", description="🍪 Собрать ежедневный бонус"),
+            BotCommand(command="top", description="🏆 Рейтинг участников"),
+            BotCommand(command="casino", description="🎰 Крутить рулетку (ставка)"),
+            BotCommand(command="shop", description="🛒 Магазин печенек"),
+            BotCommand(command="loan", description="🤝 Предложить в долг"),
+            BotCommand(command="ask_loan", description="🙏 Попросить в долг"),
+            BotCommand(command="repay", description="💰 Вернуть долг"),
+            BotCommand(command="give", description="🎁 Подарить печеньки"),
+            BotCommand(command="rp", description="🎭 Ролевые команды (RP)"),
+            BotCommand(command="feedback", description="✉️ Предложения и поддержка"),
         ]
         try:
             await bot.set_my_commands(commands, scope=BotCommandScopeDefault())
