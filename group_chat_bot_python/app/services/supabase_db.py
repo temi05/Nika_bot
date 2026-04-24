@@ -309,7 +309,9 @@ class SupabaseDB:
 
     def get_active_users(self, chat_id: int, minutes: int = 60, limit: int = 20) -> list[ChatUser]:
         """Get users active in the last X minutes"""
-        since = int(time.time()) - (minutes * 60)
+        now = int(time.time())
+        since = now - (minutes * 60)
+        
         response = self._safe_execute(
             self._users()
             .select("*")
@@ -320,9 +322,26 @@ class SupabaseDB:
             fallback=None,
             context=f"get_active_users chat_id={chat_id}",
         )
+        
         if not response or not response.data:
             return []
-        return [self._user_from_row(row) for row in response.data]
+            
+        users = []
+        for row in response.data:
+            user_time = int(row.get("last_message_time") or 0)
+            
+            # Защита от миллисекунд (если число слишком большое, делим на 1000)
+            # 10**11 - это порог, выше которого начинаются миллисекунды для нашего времени
+            if user_time > 10**11:
+                user_time //= 1000
+                # Обновляем в базе, чтобы больше не спотыкаться
+                self._users().update({"last_message_time": user_time}).eq("id", row["id"]).execute()
+            
+            # Финальная проверка: действительно ли это было в пределах окна (на случай если gt не сработал из-за типов)
+            if user_time >= since:
+                users.append(self._user_from_row({**row, "last_message_time": user_time}))
+                
+        return users
 
     def get_all_users(self, chat_id: int) -> list[ChatUser]:
         response = self._safe_execute(
