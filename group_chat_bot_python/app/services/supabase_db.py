@@ -692,6 +692,28 @@ class SupabaseDB:
         )
         return bool(result and result.data)
 
+    def get_all_feedbacks(self, chat_id: int) -> list[dict[str, Any]]:
+        response = self._safe_execute(
+            self._feedback()
+            .select("id,user_name,category,text,status,response,created_at")
+            .eq("chat_id", chat_id)
+            .order("created_at", desc=True)
+            .limit(50),
+            fallback=None,
+            context=f"get_all_feedbacks chat_id={chat_id}",
+        )
+        if not response or not response.data:
+            return []
+        return response.data
+
+    def delete_feedback(self, chat_id: int, feedback_id: int) -> bool:
+        result = self._safe_execute(
+            self._feedback().delete().eq("id", feedback_id).eq("chat_id", chat_id),
+            fallback=None,
+            context=f"delete_feedback id={feedback_id}",
+        )
+        return bool(result and result.data)
+
     def add_reputation(self, user: ChatUser, amount: int) -> ChatUser | None:
         """Добавить или отнять репутацию (печеньки)"""
         new_rep = user.reputation + amount

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
-from aiogram import Router
-from aiogram.filters import Command
+from aiogram import Bot, Router
+from aiogram.filters import Command, CommandObject
 from aiogram.types import Message
+
+from app.bot.admin import is_admin
 
 from app.services.supabase_db import SupabaseDB
 from app.utils import escape_html, get_sender_data
@@ -10,35 +12,43 @@ from app.utils import escape_html, get_sender_data
 
 # Категории предложений и жалоб
 CATEGORIES = {
-    "suggestion": {
+    "идея": {
         "name": "Предложение",
         "emoji": "💡",
         "description": "Новая идея для улучшения бота",
     },
-    "bug": {
+    "баг": {
         "name": "Баг",
         "emoji": "🐛",
         "description": "Ошибка в работе бота",
     },
-    "complaint": {
+    "жалоба": {
         "name": "Жалоба",
         "emoji": "😤",
         "description": "Несправедливое наказание или действие",
     },
-    "feature": {
+    "фича": {
         "name": "Фичреквест",
         "emoji": "✨",
         "description": "Запрос новой функции",
     },
-    "other": {
+    "другое": {
         "name": "Другое",
         "emoji": "💬",
         "description": "Другой вопрос",
     },
 }
 
+CATEGORY_ALIASES = {
+    "suggestion": "идея",
+    "bug": "баг",
+    "complaint": "жалоба",
+    "feature": "фича",
+    "other": "другое",
+    "предложение": "идея",
+}
 
-def build_feedback_router(db: SupabaseDB) -> Router:
+def build_feedback_router(bot: Bot, db: SupabaseDB) -> Router:
     router = Router(name="feedback")
 
     @router.message(Command("feedback"))
@@ -62,9 +72,9 @@ def build_feedback_router(db: SupabaseDB) -> Router:
             lines.extend([
                 "",
                 "<b>Примеры:</b>",
-                "<code>/feedback new bug Бот не отвечает на /top</code>",
-                "<code>/feedback new suggestion Добавить команду обнять</code>",
-                "<code>/feedback new complaint Меня забанили без причины</code>",
+                "<code>/feedback new баг Бот не отвечает на /top</code>",
+                "<code>/feedback new идея Добавить команду обнять</code>",
+                "<code>/feedback new жалоба Меня забанили без причины</code>",
             ])
             await message.answer("\n".join(lines), parse_mode="HTML")
             return
@@ -79,13 +89,52 @@ def build_feedback_router(db: SupabaseDB) -> Router:
             await feedback_cancel(message, args[1])
         elif subcommand == "new" and len(args) >= 3:
             category = args[1].lower()
+            category = CATEGORY_ALIASES.get(category, category)
             text = args[2]
             await feedback_create(message, category, text)
         else:
             await message.answer(
-                "Неверный формат. Пример: /feedback new bug Бот сломался",
+                "Неверный формат. Пример: /feedback new баг Бот сломался",
                 parse_mode="HTML",
             )
+
+    @router.message(Command("feedbacks"))
+    async def feedbacks_command(message: Message) -> None:
+        if not await is_admin(bot, message.chat.id, message.from_user.id):
+            await message.answer("Эта команда доступна только админам.")
+            return
+            
+        all_fb = db.get_all_feedbacks(message.chat.id)
+        if not all_fb:
+            await message.answer("📝 Нет активных обращений.")
+            return
+            
+        lines = ["<b>🛠 Все обращения:</b>\n"]
+        for fb in all_fb:
+            cat = CATEGORIES.get(fb.get("category"), CATEGORIES["другое"])
+            status_emoji = "✅" if fb.get("status") == "resolved" else "⏳" if fb.get("status") == "pending" else "🚫"
+            lines.append(
+                f"{status_emoji} <b>#{fb.get('id')}</b> {cat['emoji']} {cat['name']} от {escape_html(fb.get('user_name', ''))}\n"
+                f"   └ {escape_html(fb.get('text', '')[:100])}"
+            )
+        await message.answer("\n".join(lines), parse_mode="HTML")
+
+    @router.message(Command("delfeedback", "resolvefeedback"))
+    async def delfeedback_command(message: Message, command: CommandObject) -> None:
+        if not await is_admin(bot, message.chat.id, message.from_user.id):
+            await message.answer("Эта команда доступна только админам.")
+            return
+            
+        if not command.args or not command.args.isdigit():
+            await message.answer("Формат: /delfeedback &lt;id&gt;", parse_mode="HTML")
+            return
+            
+        fb_id = int(command.args.strip())
+        success = db.delete_feedback(message.chat.id, fb_id)
+        if success:
+            await message.answer(f"✅ Обращение #{fb_id} удалено (помечено решенным).")
+        else:
+            await message.answer(f"❌ Обращение #{fb_id} не найдено.")
 
     async def feedback_list(message: Message) -> None:
         """Показать список обращений пользователя"""
@@ -98,14 +147,14 @@ def build_feedback_router(db: SupabaseDB) -> Router:
 
         lines = ["<b>📝 Твои обращения</b>\n"]
         for fb in feedbacks:
-            cat = CATEGORIES.get(fb.category, CATEGORIES["other"])
-            status_emoji = "✅" if fb.status == "resolved" else "⏳" if fb.status == "pending" else "🚫"
+            cat = CATEGORIES.get(fb["category"], CATEGORIES["другое"])
+            status_emoji = "✅" if fb["status"] == "resolved" else "⏳" if fb["status"] == "pending" else "🚫"
             lines.append(
-                f"{status_emoji} <b>#{fb.id}</b> {cat['emoji']} {cat['name']}\n"
-                f"   └ {escape_html(fb.text[:100])}"
+                f"{status_emoji} <b>#{fb['id']}</b> {cat['emoji']} {cat['name']}\n"
+                f"   └ {escape_html(fb['text'][:100])}"
             )
-            if fb.response:
-                lines.append(f"   └ Ответ: {escape_html(fb.response[:100])}")
+            if fb.get("response"):
+                lines.append(f"   └ Ответ: {escape_html(fb['response'][:100])}")
         
         await message.answer("\n".join(lines), parse_mode="HTML")
 

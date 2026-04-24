@@ -31,7 +31,7 @@ def create_app() -> FastAPI:
     dispatcher.include_router(build_admin_router(bot, db))
     dispatcher.include_router(build_commands_router(db, settings.bot_name, ai_service))
     dispatcher.include_router(build_rp_router(db))
-    dispatcher.include_router(build_feedback_router(db))
+    dispatcher.include_router(build_feedback_router(bot, db))
     dispatcher.include_router(build_messages_router(bot, settings, db, ai_service))
 
     reminder_task: asyncio.Task | None = None

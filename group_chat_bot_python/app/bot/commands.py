@@ -277,9 +277,11 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
             return
 
         msg = await message.answer("🎰 <b>Крутим барабаны...</b>\n\n[ ❓ | ❓ | ❓ ]", parse_mode="HTML")
-        await asyncio.sleep(1.0)
-        await msg.edit_text("🎰 <b>Крутим барабаны...</b>\n\n[ 🍋 | ❓ | ❓ ]", parse_mode="HTML")
-        await asyncio.sleep(1.0)
+        await asyncio.sleep(0.8)
+        await msg.edit_text("🎰 <b>Крутим барабаны...</b>\n\n[ 🍒 | ❓ | ❓ ]", parse_mode="HTML")
+        await asyncio.sleep(0.8)
+        await msg.edit_text("🎰 <b>Крутим барабаны...</b>\n\n[ 🍒 | 🍋 | ❓ ]", parse_mode="HTML")
+        await asyncio.sleep(0.8)
         
         roll = random.randint(1, 100)
         
