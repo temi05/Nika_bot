@@ -276,15 +276,36 @@ class SupabaseDB:
             "level_up": level_up,
         }
 
-    def get_top_users(self, chat_id: int, limit: int = 10) -> list[ChatUser]:
+    def get_top_users(self, chat_id: int, limit: int = 10, order_by: str = "xp") -> list[ChatUser]:
         response = self._safe_execute(
-            self._users().select("*").eq("chat_id", chat_id).order("xp", desc=True).limit(limit),
+            self._users().select("*").eq("chat_id", chat_id).order(order_by, desc=True).limit(limit),
             fallback=None,
-            context=f"get_top_users chat_id={chat_id}",
+            context=f"get_top_users chat_id={chat_id} order_by={order_by}",
         )
         if not response or not response.data:
             return []
         return [self._user_from_row(row) for row in response.data]
+
+    def get_user_rank(self, chat_id: int, user_id: int, column: str = "xp") -> int:
+        """Получить место пользователя в топе чата по выбранной колонке"""
+        user_resp = self._safe_execute(
+            self._users().select(column).eq("chat_id", chat_id).eq("user_id", user_id).limit(1),
+            fallback=None
+        )
+        if not user_resp or not user_resp.data:
+            return 0
+            
+        value = user_resp.data[0].get(column, 0)
+        
+        # Считаем количество пользователей, у которых значение больше
+        # Используем rpc или просто запрос с count
+        count_resp = self._safe_execute(
+            self._users().select("id", count="exact").eq("chat_id", chat_id).gt(column, value),
+            fallback=None
+        )
+        if count_resp and count_resp.count is not None:
+            return count_resp.count + 1
+        return 0
 
     def get_active_users(self, chat_id: int, minutes: int = 60, limit: int = 20) -> list[ChatUser]:
         """Get users active in the last X minutes"""

@@ -142,23 +142,57 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
         body += f"\n<i>До следующего уровня осталось {max(next_xp - target.xp, 0)} XP</i>"
         await message.answer(body, parse_mode="HTML")
 
-    @router.message(Command("top"))
+    @router.message(Command("top", "лидеры", "рейтинг"))
     async def top_command(message: Message) -> None:
-        users = db.get_top_users(message.chat.id, limit=10)
+        await _show_top(message, "xp")
+
+    @router.callback_query(F.data.startswith("top_"))
+    async def top_callback(query: CallbackQuery) -> None:
+        category = query.data.split("_")[1]
+        await _show_top(query.message, category, is_edit=True)
+        await query.answer()
+
+    async def _show_top(msg: Message, category: str, is_edit: bool = False) -> None:
+        chat_id = msg.chat.id
+        users = db.get_top_users(chat_id, limit=10, order_by=category)
+        
         if not users:
-            await message.answer("В этом чате пока нет активных участников.")
+            text = "✨ <b>Лидеры NeuroNika</b>\n\nВ этом чате пока пусто. Будь первым!"
+            if is_edit:
+                await msg.edit_text(text, parse_mode="HTML")
+            else:
+                await msg.answer(text, parse_mode="HTML")
             return
 
+        title = "🏆 <b>ТОП ПО УРОВНЮ</b>" if category == "xp" else "🍪 <b>ТОП ПО ПЕЧЕНЬКАМ</b>"
         medals = ["🥇", "🥈", "🥉"]
-        lines = ["<b>Топ-10 активных участников</b>", ""]
+        lines = [f"{title}", ""]
+        
         for idx, user in enumerate(users, start=1):
-            prefix = medals[idx - 1] if idx <= 3 else f"{idx}."
-            warns_marker = " ⚠️" if user.warns > 0 else ""
-            lines.append(
-                f"{prefix} <code>{escape_html(user.display_name)}</code>\n"
-                f"   └ <b>Ур. {user.level}</b> | 🍪 {user.reputation}{warns_marker}"
-            )
-        await message.answer("\n".join(lines), parse_mode="HTML")
+            prefix = medals[idx-1] if idx <= 3 else f"{idx}."
+            name = escape_html(user.display_name)
+            if category == "xp":
+                lines.append(f"{prefix} <b>{name}</b> — <code>{user.level} ур.</code> (<i>{user.xp} XP</i>)")
+            else:
+                lines.append(f"{prefix} <b>{name}</b> — <code>{user.reputation} 🍪</code>")
+        
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(text="⭐️ Уровень", callback_data="top_xp"),
+                InlineKeyboardButton(text="🍪 Печеньки", callback_data="top_reputation")
+            ]
+        ])
+
+        footer = "\n\n<i>Обновлено: " + datetime.now().strftime("%H:%M:%S") + "</i>"
+        final_text = "\n".join(lines) + footer
+
+        if is_edit:
+            try:
+                await msg.edit_text(final_text, reply_markup=kb, parse_mode="HTML")
+            except Exception:
+                pass 
+        else:
+            await msg.answer(final_text, reply_markup=kb, parse_mode="HTML")
 
     @router.message(Command("daily"))
     async def daily_command(message: Message) -> None:
