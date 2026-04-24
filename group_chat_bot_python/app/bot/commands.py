@@ -766,6 +766,8 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
                 [InlineKeyboardButton(text="🃏 Рискнуть: Удвоить", callback_data=f"dice_double_{sender.user_id}_{win_total}")]
             ])
 
+        await msg.edit_text(final_msg, reply_markup=keyboard, parse_mode="HTML")
+
     def _get_rank_name(level: int) -> str:
         if level >= 10:
             return "Мастер"
@@ -798,6 +800,43 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
         
         # Начальное состояние: Этаж 1
         await _show_tower(message, floor=1, bet=bet, user_id=sender.user_id, is_new=True)
+
+    @router.callback_query(F.data.startswith("dice_double_"))
+    async def casino_double_callback(query: CallbackQuery) -> None:
+        parts = query.data.split("_")
+        original_user_id = int(parts[2])
+        win_total = int(parts[3])
+        
+        if query.from_user.id != original_user_id:
+            await query.answer("Это не твой выигрыш!", show_alert=True)
+            return
+            
+        sender = db.get_user_by_platform_id(query.message.chat.id, original_user_id)
+        if not sender or win_total <= 0:
+             await query.answer("Ошибка данных.")
+             return
+
+        if random.random() < 0.5:
+            new_win = win_total * 2
+            db.update_user(sender.id, {"reputation": sender.reputation + win_total})
+            await query.message.edit_text(
+                f"🃏 <b>РИСК ОПРАВДАН!</b>\n\n"
+                f"👤 Игрок: <b>{escape_html(sender.display_name)}</b>\n"
+                f"✨ Твой выигрыш удвоился: <b>{new_win} 🍪</b>!\n\n"
+                f"💰 Баланс: <b>{sender.reputation + win_total}</b> 🍪",
+                parse_mode="HTML"
+            )
+            await query.answer("🎉 Удвоено!")
+        else:
+            db.update_user(sender.id, {"reputation": sender.reputation - win_total})
+            await query.message.edit_text(
+                f"🃏 <b>РИСК НЕ ОПРАВДАЛСЯ...</b>\n\n"
+                f"👤 Игрок: <b>{escape_html(sender.display_name)}</b>\n"
+                f"💨 Ты потерял всё, что выиграл в этом спине.\n\n"
+                f"💰 Баланс: <b>{sender.reputation - win_total}</b> 🍪",
+                parse_mode="HTML"
+            )
+            await query.answer("💨 Потрачено", show_alert=True)
 
     @router.callback_query(F.data.startswith("tower_"))
     async def tower_callback(query: CallbackQuery) -> None:
