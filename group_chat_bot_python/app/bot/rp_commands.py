@@ -137,7 +137,7 @@ def build_rp_router(db: SupabaseDB) -> Router:
     async def rp_handler(message: Message, command: CommandObject) -> None:
         """Обработчик команды /rp - показывает справку или выполняет действие"""
         # Если нет аргументов - показываем справку
-        if not command.args:
+        if not command.args or not command.args.strip():
             lines = [
                 "<b>🎭 RP-команды</b>",
                 "Использование: /rp &lt;действие&gt; в ответ на сообщение",

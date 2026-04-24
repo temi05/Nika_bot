@@ -262,27 +262,27 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
             return
 
         sender = db.get_or_create_user(message.chat.id, get_sender_data(message))
-        if sender.cookies < bet:
-            await message.answer(f"Недостаточно печенек! У тебя всего {sender.cookies} 🍪.")
+        if sender.reputation < bet:
+            await message.answer(f"Недостаточно печенек! У тебя всего {sender.reputation} 🍪.")
             return
 
         roll = random.randint(1, 100)
         
         if roll <= 50:
-            db.update_user(sender.id, {"cookies": sender.cookies - bet})
-            await message.answer(f"🎰 Автомат показал 🍒🍋🍉\n\nУвы, ты проиграл {bet} 🍪. Осталось: {sender.cookies - bet} 🍪.")
+            db.update_user(sender.id, {"reputation": sender.reputation - bet})
+            await message.answer(f"🎰 Автомат показал 🍒🍋🍉\n\nУвы, ты проиграл {bet} 🍪. Осталось: {sender.reputation - bet} 🍪.")
         elif roll <= 80:
             win = int(bet * 1.5)
-            db.update_user(sender.id, {"cookies": sender.cookies - bet + win})
-            await message.answer(f"🎰 Автомат показал 🍒🍒🍇\n\nТы выиграл {win} 🍪! Текущий баланс: {sender.cookies - bet + win} 🍪.")
+            db.update_user(sender.id, {"reputation": sender.reputation - bet + win})
+            await message.answer(f"🎰 Автомат показал 🍒🍒🍇\n\nТы выиграл {win} 🍪! Текущий баланс: {sender.reputation - bet + win} 🍪.")
         elif roll <= 95:
             win = bet * 2
-            db.update_user(sender.id, {"cookies": sender.cookies - bet + win})
-            await message.answer(f"🎰 Автомат показал 🍉🍉🍉\n\nУдача! Ты выиграл {win} 🍪! Текущий баланс: {sender.cookies - bet + win} 🍪.")
+            db.update_user(sender.id, {"reputation": sender.reputation - bet + win})
+            await message.answer(f"🎰 Автомат показал 🍉🍉🍉\n\nУдача! Ты выиграл {win} 🍪! Текущий баланс: {sender.reputation - bet + win} 🍪.")
         else:
             win = bet * 5
-            db.update_user(sender.id, {"cookies": sender.cookies - bet + win})
-            await message.answer(f"🎰 Автомат показал 💎💎💎\n\nДЖЕКПОТ! Ты выиграл {win} 🍪! Текущий баланс: {sender.cookies - bet + win} 🍪.")
+            db.update_user(sender.id, {"reputation": sender.reputation - bet + win})
+            await message.answer(f"🎰 Автомат показал 💎💎💎\n\nДЖЕКПОТ! Ты выиграл {win} 🍪! Текущий баланс: {sender.reputation - bet + win} 🍪.")
 
     @router.message(Command("kto"))
     async def kto_command(message: Message, command: CommandObject) -> None:
