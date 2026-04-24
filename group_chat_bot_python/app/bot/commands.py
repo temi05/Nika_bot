@@ -29,7 +29,7 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
             "/me — профиль\n"
             "/top — топ активных\n"
             "/daily — ежедневный бонус\n"
-            "/bio <текст> — обновить био\n"
+            "/bio &lt;текст&gt; — обновить био\n"
             "/mybirthday DD.MM[.YYYY] — день рождения\n"
             "/notes [@user] — заметки ИИ\n"
             "/mood — настроение бота\n"
@@ -37,13 +37,13 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
             "<b>Магазин:</b>\n"
             "/shop — магазин печенек\n"
             "/buy 1|2 — купить уровень или снять варны\n"
-            "/give <число> — передать печеньки в реплае\n\n"
+            "/give &lt;число&gt; — передать печеньки в реплае\n\n"
             "<b>Развлечения:</b>\n"
-            "/rp <действие> — RP-команды (обнять, поцеловать и др.)\n"
-            "/kto <текст> — выбрать, кто...\n"
-            "/remind <10m|2h|18:30> <текст> — напоминание\n\n"
+            "/rp &lt;действие&gt; — RP-команды (обнять, поцеловать и др.)\n"
+            "/kto &lt;текст&gt; — выбрать, кто...\n"
+            "/remind &lt;10m|2h|18:30&gt; &lt;текст&gt; — напоминание\n\n"
             "<b>Обратная связь:</b>\n"
-            "/feedback new <категория> <текст> — создать обращение\n"
+            "/feedback new &lt;категория&gt; &lt;текст&gt; — создать обращение\n"
             "/feedback list — мои обращения\n\n"
             "<b>Админ:</b>\n"
             "/ban, /unban, /banword, /unbanword, /listwords"
@@ -131,7 +131,7 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
     @router.message(Command("bio"))
     async def bio_command(message: Message, command: CommandObject) -> None:
         if not command.args:
-            await message.answer("Использование: /bio <текст>")
+            await message.answer("Использование: /bio &lt;текст&gt;", parse_mode="HTML")
             return
         sender = get_sender_data(message)
         user = db.get_or_create_user(message.chat.id, sender)
@@ -227,7 +227,7 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
     @router.message(Command("give"))
     async def give_command(message: Message, command: CommandObject) -> None:
         if not message.reply_to_message or not command.args or not command.args.strip().isdigit():
-            await message.answer("Использование: /give <число> в ответ на сообщение.")
+            await message.answer("Использование: /give &lt;число&gt; в ответ на сообщение.", parse_mode="HTML")
             return
         amount = int(command.args.strip())
         if amount <= 0:
@@ -252,7 +252,7 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
     @router.message(Command("kto"))
     async def kto_command(message: Message, command: CommandObject) -> None:
         if not command.args:
-            await message.answer("Использование: /kto <текст>")
+            await message.answer("Использование: /kto &lt;текст&gt;", parse_mode="HTML")
             return
         allowed, remaining = db.can_use_command(message.chat.id, "kto", 60)
         if not allowed:
@@ -276,11 +276,11 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
     @router.message(Command("remind"))
     async def remind_command(message: Message, command: CommandObject) -> None:
         if not command.args:
-            await message.answer("Использование: /remind <10m|2h|18:30> <текст>")
+            await message.answer("Использование: /remind &lt;10m|2h|18:30&gt; &lt;текст&gt;", parse_mode="HTML")
             return
         raw = command.args.strip().split(maxsplit=1)
         if len(raw) != 2:
-            await message.answer("Использование: /remind <10m|2h|18:30> <текст>")
+            await message.answer("Использование: /remind &lt;10m|2h|18:30&gt; &lt;текст&gt;", parse_mode="HTML")
             return
         trigger = parse_simple_reminder_time(raw[0])
         if not trigger:

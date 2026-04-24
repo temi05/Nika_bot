@@ -50,7 +50,7 @@ def build_feedback_router(db: SupabaseDB) -> Router:
                 "Предложения и жалобы на работу бота",
                 "",
                 "<b>Команды:</b>",
-                "• /feedback new <категория> <текст> — создать обращение",
+                "• /feedback new &lt;категория&gt; &lt;текст&gt; — создать обращение",
                 "• /feedback list — мои обращения",
                 "• /feedback cancel <id> — отменить обращение",
                 "",
