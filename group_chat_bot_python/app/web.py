@@ -30,9 +30,9 @@ def create_app() -> FastAPI:
 
     dispatcher.include_router(build_admin_router(bot, db))
     dispatcher.include_router(build_commands_router(db, settings.bot_name, ai_service))
-    dispatcher.include_router(build_messages_router(bot, settings, db, ai_service))
     dispatcher.include_router(build_rp_router(db))
     dispatcher.include_router(build_feedback_router(db))
+    dispatcher.include_router(build_messages_router(bot, settings, db, ai_service))
 
     reminder_task: asyncio.Task | None = None
 
@@ -52,8 +52,6 @@ def create_app() -> FastAPI:
                 await asyncio.sleep(60)
         except asyncio.CancelledError:
             pass
-
-
 
     async def configure_webhook() -> None:
         base_url = settings.render_external_url.rstrip("/")

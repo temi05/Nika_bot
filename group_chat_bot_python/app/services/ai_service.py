@@ -622,9 +622,6 @@ class AIService:
             self.db.update_user(target.id, {"reputation": target.reputation + amount})
             return f"Выдано {amount} печенек для {target.display_name}."
 
-        if not caller_is_admin:
-            return "Действия warn, mute и unmute доступны только админам. Отказано."
-
         if action == "warn":
             updated = self.db.apply_warn(target)
             warns = updated.warns if updated else target.warns + 1

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import random
 
 from aiogram import Router
@@ -262,27 +263,51 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
             return
 
         sender = db.get_or_create_user(message.chat.id, get_sender_data(message))
+        
+        allowed, remaining = db.can_use_command(message.chat.id, f"casino_{sender.user_id}", 15)
+        if not allowed:
+            await message.answer(
+                f"⏳ Автомат остывает. Подожди ещё <code>{remaining} сек.</code>",
+                parse_mode="HTML"
+            )
+            return
+
         if sender.reputation < bet:
             await message.answer(f"Недостаточно печенек! У тебя всего {sender.reputation} 🍪.")
             return
 
+        msg = await message.answer("🎰 <b>Крутим барабаны...</b>\n\n[ ❓ | ❓ | ❓ ]", parse_mode="HTML")
+        await asyncio.sleep(1.0)
+        await msg.edit_text("🎰 <b>Крутим барабаны...</b>\n\n[ 🍋 | ❓ | ❓ ]", parse_mode="HTML")
+        await asyncio.sleep(1.0)
+        
         roll = random.randint(1, 100)
         
-        if roll <= 50:
+        if roll <= 45:
             db.update_user(sender.id, {"reputation": sender.reputation - bet})
-            await message.answer(f"🎰 Автомат показал 🍒🍋🍉\n\nУвы, ты проиграл {bet} 🍪. Осталось: {sender.reputation - bet} 🍪.")
-        elif roll <= 80:
+            await msg.edit_text(f"🎰 Автомат остановился:\n\n[ 🍒 | 🍋 | 🍉 ]\n\nУвы, ты проиграл <b>{bet}</b> 🍪.\nОсталось: {sender.reputation - bet} 🍪.", parse_mode="HTML")
+        elif roll <= 60:
+            await msg.edit_text(f"🎰 Автомат остановился:\n\n[ 🍋 | 🍋 | 🍋 ]\n\nВозврат ставки! Ты остался при своих <b>{bet}</b> 🍪.\nБаланс: {sender.reputation} 🍪.", parse_mode="HTML")
+        elif roll <= 75:
             win = int(bet * 1.5)
             db.update_user(sender.id, {"reputation": sender.reputation - bet + win})
-            await message.answer(f"🎰 Автомат показал 🍒🍒🍇\n\nТы выиграл {win} 🍪! Текущий баланс: {sender.reputation - bet + win} 🍪.")
-        elif roll <= 95:
+            await msg.edit_text(f"🎰 Автомат остановился:\n\n[ 🍒 | 🍒 | 🍒 ]\n\nНеплохо! Ты выиграл <b>{win}</b> 🍪!\nТекущий баланс: {sender.reputation - bet + win} 🍪.", parse_mode="HTML")
+        elif roll <= 88:
             win = bet * 2
             db.update_user(sender.id, {"reputation": sender.reputation - bet + win})
-            await message.answer(f"🎰 Автомат показал 🍉🍉🍉\n\nУдача! Ты выиграл {win} 🍪! Текущий баланс: {sender.reputation - bet + win} 🍪.")
-        else:
+            await msg.edit_text(f"🎰 Автомат остановился:\n\n[ 🍇 | 🍇 | 🍇 ]\n\nУдача! Ты выиграл <b>{win}</b> 🍪!\nТекущий баланс: {sender.reputation - bet + win} 🍪.", parse_mode="HTML")
+        elif roll <= 96:
+            win = bet * 3
+            db.update_user(sender.id, {"reputation": sender.reputation - bet + win})
+            await msg.edit_text(f"🎰 Автомат остановился:\n\n[ 🍉 | 🍉 | 🍉 ]\n\nОтлично! Ты утроил ставку: <b>{win}</b> 🍪!\nТекущий баланс: {sender.reputation - bet + win} 🍪.", parse_mode="HTML")
+        elif roll <= 99:
             win = bet * 5
             db.update_user(sender.id, {"reputation": sender.reputation - bet + win})
-            await message.answer(f"🎰 Автомат показал 💎💎💎\n\nДЖЕКПОТ! Ты выиграл {win} 🍪! Текущий баланс: {sender.reputation - bet + win} 🍪.")
+            await msg.edit_text(f"🎰 Автомат остановился:\n\n[ ⭐️ | ⭐️ | ⭐️ ]\n\nСУПЕР ПРИЗ! Ты выиграл <b>{win}</b> 🍪!\nТекущий баланс: {sender.reputation - bet + win} 🍪.", parse_mode="HTML")
+        else:
+            win = bet * 10
+            db.update_user(sender.id, {"reputation": sender.reputation - bet + win})
+            await msg.edit_text(f"🎰 Автомат остановился:\n\n[ 💎 | 💎 | 💎 ]\n\nДЖЕКПОТ!!! 🎉 Ты сорвал куш в <b>{win}</b> 🍪!\nТекущий баланс: {sender.reputation - bet + win} 🍪.", parse_mode="HTML")
 
     @router.message(Command("kto"))
     async def kto_command(message: Message, command: CommandObject) -> None:
