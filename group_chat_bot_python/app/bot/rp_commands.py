@@ -217,48 +217,6 @@ def build_rp_router(db: SupabaseDB) -> Router:
         await message.answer(result, parse_mode="HTML")
 
     return router
-        """Выполнить RP-действие"""
-        if not message.reply_to_message:
-            await message.answer("Использование: /rp &lt;действие&gt; в ответ на сообщение пользователя")
-            return
-
-        if not command.args:
-            await message.answer("Укажи действие: /rp обнять, /rp поцеловать и т.д.")
-            return
-
-        # Парсим команду и текст (для шепнуть)
-        parts = command.args.strip().split(maxsplit=1)
-        action_name = parts[0].lower()
-        extra_phrase = parts[1] if len(parts) > 1 else None
-
-        # Проверяем существование действия
-        if action_name not in RP_ACTIONS:
-            await message.answer(
-                f"Неизвестное действие: <code>{action_name}</code>\n"
-                f"Напиши /rp для списка команд.",
-                parse_mode="HTML",
-            )
-            return
-
-        action = RP_ACTIONS[action_name]
-        sender = get_sender_data(message)
-        target = get_sender_data(message.reply_to_message)
-
-        # Проверка на самого себя
-        if sender.user_id == target.user_id:
-            await message.answer(action["self"])
-            return
-
-        # Проверка стоимости
-        cost = action.get("cost", 0)
-        if cost > 0:
-            sender_user = db.get_or_create_user(message.chat.id, sender)
-            if sender_user.reputation < cost:
-                await message.answer(
-                    f"😔 Нужно {cost} печенек для этого действия. "
-                    f"У тебя: {sender_user.reputation} 🍪",
-                    parse_mode="HTML",
-                )
                 return
             # Списываем печеньки
             db.add_reputation(sender_user, -cost)
