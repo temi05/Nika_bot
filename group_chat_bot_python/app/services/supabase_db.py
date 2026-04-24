@@ -143,6 +143,14 @@ class SupabaseDB:
             return None
         return self.reset_expired_warns(self._user_from_row(response.data[0]))
 
+    def update_last_message_time(self, chat_id: int, user_id: int) -> None:
+        now = int(time.time())
+        self._safe_execute(
+            self._users().update({"last_message_time": now}).eq("chat_id", chat_id).eq("user_id", user_id),
+            fallback=None,
+            context=f"update_last_message_time chat_id={chat_id} user_id={user_id}",
+        )
+
     def update_user(self, db_id: int, updates: dict[str, Any]) -> ChatUser | None:
         payload = dict(updates)
         try:

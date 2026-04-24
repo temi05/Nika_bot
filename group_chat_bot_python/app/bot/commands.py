@@ -3,9 +3,9 @@ from __future__ import annotations
 import asyncio
 import random
 
-from aiogram import Router
+from aiogram import Router, F
 from aiogram.filters import Command, CommandObject
-from aiogram.types import Message
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 
 from app.services.ai_service import AIService
 from app.services.supabase_db import SupabaseDB
@@ -348,62 +348,146 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
     @router.message(Command("casino", "gamble", "spin", "казино", "ставка"))
     async def casino_command(message: Message, command: CommandObject) -> None:
         if not command.args or not command.args.strip().isdigit():
-            await message.answer("Использование: /casino &lt;сумма&gt;", parse_mode="HTML")
+            await message.answer("🎰 <b>Казино NeuroNika</b>\n\nИспользование: <code>/casino &lt;сумма&gt;</code>\nМинимальная ставка: <code>1 🍪</code>", parse_mode="HTML")
             return
             
         bet = int(command.args.strip())
         if bet <= 0:
-            await message.answer("Ставка должна быть больше нуля.")
+            await message.answer("❌ Ставка должна быть больше нуля!")
             return
 
-        sender = db.get_or_create_user(message.chat.id, get_sender_data(message))
+        sender_data = get_sender_data(message)
+        sender = db.get_or_create_user(message.chat.id, sender_data)
         
-        allowed, remaining = db.can_use_command(message.chat.id, f"casino_{sender.user_id}", 15)
+        # Проверка кулдауна (20 секунд на казино)
+        allowed, remaining = db.can_use_command(message.chat.id, f"casino_{sender.user_id}", 20)
         if not allowed:
             await message.answer(
-                f"⏳ Автомат остывает. Подожди ещё <code>{remaining} сек.</code>",
+                f"⏳ <b>Автомат остывает.</b>\nПодожди ещё <code>{remaining} сек.</code>",
                 parse_mode="HTML"
             )
             return
 
         if sender.reputation < bet:
-            await message.answer(f"Недостаточно печенек! У тебя всего {sender.reputation} 🍪.")
+            await message.answer(f"❌ Недостаточно печенек! У тебя всего: <b>{sender.reputation}</b> 🍪")
             return
 
-        msg = await message.answer("🎰 <b>Крутим барабаны...</b>\n\n[ ❓ | ❓ | ❓ ]", parse_mode="HTML")
-        await asyncio.sleep(0.8)
-        await msg.edit_text("🎰 <b>Крутим барабаны...</b>\n\n[ 🍒 | ❓ | ❓ ]", parse_mode="HTML")
-        await asyncio.sleep(0.8)
-        await msg.edit_text("🎰 <b>Крутим барабаны...</b>\n\n[ 🍒 | 🍋 | ❓ ]", parse_mode="HTML")
-        await asyncio.sleep(0.8)
+        # Снимаем ставку сразу
+        db.update_user(sender.id, {"reputation": sender.reputation - bet})
+
+        # Премиальная анимация
+        msg = await message.answer("🎰 <b>КРУТИМ БАРАБАНЫ...</b>\n\n[ 🎲 | 🎲 | 🎲 ]", parse_mode="HTML")
+        await asyncio.sleep(0.6)
+        await msg.edit_text("🎰 <b>КРУТИМ БАРАБАНЫ...</b>\n\n[ 🍋 | 🍒 | 🍇 ]", parse_mode="HTML")
+        await asyncio.sleep(0.6)
+        await msg.edit_text("🎰 <b>КРУТИМ БАРАБАНЫ...</b>\n\n[ 🍇 | 🍋 | 🍉 ]", parse_mode="HTML")
+        await asyncio.sleep(0.6)
         
-        roll = random.randint(1, 100)
+        roll = random.randint(1, 1000)
         
-        if roll <= 45:
-            db.update_user(sender.id, {"reputation": sender.reputation - bet})
-            await msg.edit_text(f"🎰 Автомат остановился:\n\n[ 🍒 | 🍋 | 🍉 ]\n\nУвы, ты проиграл <b>{bet}</b> 🍪.\nОсталось: {sender.reputation - bet} 🍪.", parse_mode="HTML")
-        elif roll <= 60:
-            await msg.edit_text(f"🎰 Автомат остановился:\n\n[ 🍋 | 🍋 | 🍋 ]\n\nВозврат ставки! Ты остался при своих <b>{bet}</b> 🍪.\nБаланс: {sender.reputation} 🍪.", parse_mode="HTML")
-        elif roll <= 75:
-            win = int(bet * 1.5)
-            db.update_user(sender.id, {"reputation": sender.reputation - bet + win})
-            await msg.edit_text(f"🎰 Автомат остановился:\n\n[ 🍒 | 🍒 | 🍒 ]\n\nНеплохо! Ты выиграл <b>{win}</b> 🍪!\nТекущий баланс: {sender.reputation - bet + win} 🍪.", parse_mode="HTML")
-        elif roll <= 88:
-            win = bet * 2
-            db.update_user(sender.id, {"reputation": sender.reputation - bet + win})
-            await msg.edit_text(f"🎰 Автомат остановился:\n\n[ 🍇 | 🍇 | 🍇 ]\n\nУдача! Ты выиграл <b>{win}</b> 🍪!\nТекущий баланс: {sender.reputation - bet + win} 🍪.", parse_mode="HTML")
-        elif roll <= 96:
-            win = bet * 3
-            db.update_user(sender.id, {"reputation": sender.reputation - bet + win})
-            await msg.edit_text(f"🎰 Автомат остановился:\n\n[ 🍉 | 🍉 | 🍉 ]\n\nОтлично! Ты утроил ставку: <b>{win}</b> 🍪!\nТекущий баланс: {sender.reputation - bet + win} 🍪.", parse_mode="HTML")
-        elif roll <= 99:
-            win = bet * 5
-            db.update_user(sender.id, {"reputation": sender.reputation - bet + win})
-            await msg.edit_text(f"🎰 Автомат остановился:\n\n[ ⭐️ | ⭐️ | ⭐️ ]\n\nСУПЕР ПРИЗ! Ты выиграл <b>{win}</b> 🍪!\nТекущий баланс: {sender.reputation - bet + win} 🍪.", parse_mode="HTML")
+        final_symbols = ""
+        result_text = ""
+        multiplier = 0
+        
+        if roll <= 450:
+            final_symbols = " [ 💀 | 🍋 | 🍒 ] "
+            result_text = f"💨 Увы, фортуна отвернулась! Ты потерял <b>{bet}</b> 🍪."
+            multiplier = 0
+        elif roll <= 600:
+            final_symbols = " [ 🍋 | 🍋 | 🍋 ] "
+            result_text = f"🔄 Почти! Возврат ставки. Баланс сохранен."
+            multiplier = 1
+        elif roll <= 750:
+            final_symbols = " [ 🍒 | 🍒 | 🍒 ] "
+            result_text = f"✨ Неплохо! Выигрыш: <b>{int(bet * 1.5)}</b> 🍪."
+            multiplier = 1.5
+        elif roll <= 850:
+            final_symbols = " [ 🍇 | 🍇 | 🍇 ] "
+            result_text = f"🔥 Хорошо идешь! Удвоение: <b>{bet * 2}</b> 🍪."
+            multiplier = 2
+        elif roll <= 920:
+            final_symbols = " [ 🍉 | 🍉 | 🍉 ] "
+            result_text = f"🌟 Отличный улов! Утроение: <b>{bet * 3}</b> 🍪."
+            multiplier = 3
+        elif roll <= 960:
+            final_symbols = " [ 🔔 | 🔔 | 🔔 ] "
+            result_text = f"💥 БИГ ВИН! Пятикратный выигрыш: <b>{bet * 5}</b> 🍪!"
+            multiplier = 5
+        elif roll <= 985:
+            final_symbols = " [ ⭐️ | ⭐️ | ⭐️ ] "
+            result_text = f"🌈 СУПЕР ПРИЗ! Ты получил <b>{bet * 8}</b> 🍪!"
+            multiplier = 8
+        elif roll <= 995:
+            final_symbols = " [ 💎 | 💎 | 💎 ] "
+            result_text = f"👑 МЕГА КУШ! Невероятные <b>{bet * 15}</b> 🍪!"
+            multiplier = 15
         else:
-            win = bet * 10
-            db.update_user(sender.id, {"reputation": sender.reputation - bet + win})
-            await msg.edit_text(f"🎰 Автомат остановился:\n\n[ 💎 | 💎 | 💎 ]\n\nДЖЕКПОТ!!! 🎉 Ты сорвал куш в <b>{win}</b> 🍪!\nТекущий баланс: {sender.reputation - bet + win} 🍪.", parse_mode="HTML")
+            final_symbols = " [ 🏆 | 🏆 | 🏆 ] "
+            result_text = f"🌌 <b>ДЖЕКПОТ!!!</b> Ты сорвал куш в <b>{bet * 30}</b> 🍪! 🎉"
+            multiplier = 30
+
+        win_total = int(bet * multiplier)
+        if win_total > 0:
+            db.update_user(sender.id, {"reputation": sender.reputation - bet + win_total})
+            new_bal = sender.reputation - bet + win_total
+        else:
+            new_bal = sender.reputation - bet
+
+        final_msg = (
+            f"🎰 <b>РЕЗУЛЬТАТЫ СПИНА</b>\n\n"
+            f"<code>{final_symbols}</code>\n\n"
+            f"{result_text}\n"
+            f"💰 Твой баланс: <b>{new_bal}</b> 🍪"
+        )
+        
+        keyboard = None
+        if win_total > 0:
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🃏 Рискнуть: Удвоить или ничего!", callback_data=f"double_{win_total}_{sender.user_id}")]
+            ])
+        
+        await msg.edit_text(final_msg, reply_markup=keyboard, parse_mode="HTML")
+
+    @router.callback_query(F.data.startswith("double_"))
+    async def double_callback(query: CallbackQuery) -> None:
+        parts = query.data.split("_")
+        amount = int(parts[1])
+        original_user_id = int(parts[2])
+        
+        if query.from_user.id != original_user_id:
+            await query.answer("❌ Это не твой выигрыш!", show_alert=True)
+            return
+            
+        # 50/50 шанс
+        if random.random() < 0.5:
+            new_win = amount * 2
+            # Начисляем разницу (потому что amount уже был начислен в casino_command)
+            sender = db.get_user_by_platform_id(query.message.chat.id, query.from_user.id)
+            if sender:
+                db.update_user(sender.id, {"reputation": sender.reputation + amount})
+                new_balance = sender.reputation + amount
+                
+                await query.message.edit_text(
+                    f"🃏 <b>РИСК ОПРАВДАН!</b>\n\n"
+                    f"Ты удвоил свой выигрыш до <b>{new_win}</b> 🍪!\n"
+                    f"💰 Новый баланс: <b>{new_balance}</b> 🍪",
+                    parse_mode="HTML"
+                )
+        else:
+            # Вычитаем выигрыш (потому что amount уже был начислен в casino_command)
+            sender = db.get_user_by_platform_id(query.message.chat.id, query.from_user.id)
+            if sender:
+                db.update_user(sender.id, {"reputation": sender.reputation - amount})
+                new_balance = sender.reputation - amount
+                
+                await query.message.edit_text(
+                    f"🃏 <b>УВЫ, ВСЁ ПОТЕРЯНО!</b>\n\n"
+                    f"Ты проиграл свои <b>{amount}</b> 🍪 в попытке удвоить.\n"
+                    f"💰 Новый баланс: <b>{new_balance}</b> 🍪",
+                    parse_mode="HTML"
+                )
+        
+        await query.answer()
 
     @router.message(Command("kto"))
     async def kto_command(message: Message, command: CommandObject) -> None:
