@@ -375,23 +375,31 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
         # Снимаем ставку сразу
         db.update_user(sender.id, {"reputation": sender.reputation - bet})
 
-        # Премиальная анимация
-        msg = await message.answer("🎰 <b>КРУТИМ БАРАБАНЫ...</b>\n\n[ 🎲 | 🎲 | 🎲 ]", parse_mode="HTML")
-        await asyncio.sleep(0.6)
-        await msg.edit_text("🎰 <b>КРУТИМ БАРАБАНЫ...</b>\n\n[ 🍋 | 🍒 | 🍇 ]", parse_mode="HTML")
-        await asyncio.sleep(0.6)
-        await msg.edit_text("🎰 <b>КРУТИМ БАРАБАНЫ...</b>\n\n[ 🍇 | 🍋 | 🍉 ]", parse_mode="HTML")
-        await asyncio.sleep(0.6)
+        # Начальная анимация
+        frames = [
+            f"🎰 <b>ИГРОК: {escape_html(sender.display_name)}</b>\n\n[ 🎲 | 🎲 | 🎲 ]\n\n💰 Ставка: <code>{bet}</code> 🍪",
+            f"🎰 <b>ИГРОК: {escape_html(sender.display_name)}</b>\n\n[ 🍋 | 🍒 | 🍇 ]\n\n💰 Ставка: <code>{bet}</code> 🍪",
+            f"🎰 <b>ИГРОК: {escape_html(sender.display_name)}</b>\n\n[ 🍇 | 🍋 | 🍉 ]\n\n💰 Ставка: <code>{bet}</code> 🍪",
+        ]
         
+        msg = await message.answer(frames[0], parse_mode="HTML")
+        await asyncio.sleep(0.6)
+        await msg.edit_text(frames[1], parse_mode="HTML")
+        await asyncio.sleep(0.6)
+        await msg.edit_text(frames[2], parse_mode="HTML")
+        await asyncio.sleep(0.6)
+
         roll = random.randint(1, 1000)
         
         final_symbols = ""
         result_text = ""
         multiplier = 0
+        consol_xp = 0
         
         if roll <= 450:
             final_symbols = " [ 💀 | 🍋 | 🍒 ] "
-            result_text = f"💨 Увы, фортуна отвернулась! Ты потерял <b>{bet}</b> 🍪."
+            consol_xp = random.randint(1, 3)
+            result_text = f"💨 Увы, фортуна отвернулась! Ты потерял <b>{bet}</b> 🍪.\n<i>(Утешительный приз: +{consol_xp} XP)</i>"
             multiplier = 0
         elif roll <= 600:
             final_symbols = " [ 🍋 | 🍋 | 🍋 ] "
@@ -431,10 +439,12 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
             db.update_user(sender.id, {"reputation": sender.reputation - bet + win_total})
             new_bal = sender.reputation - bet + win_total
         else:
+            db.update_user(sender.id, {"reputation": sender.reputation - bet, "xp": sender.xp + consol_xp})
             new_bal = sender.reputation - bet
 
         final_msg = (
-            f"🎰 <b>РЕЗУЛЬТАТЫ СПИНА</b>\n\n"
+            f"🎰 <b>РЕЗУЛЬТАТЫ СПИНА</b>\n"
+            f"👤 Игрок: <b>{escape_html(sender.display_name)}</b>\n\n"
             f"<code>{final_symbols}</code>\n\n"
             f"{result_text}\n"
             f"💰 Твой баланс: <b>{new_bal}</b> 🍪"
@@ -468,7 +478,8 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
                 new_balance = sender.reputation + amount
                 
                 await query.message.edit_text(
-                    f"🃏 <b>РИСК ОПРАВДАН!</b>\n\n"
+                    f"🃏 <b>РИСК ОПРАВДАН!</b>\n"
+                    f"👤 Игрок: <b>{escape_html(sender.display_name)}</b>\n\n"
                     f"Ты удвоил свой выигрыш до <b>{new_win}</b> 🍪!\n"
                     f"💰 Новый баланс: <b>{new_balance}</b> 🍪",
                     parse_mode="HTML"
@@ -481,7 +492,8 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
                 new_balance = sender.reputation - amount
                 
                 await query.message.edit_text(
-                    f"🃏 <b>УВЫ, ВСЁ ПОТЕРЯНО!</b>\n\n"
+                    f"🃏 <b>УВЫ, ВСЁ ПОТЕРЯНО!</b>\n"
+                    f"👤 Игрок: <b>{escape_html(sender.display_name)}</b>\n\n"
                     f"Ты проиграл свои <b>{amount}</b> 🍪 в попытке удвоить.\n"
                     f"💰 Новый баланс: <b>{new_balance}</b> 🍪",
                     parse_mode="HTML"
