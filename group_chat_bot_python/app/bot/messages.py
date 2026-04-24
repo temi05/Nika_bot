@@ -256,14 +256,14 @@ def build_messages_router(bot: Bot, settings: Settings, db: SupabaseDB, ai: AISe
                 is_reply_to_bot = reply_username == bot_username.lower()
 
         # ЛОГИ ДЛЯ ОТЛАДКИ (появятся в Render)
-        print(f"🔍 [DEBUG] Msg from {sender.display_name}: mentioned={is_mentioned}, reply_to_bot={is_reply_to_bot}")
-        if is_reply_to_bot:
-            print(f"   └ Bot ID: {bot_id}, Reply to User ID: {message.reply_to_message.from_user.id}")
-
+        print(f"🔍 [DEBUG] Msg: '{text[:50]}', mentioned={is_mentioned}, reply_to_bot={is_reply_to_bot}")
+        
         if ai_input_text:
             caller_is_admin = await _message_sender_is_admin(bot, message, sender)
             is_private_chat = message.chat.type == "private"
             should_reply = is_private_chat or is_reply_to_bot or is_mentioned
+            
+            print(f"🔍 [DEBUG] should_reply={should_reply}, is_private={is_private_chat}")
             should_capture_memory = (
                 settings.memory_capture_all_messages
                 or should_reply
@@ -276,6 +276,7 @@ def build_messages_router(bot: Bot, settings: Settings, db: SupabaseDB, ai: AISe
                     print(f"[AI:flush_memory_error] chat_id={message.chat.id} error={exc}")
             reply = None
             if should_reply:
+                print(f"🤖 [AI] Starting generation for chat {message.chat.id}...")
                 image_data_urls = []
                 if settings.ai_vision_enabled:
                     image_data_urls = await _build_ai_image_inputs(
@@ -285,21 +286,34 @@ def build_messages_router(bot: Bot, settings: Settings, db: SupabaseDB, ai: AISe
                         max_bytes=max(0, settings.ai_vision_max_bytes),
                     )
                 async with ChatActionSender.typing(bot=bot, chat_id=message.chat.id):
-                    reply = await ai.generate_reply(
-                        message.chat.id,
-                        sender,
-                        ai_input_text,
-                        is_reply_to_bot,
-                        is_mentioned,
-                        caller_is_admin,
-                        is_private_chat=is_private_chat,
-                        image_data_urls=image_data_urls,
-                    )
+                    try:
+                        reply = await asyncio.wait_for(
+                            ai.generate_reply(
+                                message.chat.id,
+                                sender,
+                                ai_input_text,
+                                is_reply_to_bot,
+                                is_mentioned,
+                                caller_is_admin,
+                                is_private_chat=is_private_chat,
+                                image_data_urls=image_data_urls,
+                            ),
+                            timeout=25.0
+                        )
+                    except asyncio.TimeoutError:
+                        print(f"❌ [AI] Timeout in chat {message.chat.id}")
+                        reply = "Прости, я слишком долго думала и запуталась в своих мыслях. Попробуй ещё раз!"
+                    except Exception as e:
+                        print(f"❌ [AI] Crash in chat {message.chat.id}: {e}")
+                        reply = "Ой, что-то пошло не так в моих схемах. Давай попробуем позже."
+                print(f"🤖 [AI] Generation finished. Reply length: {len(reply) if reply else 0}")
             
             if should_reply and not reply:
+                print("⚠️ [AI] Empty reply, using fallback.")
                 reply = "Я что-то задумалась и потеряла нить разговора... Можешь повторить?"
 
             if reply:
+                print(f"✉️ [AI] Sending reply to chat {message.chat.id}...")
                 await _send_ai_reply(bot, message, reply)
 
     return router
