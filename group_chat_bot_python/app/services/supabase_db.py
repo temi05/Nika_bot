@@ -290,7 +290,12 @@ class SupabaseDB:
         """Get users active in the last X minutes"""
         since = int(time.time()) - (minutes * 60)
         response = self._safe_execute(
-            self._users().select("*").eq("chat_id", chat_id).gt("last_message_time", since).limit(limit),
+            self._users()
+            .select("*")
+            .eq("chat_id", chat_id)
+            .gt("last_message_time", since)
+            .order("last_message_time", desc=True)
+            .limit(limit),
             fallback=None,
             context=f"get_active_users chat_id={chat_id}",
         )
@@ -316,18 +321,30 @@ class SupabaseDB:
         )
         if response and response.data:
             row = response.data[0]
-            return ChatSettings(chat_id=chat_id, link_filter_enabled=bool(row.get("link_filter_enabled", True)))
+            return ChatSettings(
+                chat_id=chat_id, 
+                link_filter_enabled=bool(row.get("link_filter_enabled", True)),
+                casino_jackpot=int(row.get("casino_jackpot", 0))
+            )
 
         created = self._safe_execute(
             self._chats().insert(
-                {"chat_id": chat_id, "link_filter_enabled": self.settings.link_filter_default}
+                {
+                    "chat_id": chat_id, 
+                    "link_filter_enabled": self.settings.link_filter_default,
+                    "casino_jackpot": 0
+                }
             ),
             fallback=None,
             context=f"get_chat_settings.insert chat_id={chat_id}",
         )
         if created and created.data:
             row = created.data[0]
-            return ChatSettings(chat_id=chat_id, link_filter_enabled=bool(row.get("link_filter_enabled", True)))
+            return ChatSettings(
+                chat_id=chat_id, 
+                link_filter_enabled=bool(row.get("link_filter_enabled", True)),
+                casino_jackpot=int(row.get("casino_jackpot", 0))
+            )
 
         # Safe fallback when DB is temporarily unavailable.
         return ChatSettings(chat_id=chat_id, link_filter_enabled=self.settings.link_filter_default)

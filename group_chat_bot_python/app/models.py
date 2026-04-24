@@ -48,6 +48,7 @@ class ChatUser:
 class ChatSettings:
     chat_id: int
     link_filter_enabled: bool = True
+    casino_jackpot: int = 0
 
 
 @dataclass(slots=True)

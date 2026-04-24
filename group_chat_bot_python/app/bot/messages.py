@@ -232,8 +232,7 @@ def build_messages_router(bot: Bot, settings: Settings, db: SupabaseDB, ai: AISe
                 lines.append("<i>Желаем море печенек и высокого уровня во всём!</i>")
                 await message.answer("\n".join(lines), parse_mode="HTML")
             db.last_birthday_check[message.chat.id] = today_key
-        # Обновляем время последнего сообщения для системы "Активности"
-        db.update_last_message_time(message.chat.id, sender.user_id)
+        # Обновляем время последнего сообщения теперь через middleware в web.py
 
         bot_username = settings.bot_username
         bot_id = None

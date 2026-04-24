@@ -34,6 +34,14 @@ def create_app() -> FastAPI:
     dispatcher.include_router(build_feedback_router(bot, db))
     dispatcher.include_router(build_messages_router(bot, settings, db, ai_service))
 
+    @dispatcher.message.outer_middleware()
+    async def activity_middleware(handler, event, data):
+        # Обновляем время активности при каждом сообщении
+        db = data.get("db")
+        if db and event.from_user:
+            db.update_last_message_time(event.chat.id, event.from_user.id)
+        return await handler(event, data)
+
     reminder_task: asyncio.Task | None = None
 
     async def reminders_loop() -> None:

@@ -528,7 +528,7 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
 
         chance = random.random()
         if chance < 0.35: # Success
-            amount = random.randint(1, max(1, int(target.reputation * 0.15)))
+            amount = random.randint(1, max(1, int(target.reputation * 0.05)))
             db.add_reputation(target, -amount)
             db.add_reputation(sender, amount)
             await message.answer(f"🤫 <b>УСПЕХ!</b> Ты незаметно стащил <b>{amount} 🍪</b> у {escape_html(target.display_name)}.", parse_mode="HTML")
@@ -554,23 +554,41 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
              await message.answer("❌ Только админ может вызвать печеньковый дождь!")
              return
              
-        users = db.get_active_users(message.chat.id, minutes=60, limit=10)
+        users = db.get_active_users(message.chat.id, minutes=60, limit=20)
         if not users:
             await message.answer("☁️ В чате слишком тихо для дождя. Никого нет.")
             return
             
         rewarded = []
+        total_cookies = 0
+        total_xp = 0
+        
+        # Выбираем одного счастливчика
+        lucky_one = random.choice(users)
+        
         for u in users:
-            c = random.randint(1, 3)
-            x = random.randint(20, 100)
+            is_lucky = (u.user_id == lucky_one.user_id)
+            c = random.randint(2, 5) if is_lucky else random.randint(1, 2)
+            x = random.randint(100, 250) if is_lucky else random.randint(30, 80)
+            
             db.add_reputation(u, c)
             db.add_xp(u, x)
-            rewarded.append(u.display_name)
+            
+            total_cookies += c
+            total_xp += x
+            
+            name = u.display_name
+            if is_lucky:
+                name = f"🌟 <b>{escape_html(name)}</b>"
+            else:
+                name = escape_html(name)
+            rewarded.append(name)
             
         text = (
             "🍪🌧 <b>ПЕЧЕНЬКОВЫЙ ДОЖДЬ!</b>\n\n"
-            "Небо затянуло облаками и на головы посыпались вкусняшки!\n\n"
-            f"🎁 Получили подарки: {', '.join(rewarded)}"
+            "Небо затянуло сладкими облаками, и на головы посыпались вкусняшки!\n\n"
+            f"🎁 <b>Участники:</b> {', '.join(rewarded)}\n\n"
+            f"📊 <b>Итого:</b> Раздали <b>{total_cookies} 🍪</b> и <b>{total_xp} XP</b>!"
         )
         await message.answer(text, parse_mode="HTML")
 
@@ -615,20 +633,24 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
 
         # Снимаем ставку сразу
         db.update_user(sender.id, {"reputation": sender.reputation - bet})
+        
+        # Получаем настройки чата для Джекпота
+        chat_settings = db.get_chat_settings(message.chat.id)
+        current_jackpot = chat_settings.casino_jackpot
 
-        # Начальная анимация
+        # Начальная анимация (более быстрая и яркая)
         frames = [
-            f"🎰 <b>ИГРОК: {escape_html(sender.display_name)}</b>\n\n[ 🎲 | 🎲 | 🎲 ]\n\n💰 Ставка: <code>{bet}</code> 🍪",
-            f"🎰 <b>ИГРОК: {escape_html(sender.display_name)}</b>\n\n[ 🍋 | 🍒 | 🍇 ]\n\n💰 Ставка: <code>{bet}</code> 🍪",
-            f"🎰 <b>ИГРОК: {escape_html(sender.display_name)}</b>\n\n[ 🍇 | 🍋 | 🍉 ]\n\n💰 Ставка: <code>{bet}</code> 🍪",
+            f"🎰 <b>ИГРОК: {escape_html(sender.display_name)}</b>\n💰 Ставка: <code>{bet}</code> 🍪\n🏆 Джекпот: <code>{current_jackpot}</code>\n\n[ 🎲 | 🎲 | 🎲 ]",
+            f"🎰 <b>ИГРОК: {escape_html(sender.display_name)}</b>\n💰 Ставка: <code>{bet}</code> 🍪\n🏆 Джекпот: <code>{current_jackpot}</code>\n\n[ 🍒 | 🍋 | 🍇 ]",
+            f"🎰 <b>ИГРОК: {escape_html(sender.display_name)}</b>\n💰 Ставка: <code>{bet}</code> 🍪\n🏆 Джекпот: <code>{current_jackpot}</code>\n\n[ 🍋 | 🍇 | 🔔 ]",
+            f"🎰 <b>ИГРОК: {escape_html(sender.display_name)}</b>\n💰 Ставка: <code>{bet}</code> 🍪\n🏆 Джекпот: <code>{current_jackpot}</code>\n\n[ 🍇 | 🔔 | 🍉 ]",
         ]
         
         msg = await message.answer(frames[0], parse_mode="HTML")
-        await asyncio.sleep(0.6)
-        await msg.edit_text(frames[1], parse_mode="HTML")
-        await asyncio.sleep(0.6)
-        await msg.edit_text(frames[2], parse_mode="HTML")
-        await asyncio.sleep(0.6)
+        for frame in frames[1:]:
+            await asyncio.sleep(0.4)
+            await msg.edit_text(frame, parse_mode="HTML")
+        await asyncio.sleep(0.5)
 
         roll = random.randint(1, 1000)
         
@@ -636,52 +658,64 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
         result_text = ""
         multiplier = 0
         consol_xp = 0
+        is_jackpot = False
         
-        if roll <= 450:
+        if roll <= 480:
             final_symbols = " [ 💀 | 🍋 | 🍒 ] "
-            consol_xp = random.randint(1, 3)
-            result_text = f"💨 Увы, фортуна отвернулась! Ты потерял <b>{bet}</b> 🍪.\n<i>(Утешительный приз: +{consol_xp} XP)</i>"
+            consol_xp = random.randint(2, 5)
+            # Добавляем 10% от ставки в джекпот при проигрыше
+            jackpot_add = max(1, bet // 10)
+            db.update_chat_settings(message.chat.id, casino_jackpot=current_jackpot + jackpot_add)
+            result_text = f"💨 <b>НЕУДАЧА!</b> Ты проиграл. <b>{jackpot_add} 🍪</b> ушло в фонд джекпота!\n<i>(Утешительный приз: +{consol_xp} XP)</i>"
             multiplier = 0
-        elif roll <= 600:
+        elif roll <= 630:
             final_symbols = " [ 🍋 | 🍋 | 🍋 ] "
-            result_text = f"🔄 Почти! Возврат ставки. Баланс сохранен."
+            result_text = f"🔄 <b>ВОЗВРАТ!</b> Ты остался при своих. Никто не проиграл."
             multiplier = 1
-        elif roll <= 750:
+        elif roll <= 770:
             final_symbols = " [ 🍒 | 🍒 | 🍒 ] "
-            result_text = f"✨ Неплохо! Выигрыш: <b>{int(bet * 1.5)}</b> 🍪."
+            result_text = f"✨ <b>МАЛЫЙ ВЫИГРЫШ!</b> Получи <b>{int(bet * 1.5)}</b> 🍪."
             multiplier = 1.5
-        elif roll <= 850:
+        elif roll <= 870:
             final_symbols = " [ 🍇 | 🍇 | 🍇 ] "
-            result_text = f"🔥 Хорошо идешь! Удвоение: <b>{bet * 2}</b> 🍪."
+            result_text = f"🔥 <b>ХОРОШО!</b> Удвоение ставки: <b>{bet * 2}</b> 🍪."
             multiplier = 2
-        elif roll <= 920:
+        elif roll <= 930:
             final_symbols = " [ 🍉 | 🍉 | 🍉 ] "
-            result_text = f"🌟 Отличный улов! Утроение: <b>{bet * 3}</b> 🍪."
+            result_text = f"🌟 <b>ОТЛИЧНО!</b> Тройной выигрыш: <b>{bet * 3}</b> 🍪."
             multiplier = 3
-        elif roll <= 960:
+        elif roll <= 965:
             final_symbols = " [ 🔔 | 🔔 | 🔔 ] "
-            result_text = f"💥 БИГ ВИН! Пятикратный выигрыш: <b>{bet * 5}</b> 🍪!"
+            result_text = f"💥 <b>БИГ ВИН!</b> Пятикратный куш: <b>{bet * 5}</b> 🍪!"
             multiplier = 5
         elif roll <= 985:
             final_symbols = " [ ⭐️ | ⭐️ | ⭐️ ] "
-            result_text = f"🌈 СУПЕР ПРИЗ! Ты получил <b>{bet * 8}</b> 🍪!"
-            multiplier = 8
-        elif roll <= 995:
+            result_text = f"🌈 <b>СУПЕР ПРИЗ!</b> Огромные <b>{bet * 10}</b> 🍪!"
+            multiplier = 10
+        elif roll <= 996:
             final_symbols = " [ 💎 | 💎 | 💎 ] "
-            result_text = f"👑 МЕГА КУШ! Невероятные <b>{bet * 15}</b> 🍪!"
-            multiplier = 15
+            result_text = f"👑 <b>МЕГА КУШ!</b> Королевские <b>{bet * 20}</b> 🍪!"
+            multiplier = 20
         else:
             final_symbols = " [ 🏆 | 🏆 | 🏆 ] "
-            result_text = f"🌌 <b>ДЖЕКПОТ!!!</b> Ты сорвал куш в <b>{bet * 30}</b> 🍪! 🎉"
-            multiplier = 30
-
-        win_total = int(bet * multiplier)
-        if win_total > 0:
-            db.update_user(sender.id, {"reputation": sender.reputation - bet + win_total})
-            new_bal = sender.reputation - bet + win_total
+            # Выплата джекпота!
+            is_jackpot = True
+            win_total = int(bet * 30) + current_jackpot
+            db.update_chat_settings(message.chat.id, casino_jackpot=0)
+            result_text = f"🌌 <b>ЛЕГЕНДАРНЫЙ ДЖЕКПОТ!!!</b>\n\nТы сорвал куш в <b>{win_total}</b> 🍪! 🎉🍾"
+            multiplier = 0 # Чтобы не считало повторно
+        
+        if is_jackpot:
+            # win_total уже рассчитан выше
+            pass
         else:
-            db.update_user(sender.id, {"reputation": sender.reputation - bet, "xp": sender.xp + consol_xp})
-            new_bal = sender.reputation - bet
+            win_total = int(bet * multiplier)
+
+        new_bal = sender.reputation - bet + win_total
+        if win_total > 0:
+            db.update_user(sender.id, {"reputation": new_bal})
+        else:
+            db.update_user(sender.id, {"reputation": new_bal, "xp": sender.xp + consol_xp})
 
         final_msg = (
             f"🎰 <b>РЕЗУЛЬТАТЫ СПИНА</b>\n"
@@ -692,7 +726,7 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
         )
         
         keyboard = None
-        if win_total > 0:
+        if win_total > 0 and not is_jackpot:
             keyboard = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="🃏 Рискнуть: Удвоить или ничего!", callback_data=f"double_{win_total}_{sender.user_id}")]
             ])

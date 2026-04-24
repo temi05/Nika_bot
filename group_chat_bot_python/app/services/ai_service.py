@@ -831,6 +831,8 @@ class AIService:
         cleaned = self._enforce_personality_mode(cleaned)
         cleaned = self._soften_personal_attacks(cleaned)
         cleaned = self._trim_incomplete_tail(cleaned)
+        if content and not cleaned:
+            print(f"⚠️ [AI:finalize] Content was stripped to empty. Original: '{content[:50]}'")
         return cleaned
 
     def _enforce_personality_mode(self, content: str) -> str:
