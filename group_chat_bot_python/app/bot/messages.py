@@ -293,6 +293,10 @@ def build_messages_router(bot: Bot, settings: Settings, db: SupabaseDB, ai: AISe
                         is_private_chat=is_private_chat,
                         image_data_urls=image_data_urls,
                     )
+            
+            if should_reply and not reply:
+                reply = "Я что-то задумалась и потеряла нить разговора... Можешь повторить?"
+
             if reply:
                 await _send_ai_reply(bot, message, reply)
 

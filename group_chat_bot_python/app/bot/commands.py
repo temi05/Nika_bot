@@ -9,6 +9,7 @@ from aiogram.types import Message
 
 from app.services.ai_service import AIService
 from app.services.supabase_db import SupabaseDB
+from app.bot.admin import is_admin
 from app.utils import (
     build_progress_bar,
     escape_html,
@@ -32,13 +33,15 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
             "/daily — ежедневный бонус\n"
             "/bio &lt;текст&gt; — обновить био\n"
             "/mybirthday DD.MM[.YYYY] — день рождения\n"
+            "/setflavor &lt;текст&gt; — изменить свой вкус\n"
             "/notes [@user] — заметки ИИ\n"
             "/mood — настроение бота\n"
             "/linkfilter [on|off] — фильтр ссылок\n\n"
             "<b>Магазин:</b>\n"
             "/shop — магазин печенек\n"
             "/buy 1|2 — купить уровень или снять варны\n"
-            "/give &lt;число&gt; — передать печеньки в реплае\n\n"
+            "/give &lt;число&gt; — передать печеньки в реплае\n"
+            "/steal — попытка кражи печенек (в реплае)\n\n"
             "<b>Развлечения:</b>\n"
             "/casino &lt;сумма&gt; — крутить рулетку (ставка печеньками)\n"
             "/rp &lt;действие&gt; — RP-команды (обнять, поцеловать и др.)\n"
@@ -48,7 +51,11 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
             "/feedback new &lt;категория&gt; &lt;текст&gt; — создать обращение\n"
             "/feedback list — мои обращения\n\n"
             "<b>Админ:</b>\n"
-            "/ban, /unban, /banword, /unbanword, /listwords"
+            "/cookie_rain — вызвать дождь печенек\n"
+            "/whisper &lt;текст&gt; — сказать от лица бота\n"
+            "/feedbacks — список всех обращений\n"
+            "/delfeedback &lt;id&gt; — удалить обращение\n"
+            "/ban, /unban, /mute"
         )
         await message.answer(text, parse_mode="HTML")
 
@@ -78,6 +85,8 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
             f"XP: <code>{target.xp} / {next_xp}</code>\n"
             f"Печеньки: <code>{target.reputation}</code>\n"
         )
+        if target.flavor:
+            body += f"Вкус: <b>{escape_html(target.flavor)}</b>\n"
         if target.warns > 0:
             body += f"Предупреждения: <code>{target.warns} / {db.settings.warn_limit}</code>\n"
         if target.birthday:
@@ -250,6 +259,91 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
             amount,
         )
         await message.answer(gift_message, parse_mode="HTML")
+
+    @router.message(Command("steal"))
+    async def steal_command(message: Message) -> None:
+        if not message.reply_to_message:
+            await message.answer("🚨 Нужно ответить на сообщение того, у кого хочешь украсть печеньки!")
+            return
+            
+        sender_data = get_sender_data(message)
+        target_data = get_sender_data(message.reply_to_message)
+        
+        if sender_data.user_id == target_data.user_id:
+            await message.answer("Воровать у самого себя? Ты гений мысли.")
+            return
+
+        ok, remaining = db.can_user_use_command(message.chat.id, sender_data.user_id, "steal", 900)
+        if not ok:
+            await message.answer(f"⏳ Ты ещё не отошёл от прошлого дела. Подожди {remaining} сек.")
+            return
+
+        sender = db.get_or_create_user(message.chat.id, sender_data)
+        target = db.get_or_create_user(message.chat.id, target_data)
+        
+        if target.reputation <= 0:
+            await message.answer("🥥 У этого бедняка нечего воровать, карманы пусты.")
+            return
+
+        chance = random.random()
+        if chance < 0.35: # Success
+            amount = random.randint(1, max(1, int(target.reputation * 0.15)))
+            db.add_reputation(target, -amount)
+            db.add_reputation(sender, amount)
+            await message.answer(f"🤫 <b>УСПЕХ!</b> Ты незаметно стащил <b>{amount} 🍪</b> у {escape_html(target.display_name)}.", parse_mode="HTML")
+        else: # Failure
+            loss = random.randint(5, 15)
+            db.add_reputation(sender, -loss)
+            await message.answer(f"🚨 <b>ПОЙМАН!</b> {escape_html(target.display_name)} заметил тебя! Ты позорно бежал, потеряв <b>{loss} 🍪</b>.", parse_mode="HTML")
+
+    @router.message(Command("setflavor"))
+    async def set_flavor_command(message: Message, command: CommandObject) -> None:
+        if not command.args:
+            await message.answer("Использование: /setflavor &lt;твой вкус&gt; (например: шоколадная, с мятой, ванильная)", parse_mode="HTML")
+            return
+        sender = get_sender_data(message)
+        user = db.get_or_create_user(message.chat.id, sender)
+        flavor = command.args.strip()
+        db.update_user_flavor(user, flavor)
+        await message.answer(f"✨ Теперь твой вкус: <b>{escape_html(flavor)}</b>", parse_mode="HTML")
+
+    @router.message(Command("cookie_rain"))
+    async def rain_command(message: Message) -> None:
+        if not await is_admin(message.bot, message.chat.id, message.from_user.id):
+             await message.answer("❌ Только админ может вызвать печеньковый дождь!")
+             return
+             
+        users = db.get_active_users(message.chat.id, minutes=60, limit=10)
+        if not users:
+            await message.answer("☁️ В чате слишком тихо для дождя. Никого нет.")
+            return
+            
+        rewarded = []
+        for u in users:
+            c = random.randint(1, 3)
+            x = random.randint(20, 100)
+            db.add_reputation(u, c)
+            db.add_xp(u, x)
+            rewarded.append(u.display_name)
+            
+        text = (
+            "🍪🌧 <b>ПЕЧЕНЬКОВЫЙ ДОЖДЬ!</b>\n\n"
+            "Небо затянуло облаками и на головы посыпались вкусняшки!\n\n"
+            f"🎁 Получили подарки: {', '.join(rewarded)}"
+        )
+        await message.answer(text, parse_mode="HTML")
+
+    @router.message(Command("whisper"))
+    async def whisper_command(message: Message, command: CommandObject) -> None:
+        if not await is_admin(message.bot, message.chat.id, message.from_user.id):
+             return
+             
+        if not command.args:
+            return
+            
+        # Отправляем сообщение от имени бота и удаляем команду
+        await message.delete()
+        await message.answer(command.args, parse_mode="HTML")
 
     @router.message(Command("casino", "gamble", "spin", "казино", "ставка"))
     async def casino_command(message: Message, command: CommandObject) -> None:

@@ -305,6 +305,7 @@ class AIService:
                 content = self._maybe_attach_cookie_reward(chat_id, sender, plain_user_text, content)
                 
                 self._save_and_mark_final_reply(chat_id, sender, content, is_private_chat)
+                self._log("final_reply_ready", chat_id=chat_id, length=len(content))
                 return content
 
         except Exception as exc:
@@ -314,9 +315,10 @@ class AIService:
                 if fallback:
                     self._save_and_mark_final_reply(chat_id, sender, fallback, is_private_chat)
                     return fallback
-            return "Что-то в голове замкнуло. Повтори-ка еще раз."
+            return "Ой, что-то в голове замкнуло... Давай попробуем еще раз через минутку? 😵"
             
-        return "Я немного запуталась в мыслях. Давай конкретнее."
+        self._log("no_reply_generated", chat_id=chat_id)
+        return "Я немного запуталась в мыслях. Давай конкретнее, а то я не знаю что ответить."
 
     def _save_and_mark_final_reply(self, chat_id: int, sender: Sender, content: str, is_private_chat: bool) -> None:
         self.remember_message(chat_id, Sender(user_id=0, first_name=self.settings.bot_name), content)

@@ -82,6 +82,7 @@ class SupabaseDB:
             photo_url=row.get("photo_url"),
             last_daily_claim=row.get("last_daily_claim"),
             last_warn_at=row.get("last_warn_at"),
+            flavor=row.get("flavor"),
         )
 
     def _reminder_from_row(self, row: dict[str, Any]) -> Reminder:
@@ -253,13 +254,25 @@ class SupabaseDB:
 
     def get_top_users(self, chat_id: int, limit: int = 10) -> list[ChatUser]:
         response = self._safe_execute(
-            self._users().select("*").eq("chat_id", chat_id).order("level", desc=True).order("xp", desc=True).limit(limit),
+            self._users().select("*").eq("chat_id", chat_id).order("xp", desc=True).limit(limit),
             fallback=None,
             context=f"get_top_users chat_id={chat_id}",
         )
-        if not response:
+        if not response or not response.data:
             return []
-        return [self.reset_expired_warns(self._user_from_row(row)) for row in response.data or []]
+        return [self._user_from_row(row) for row in response.data]
+
+    def get_active_users(self, chat_id: int, minutes: int = 60, limit: int = 20) -> list[ChatUser]:
+        """Get users active in the last X minutes"""
+        since = int(time.time()) - (minutes * 60)
+        response = self._safe_execute(
+            self._users().select("*").eq("chat_id", chat_id).gt("last_message_time", since).limit(limit),
+            fallback=None,
+            context=f"get_active_users chat_id={chat_id}",
+        )
+        if not response or not response.data:
+            return []
+        return [self._user_from_row(row) for row in response.data]
 
     def get_all_users(self, chat_id: int) -> list[ChatUser]:
         response = self._safe_execute(
@@ -450,6 +463,15 @@ class SupabaseDB:
         if now - last_used < cooldown_seconds:
             return False, int(cooldown_seconds - (now - last_used) + 0.999)
         store[command_name] = now
+        return True, 0
+
+    def can_user_use_command(self, chat_id: int, user_id: int, command_name: str, cooldown_seconds: int) -> tuple[bool, int]:
+        now = time.time()
+        key = f"{chat_id}_{user_id}_{command_name}"
+        last_used = self.reaction_cooldowns.get(key, 0.0)
+        if now - last_used < cooldown_seconds:
+            return False, int(cooldown_seconds - (now - last_used) + 0.999)
+        self.reaction_cooldowns[key] = now
         return True, 0
 
     def can_adjust_reputation(self, actor_id: int, target_id: int, cooldown_seconds: int = 20) -> bool:
@@ -720,3 +742,28 @@ class SupabaseDB:
         if new_rep < 0:
             new_rep = 0
         return self.update_user(user.id, {"reputation": new_rep})
+
+    def add_xp(self, user: ChatUser, amount: int) -> dict[str, Any]:
+        """Добавить XP и обработать уровень"""
+        new_xp = user.xp + amount
+        new_level = user.level
+        level_up = False
+        
+        while True:
+            next_xp = self.get_next_level_xp(new_level)
+            if new_xp >= next_xp:
+                new_level += 1
+                level_up = True
+            else:
+                break
+                
+        updated = self.update_user(user.id, {"xp": new_xp, "level": new_level})
+        return {
+            "success": bool(updated),
+            "new_xp": new_xp,
+            "new_level": new_level,
+            "level_up": level_up
+        }
+
+    def update_user_flavor(self, user: ChatUser, flavor: str) -> bool:
+        return bool(self.update_user(user.id, {"flavor": flavor[:50]}))

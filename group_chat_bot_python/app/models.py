@@ -35,6 +35,7 @@ class ChatUser:
     photo_url: str | None = None
     last_daily_claim: str | None = None
     last_warn_at: str | None = None
+    flavor: str | None = None
 
     @property
     def display_name(self) -> str:
