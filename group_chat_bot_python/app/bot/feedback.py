@@ -93,8 +93,10 @@ def build_feedback_router(bot: Bot, db: SupabaseDB) -> Router:
             text = args[2]
             await feedback_create(message, category, text)
         else:
+            cats = ", ".join(CATEGORIES.keys())
             await message.answer(
-                "Неверный формат. Пример: /feedback new баг Бот сломался",
+                f"Неверный формат. Пример: <code>/feedback new баг Бот сломался</code>\n"
+                f"Доступные категории: {cats}",
                 parse_mode="HTML",
             )
 

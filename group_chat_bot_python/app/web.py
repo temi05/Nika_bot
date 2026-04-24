@@ -4,7 +4,7 @@ import asyncio
 from contextlib import asynccontextmanager
 
 from aiogram import Bot, Dispatcher
-from aiogram.types import Update
+from aiogram.types import Update, BotCommand, BotCommandScopeDefault
 from fastapi import FastAPI, HTTPException, Request
 
 from app.bot.admin import build_admin_router
@@ -64,6 +64,20 @@ def create_app() -> FastAPI:
             allowed_updates=["message", "message_reaction", "callback_query", "chat_member"],
             drop_pending_updates=False,
         )
+        
+        commands = [
+            BotCommand(command="help", description="Справка по боту"),
+            BotCommand(command="top", description="Топ по печенькам"),
+            BotCommand(command="stats", description="Статистика чата"),
+            BotCommand(command="casino", description="Крутить рулетку"),
+            BotCommand(command="rp", description="Ролевые команды (RP)"),
+            BotCommand(command="feedback", description="Предложения и жалобы"),
+            BotCommand(command="profile", description="Твой профиль"),
+        ]
+        try:
+            await bot.set_my_commands(commands, scope=BotCommandScopeDefault())
+        except Exception as e:
+            print(f"[set_my_commands error] {e}")
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):

