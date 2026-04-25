@@ -373,7 +373,28 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
         return max(50, user.level * 25 + user.reputation)
 
     def _bail_cost(user) -> int:
-        return max(10, user.level * 3, int(user.debt * 0.1))
+        base_cost = max(50, user.level * 20, int(user.debt * 0.35))
+        wealth_part = int(user.reputation * 0.20)
+        return base_cost + wealth_part
+
+    def _pay_bail(user, cost: int) -> dict[str, int]:
+        requested_creditor_part = min(user.debt, max(0, cost // 2))
+        creditor_part = 0
+        if requested_creditor_part > 0:
+            result = db.repay_debts(user, requested_creditor_part)
+            creditor_part = int(result.get("paid") or 0)
+            user = db.get_user_by_platform_id(user.chat_id, user.user_id) or user
+        fee = cost - creditor_part
+        db.update_user(
+            user.id,
+            {
+                "reputation": max(0, user.reputation - fee),
+                "jailed_until": None,
+                "jail_reason": None,
+                "steal_fail_streak": 0,
+            },
+        )
+        return {"creditor_part": creditor_part, "fee": fee}
 
     def _jail_user(user, minutes: int, reason: str) -> None:
         db.update_user(
@@ -391,9 +412,10 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
         now = datetime.now(timezone.utc)
         has_overdue = any((_parse_iso_dt(debt.get("due_at")) or now) < now for debt in active_debts)
         if has_overdue:
-            _jail_user(user, 30, "просроченный долг")
+            _jail_user(user, 180, "просроченный долг")
 
     _loan_sessions = {}
+    _bail_sessions = {}
 
     @router.message(Command("loan"))
     async def loan_command(message: Message, command: CommandObject) -> None:
@@ -780,27 +802,82 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
             await message.answer(f"❌ Не хватает на залог. Нужно <b>{cost} 🍪</b>, у тебя <b>{user.reputation} 🍪</b>.", parse_mode="HTML")
             return
 
-        creditor_part = min(user.debt, max(0, cost // 2))
-        if creditor_part > 0:
-            db.repay_debts(user, creditor_part)
-            user = db.get_user_by_platform_id(message.chat.id, user.user_id) or user
-        fee = cost - creditor_part
-        db.update_user(
-            user.id,
-            {
-                "reputation": max(0, user.reputation - fee),
-                "jailed_until": None,
-                "jail_reason": None,
-                "steal_fail_streak": 0,
-            },
-        )
+        _bail_sessions[f"{message.chat.id}_{user.user_id}"] = {
+            "cost": cost,
+            "created_at": time.time(),
+        }
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(text=f"✅ Оплатить {cost} 🍪", callback_data=f"bail_pay_{user.user_id}"),
+                InlineKeyboardButton(text="❌ Отмена", callback_data=f"bail_cancel_{user.user_id}"),
+            ]
+        ])
         await message.answer(
+            f"🔐 <b>Подтвердить залог?</b>\n"
+            f"Стоимость: <b>{cost} 🍪</b>\n"
+            f"Осталось сидеть: <b>{_format_remaining(remaining)}</b>\n\n"
+            f"Если есть долг, до половины залога уйдет кредиторам.",
+            parse_mode="HTML",
+            reply_markup=keyboard,
+        )
+
+    @router.callback_query(F.data.startswith("bail_"))
+    async def bail_callback(query: CallbackQuery) -> None:
+        if not query.message or not query.data:
+            await query.answer("Сообщение недоступно.", show_alert=True)
+            return
+        parts = query.data.split("_")
+        if len(parts) != 3 or not parts[2].lstrip("-").isdigit():
+            await query.answer("Кнопка устарела.", show_alert=True)
+            return
+        action = parts[1]
+        if action not in {"pay", "cancel"}:
+            await query.answer("Кнопка устарела.", show_alert=True)
+            return
+        user_id = int(parts[2])
+        if query.from_user.id != user_id:
+            await query.answer("Это не твой залог.", show_alert=True)
+            return
+
+        session_key = f"{query.message.chat.id}_{user_id}"
+        session = _bail_sessions.get(session_key)
+        if not session or time.time() - session["created_at"] > 300:
+            _bail_sessions.pop(session_key, None)
+            await query.answer("Залог устарел. Напиши /bail еще раз.", show_alert=True)
+            return
+
+        if action == "cancel":
+            _bail_sessions.pop(session_key, None)
+            await query.message.edit_text("❌ Залог отменен.")
+            await query.answer()
+            return
+
+        user = db.get_user_by_platform_id(query.message.chat.id, user_id)
+        if not user:
+            _bail_sessions.pop(session_key, None)
+            await query.answer("Профиль не найден.", show_alert=True)
+            return
+        remaining = _jail_remaining(user)
+        if not remaining:
+            _bail_sessions.pop(session_key, None)
+            await query.message.edit_text("✅ Ты уже на свободе.")
+            await query.answer()
+            return
+        cost = int(session["cost"])
+        if user.reputation < cost:
+            await query.answer(f"Не хватает печенек: нужно {cost}, у тебя {user.reputation}.", show_alert=True)
+            return
+
+        result = _pay_bail(user, cost)
+        _bail_sessions.pop(session_key, None)
+        await query.message.edit_text(
             f"🔓 <b>Залог оплачен.</b>\n"
             f"Стоимость: <b>{cost} 🍪</b>\n"
-            f"Кредиторам ушло: <b>{creditor_part} 🍪</b>\n"
+            f"Кредиторам ушло: <b>{result['creditor_part']} 🍪</b>\n"
             f"Ты снова на свободе.",
             parse_mode="HTML",
         )
+        await query.answer()
 
     @router.message(Command("give"))
     async def give_command(message: Message, command: CommandObject) -> None:
@@ -900,7 +977,7 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
             "steal_success_streak": 0,
         }
         if jailed:
-            jail_minutes = 60 if critical_fail else (30 if fail_streak >= 3 else 15)
+            jail_minutes = 180 if critical_fail else (90 if fail_streak >= 3 else 45)
             updates["jailed_until"] = (datetime.now(timezone.utc) + timedelta(minutes=jail_minutes)).isoformat()
             updates["jail_reason"] = "провал кражи"
         db.update_user(sender.id, updates)
