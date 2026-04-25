@@ -735,7 +735,8 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
 
     @router.message(Command("judge"))
     async def judge_command(message: Message, command: CommandObject) -> None:
-        if not await is_admin(message):
+        sender = get_sender_data(message)
+        if not await is_admin(message.bot, message.chat.id, sender.user_id):
             await message.answer("❌ Судить может только администратор.")
             return
         if not message.reply_to_message or not command.args:
@@ -923,7 +924,8 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
 
     @router.message(Command("cookie_rain", "дождь"))
     async def rain_command(message: Message) -> None:
-        if not await is_admin(message):
+        sender = get_sender_data(message)
+        if not await is_admin(message.bot, message.chat.id, sender.user_id):
             await message.answer("❌ Эта магия доступна только администраторам.")
             return
         
@@ -942,7 +944,8 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
 
     @router.message(Command("whisper", "шепот"))
     async def whisper_command(message: Message, command: CommandObject) -> None:
-        if not await is_admin(message):
+        sender = get_sender_data(message)
+        if not await is_admin(message.bot, message.chat.id, sender.user_id):
             await message.answer("🤫 Тсс... (Только для админов)")
             return
         if not command.args: return
