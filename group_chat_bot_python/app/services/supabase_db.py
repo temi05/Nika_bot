@@ -47,6 +47,9 @@ class SupabaseDB:
     def _persona(self):
         return self.client.table("bot_persona_state")
 
+    def _debts(self):
+        return self.client.table("bot_debts")
+
 
     def _safe_execute(self, query_builder, *, fallback=None, context: str = ""):
         """
@@ -85,6 +88,10 @@ class SupabaseDB:
             flavor=row.get("flavor"),
             debt=int(row.get("debt") or 0),
             last_loan_at=row.get("last_loan_at"),
+            jailed_until=row.get("jailed_until"),
+            jail_reason=row.get("jail_reason"),
+            steal_fail_streak=int(row.get("steal_fail_streak") or 0),
+            steal_success_streak=int(row.get("steal_success_streak") or 0),
         )
 
     def _reminder_from_row(self, row: dict[str, Any]) -> Reminder:
@@ -521,6 +528,153 @@ class SupabaseDB:
         self.update_user(sender.id, {"reputation": sender.reputation - amount})
         self.update_user(receiver.id, {"reputation": receiver.reputation + amount})
         return True
+
+    def create_debt(self, lender: ChatUser, borrower: ChatUser, amount: int, due_hours: int = 48) -> dict[str, Any] | None:
+        now = datetime.now(timezone.utc)
+        result = self._safe_execute(
+            self._debts().insert(
+                {
+                    "chat_id": borrower.chat_id,
+                    "lender_id": lender.user_id,
+                    "lender_name": lender.display_name,
+                    "borrower_id": borrower.user_id,
+                    "borrower_name": borrower.display_name,
+                    "amount": amount,
+                    "paid_amount": 0,
+                    "forgiven_amount": 0,
+                    "status": "active",
+                    "created_at": now.isoformat(),
+                    "due_at": (now + timedelta(hours=due_hours)).isoformat(),
+                }
+            ),
+            fallback=None,
+            context=f"create_debt chat_id={borrower.chat_id}",
+        )
+        if result and result.data:
+            return result.data[0]
+        return None
+
+    def get_active_debts_for_borrower(self, chat_id: int, borrower_id: int) -> list[dict[str, Any]]:
+        response = self._safe_execute(
+            self._debts()
+            .select("*")
+            .eq("chat_id", chat_id)
+            .eq("borrower_id", borrower_id)
+            .eq("status", "active")
+            .order("created_at", desc=False),
+            fallback=None,
+            context=f"get_active_debts_for_borrower chat_id={chat_id} borrower_id={borrower_id}",
+        )
+        return response.data if response and response.data else []
+
+    def get_active_debts_for_lender(self, chat_id: int, lender_id: int) -> list[dict[str, Any]]:
+        response = self._safe_execute(
+            self._debts()
+            .select("*")
+            .eq("chat_id", chat_id)
+            .eq("lender_id", lender_id)
+            .eq("status", "active")
+            .order("created_at", desc=False),
+            fallback=None,
+            context=f"get_active_debts_for_lender chat_id={chat_id} lender_id={lender_id}",
+        )
+        return response.data if response and response.data else []
+
+    def repay_debts(self, borrower: ChatUser, amount: int) -> dict[str, Any]:
+        if amount <= 0 or borrower.reputation < amount:
+            return {"paid": 0, "payments": []}
+
+        debts = self.get_active_debts_for_borrower(borrower.chat_id, borrower.user_id)
+        remaining_to_pay = min(amount, borrower.debt)
+        paid_total = 0
+        payments: list[dict[str, Any]] = []
+        now = datetime.now(timezone.utc).isoformat()
+
+        for debt in debts:
+            if remaining_to_pay <= 0:
+                break
+            debt_amount = int(debt.get("amount") or 0)
+            paid_amount = int(debt.get("paid_amount") or 0)
+            forgiven_amount = int(debt.get("forgiven_amount") or 0)
+            open_amount = max(0, debt_amount - paid_amount - forgiven_amount)
+            if open_amount <= 0:
+                continue
+
+            chunk = min(open_amount, remaining_to_pay)
+            new_paid = paid_amount + chunk
+            updates: dict[str, Any] = {"paid_amount": new_paid}
+            if new_paid + forgiven_amount >= debt_amount:
+                updates["status"] = "repaid"
+                updates["repaid_at"] = now
+
+            self._safe_execute(
+                self._debts().update(updates).eq("id", debt["id"]),
+                fallback=None,
+                context=f"repay_debts debt_id={debt['id']}",
+            )
+
+            lender = self.get_user_by_platform_id(borrower.chat_id, int(debt["lender_id"]))
+            if lender:
+                self.update_user(lender.id, {"reputation": lender.reputation + chunk})
+
+            paid_total += chunk
+            remaining_to_pay -= chunk
+            payments.append({"lender_name": debt.get("lender_name") or str(debt["lender_id"]), "amount": chunk})
+
+        if paid_total > 0:
+            self.update_user(
+                borrower.id,
+                {"reputation": borrower.reputation - paid_total, "debt": max(0, borrower.debt - paid_total)},
+            )
+        return {"paid": paid_total, "payments": payments}
+
+    def forgive_debts(self, lender: ChatUser, borrower_id: int, amount: int) -> dict[str, Any]:
+        if amount <= 0:
+            return {"forgiven": 0, "borrower": None}
+
+        response = self._safe_execute(
+            self._debts()
+            .select("*")
+            .eq("chat_id", lender.chat_id)
+            .eq("lender_id", lender.user_id)
+            .eq("borrower_id", borrower_id)
+            .eq("status", "active")
+            .order("created_at", desc=False),
+            fallback=None,
+            context=f"forgive_debts chat_id={lender.chat_id}",
+        )
+        debts = response.data if response and response.data else []
+        borrower = self.get_user_by_platform_id(lender.chat_id, borrower_id)
+        remaining = amount
+        forgiven_total = 0
+        now = datetime.now(timezone.utc).isoformat()
+
+        for debt in debts:
+            if remaining <= 0:
+                break
+            debt_amount = int(debt.get("amount") or 0)
+            paid_amount = int(debt.get("paid_amount") or 0)
+            forgiven_amount = int(debt.get("forgiven_amount") or 0)
+            open_amount = max(0, debt_amount - paid_amount - forgiven_amount)
+            if open_amount <= 0:
+                continue
+            chunk = min(open_amount, remaining)
+            new_forgiven = forgiven_amount + chunk
+            updates: dict[str, Any] = {"forgiven_amount": new_forgiven}
+            if paid_amount + new_forgiven >= debt_amount:
+                updates["status"] = "forgiven"
+                updates["forgiven_at"] = now
+            self._safe_execute(
+                self._debts().update(updates).eq("id", debt["id"]),
+                fallback=None,
+                context=f"forgive_debts debt_id={debt['id']}",
+            )
+            forgiven_total += chunk
+            remaining -= chunk
+
+        if borrower and forgiven_total > 0:
+            self.update_user(borrower.id, {"debt": max(0, borrower.debt - forgiven_total)})
+        return {"forgiven": forgiven_total, "borrower": borrower}
 
     def purchase_item(self, user: ChatUser, item_id: int) -> tuple[bool, str]:
         if item_id == 1:

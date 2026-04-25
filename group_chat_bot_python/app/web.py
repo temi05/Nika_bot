@@ -83,7 +83,11 @@ def create_app() -> FastAPI:
             BotCommand(command="loan", description="🤝 Предложить в долг"),
             BotCommand(command="ask_loan", description="🙏 Попросить в долг"),
             BotCommand(command="repay", description="💰 Вернуть долг"),
+            BotCommand(command="debts", description="📒 Долги и должники"),
+            BotCommand(command="jail", description="🚔 Статус тюрьмы"),
+            BotCommand(command="bail", description="🔓 Оплатить залог"),
             BotCommand(command="give", description="🎁 Подарить печеньки"),
+            BotCommand(command="steal", description="🕵️ Попробовать украсть"),
             BotCommand(command="rp", description="🎭 Ролевые команды (RP)"),
             BotCommand(command="feedback", description="✉️ Предложения и поддержка"),
         ]

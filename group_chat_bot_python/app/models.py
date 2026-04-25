@@ -38,6 +38,10 @@ class ChatUser:
     flavor: str | None = None
     debt: int = 0
     last_loan_at: str | None = None
+    jailed_until: str | None = None
+    jail_reason: str | None = None
+    steal_fail_streak: int = 0
+    steal_success_streak: int = 0
 
     @property
     def display_name(self) -> str:

@@ -40,13 +40,16 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
             "• <code>/loan [сумма]</code> — Предложить в долг (реплаем)\n"
             "• <code>/ask_loan [сумма]</code> — Попросить в долг (реплаем)\n"
             "• <code>/repay [сумма]</code> — Вернуть долг\n"
+            "• <code>/debts</code> — Список твоих долгов и должников\n"
+            "• <code>/forgive [сумма]</code> — Простить долг (реплаем)\n"
             "• <code>/steal</code> — Попробовать украсть (реплаем)\n"
+            "• <code>/jail</code>, <code>/bail</code> — Тюрьма и залог\n"
             "• <code>/top</code> — Рейтинг самых богатых"
         ),
         "games": (
             "🎰 <b>Игры и Развлечения</b>\n\n"
             "• <code>/casino [ставка]</code> — Премиальный слот-автомат\n"
-            "• <code>/tower [ставка]</code> — Рискованная Башня (x100!)\n"
+            "• <code>/tower [ставка]</code> — Рискованная Башня (до x60)\n"
             "• <code>/kto [текст]</code> — Рандомный выбор участника\n"
             "• <code>/remind [время] [текст]</code> — Напоминания\n"
             "• <code>/rp [действие]</code> — Ролевые взаимодействия"
@@ -62,6 +65,7 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
             "🛡 <b>Администрирование</b>\n\n"
             "• <code>/cookie_rain</code> — Массовая раздача бонусов\n"
             "• <code>/whisper [текст]</code> — Сообщение от имени бота\n"
+            "• <code>/judge</code> — Посадить или выпустить игрока\n"
             "• <code>/feedbacks</code> — Управление обращениями\n"
             "• <code>/ban</code> | <code>/mute</code> — Модерация"
         ),
@@ -317,6 +321,80 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
         ok, result = db.purchase_item(user, int(command.args.strip()))
         await message.answer(("✅ " if ok else "❌ ") + result)
 
+    def _parse_iso_dt(value: str | None) -> datetime | None:
+        if not value:
+            return None
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+
+    def _jail_remaining(user) -> timedelta | None:
+        jailed_until = _parse_iso_dt(user.jailed_until)
+        if not jailed_until:
+            return None
+        remaining = jailed_until - datetime.now(timezone.utc)
+        if remaining.total_seconds() <= 0:
+            db.update_user(
+                user.id,
+                {
+                    "jailed_until": None,
+                    "jail_reason": None,
+                    "steal_fail_streak": 0,
+                    "steal_success_streak": 0,
+                },
+            )
+            return None
+        return remaining
+
+    def _format_remaining(delta: timedelta) -> str:
+        seconds = max(0, int(delta.total_seconds()))
+        minutes = seconds // 60
+        if minutes < 60:
+            return f"{max(1, minutes)} мин."
+        return f"{minutes // 60} ч. {minutes % 60} мин."
+
+    async def _deny_if_jailed(message: Message, user, action_name: str) -> bool:
+        _maybe_jail_for_overdue_debt(user)
+        user = db.get_user_by_platform_id(user.chat_id, user.user_id) or user
+        remaining = _jail_remaining(user)
+        if not remaining:
+            return False
+        await message.answer(
+            f"🚔 <b>Ты сейчас в тюрьме.</b>\n"
+            f"Действие <code>{escape_html(action_name)}</code> недоступно ещё <b>{_format_remaining(remaining)}</b>.\n"
+            f"Причина: <i>{escape_html(user.jail_reason or 'нарушение')}</i>\n\n"
+            f"Можно выйти через <code>/bail</code>.",
+            parse_mode="HTML",
+        )
+        return True
+
+    def _loan_limit(user) -> int:
+        return max(50, user.level * 25 + user.reputation)
+
+    def _bail_cost(user) -> int:
+        return max(10, user.level * 3, int(user.debt * 0.1))
+
+    def _jail_user(user, minutes: int, reason: str) -> None:
+        db.update_user(
+            user.id,
+            {
+                "jailed_until": (datetime.now(timezone.utc) + timedelta(minutes=minutes)).isoformat(),
+                "jail_reason": reason,
+            },
+        )
+
+    def _maybe_jail_for_overdue_debt(user) -> None:
+        if user.debt <= 0 or _jail_remaining(user):
+            return
+        active_debts = db.get_active_debts_for_borrower(user.chat_id, user.user_id)
+        now = datetime.now(timezone.utc)
+        has_overdue = any((_parse_iso_dt(debt.get("due_at")) or now) < now for debt in active_debts)
+        if has_overdue:
+            _jail_user(user, 30, "просроченный долг")
+
+    _loan_sessions = {}
+
     @router.message(Command("loan"))
     async def loan_command(message: Message, command: CommandObject) -> None:
         if not message.reply_to_message or not command.args or not command.args.strip().isdigit():
@@ -336,6 +414,15 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
             return
 
         sender = db.get_or_create_user(message.chat.id, sender_data)
+        target = db.get_or_create_user(message.chat.id, target_data)
+        if target.debt + amount > _loan_limit(target):
+            await message.answer(
+                f"❌ У {escape_html(target.display_name)} слишком большой долг.\n"
+                f"Лимит: <b>{_loan_limit(target)} 🍪</b>, сейчас: <b>{target.debt} 🍪</b>.",
+                parse_mode="HTML",
+            )
+            return
+
         if sender.reputation < amount:
             await message.answer(f"❌ Недостаточно печенек! Баланс: {sender.reputation}")
             return
@@ -347,23 +434,35 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
             ]
         ])
 
-        await message.answer(
+        sent_msg = await message.answer(
             f"🤝 {escape_html(sender.display_name)} предлагает вам <b>{amount} 🍪</b> в долг.\n\n"
             f"Вы согласны принять кредит?",
             reply_markup=keyboard,
             parse_mode="HTML"
         )
+        _loan_sessions[f"{message.chat.id}_{sent_msg.message_id}"] = {
+            "kind": "offer",
+            "amount": amount,
+            "lender_id": sender.user_id,
+            "borrower_id": target_data.user_id,
+        }
 
     @router.callback_query(F.data.startswith("loan_"))
     async def loan_callback(query: CallbackQuery) -> None:
         parts = query.data.split("_")
         action = parts[1]
+        session_key = f"{query.message.chat.id}_{query.message.message_id}"
+        session = _loan_sessions.get(session_key)
+        if not session:
+            await query.answer("⏳ Это предложение уже неактивно.", show_alert=True)
+            return
         
         if action == "dec":
             target_id = int(parts[2])
             if query.from_user.id != target_id:
                 await query.answer("Это не вам предложили!", show_alert=True)
                 return
+            _loan_sessions.pop(session_key, None)
             await query.message.edit_text("❌ Предложение отклонено.")
             return
 
@@ -371,6 +470,14 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
         amount = int(parts[2])
         sender_id = int(parts[3])
         target_id = int(parts[4])
+        if (
+            session.get("kind") != "offer"
+            or session.get("amount") != amount
+            or session.get("lender_id") != sender_id
+            or session.get("borrower_id") != target_id
+        ):
+            await query.answer("❌ Кнопка не совпадает с предложением.", show_alert=True)
+            return
         
         if query.from_user.id != target_id:
             await query.answer("Это не вам предложили!", show_alert=True)
@@ -382,19 +489,27 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
         if not sender or sender.reputation < amount:
             await query.message.edit_text("❌ Ошибка: у отправителя больше нет нужной суммы.")
             return
-            
+        if not target:
+            await query.message.edit_text("❌ Ошибка: получатель не найден.")
+            return
+        if target.debt + amount > _loan_limit(target):
+            await query.message.edit_text("❌ Сделка отменена: у получателя уже слишком большой долг.")
+            return
+             
         # Выполняем сделку
+        _loan_sessions.pop(session_key, None)
         db.update_user(sender.id, {"reputation": sender.reputation - amount})
         db.update_user(target.id, {
             "reputation": target.reputation + amount,
             "debt": target.debt + amount,
             "last_loan_at": datetime.now(timezone.utc).isoformat()
         })
+        db.create_debt(sender, target, amount)
         
         await query.message.edit_text(
             f"🤝 <b>Сделка совершена!</b>\n\n"
             f"{escape_html(sender.display_name)} одолжил <b>{amount} 🍪</b> {escape_html(target.display_name)}.\n"
-            f"⚠️ Долг должен быть возвращен командой <code>/repay</code>.",
+            f"⚠️ Долг должен быть возвращен командой <code>/repay</code> в течение 48 часов.",
             parse_mode="HTML"
         )
         await query.answer("Кредит получен!")
@@ -417,6 +532,15 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
             await message.answer("Просить в долг у самого себя — это интересно, но бесполезно.")
             return
 
+        asker = db.get_or_create_user(message.chat.id, sender_data)
+        if asker.debt + amount > _loan_limit(asker):
+            await message.answer(
+                f"❌ Сначала погаси часть старых долгов.\n"
+                f"Твой лимит: <b>{_loan_limit(asker)} 🍪</b>, сейчас: <b>{asker.debt} 🍪</b>.",
+                parse_mode="HTML",
+            )
+            return
+
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [
                 InlineKeyboardButton(text="🤝 Дать в долг", callback_data=f"aloan_yes_{amount}_{sender_data.user_id}_{target_data.user_id}"),
@@ -424,23 +548,35 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
             ]
         ])
 
-        await message.answer(
+        sent_msg = await message.answer(
             f"🙏 {escape_html(sender_data.display_name)} просит у вас <b>{amount} 🍪</b> в долг.\n\n"
             f"Вы готовы выручить игрока?",
             reply_markup=keyboard,
             parse_mode="HTML"
         )
+        _loan_sessions[f"{message.chat.id}_{sent_msg.message_id}"] = {
+            "kind": "request",
+            "amount": amount,
+            "borrower_id": sender_data.user_id,
+            "lender_id": target_data.user_id,
+        }
 
     @router.callback_query(F.data.startswith("aloan_"))
     async def ask_loan_callback(query: CallbackQuery) -> None:
         parts = query.data.split("_")
         action = parts[1]
+        session_key = f"{query.message.chat.id}_{query.message.message_id}"
+        session = _loan_sessions.get(session_key)
+        if not session:
+            await query.answer("⏳ Этот запрос уже неактивен.", show_alert=True)
+            return
         
         if action == "no":
             original_asker_id = int(parts[2])
-            # Отказать может только тот, у кого просили (текущий query.from_user)
-            # Но нам не нужно строго проверять, кто нажал "Отказать", если это не сам проситель.
-            # Хотя лучше проверить, что это именно тот, у кого просили.
+            if query.from_user.id != session.get("lender_id"):
+                await query.answer("Отказать должен тот, у кого просили.", show_alert=True)
+                return
+            _loan_sessions.pop(session_key, None)
             await query.message.edit_text("❌ В кредите отказано.")
             return
 
@@ -448,6 +584,14 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
         amount = int(parts[2])
         asker_id = int(parts[3])
         lender_id = int(parts[4])
+        if (
+            session.get("kind") != "request"
+            or session.get("amount") != amount
+            or session.get("borrower_id") != asker_id
+            or session.get("lender_id") != lender_id
+        ):
+            await query.answer("❌ Кнопка не совпадает с запросом.", show_alert=True)
+            return
         
         if query.from_user.id != lender_id:
             await query.answer("Просили не у вас!", show_alert=True)
@@ -459,19 +603,27 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
         if not lender or lender.reputation < amount:
             await query.answer(f"❌ У вас недостаточно печенек! Нужно {amount}, а у вас {lender.reputation if lender else 0}.", show_alert=True)
             return
-            
+        if not asker:
+            await query.message.edit_text("❌ Ошибка: проситель не найден.")
+            return
+        if asker.debt + amount > _loan_limit(asker):
+            await query.message.edit_text("❌ Сделка отменена: у просителя уже слишком большой долг.")
+            return
+             
         # Выполняем сделку
+        _loan_sessions.pop(session_key, None)
         db.update_user(lender.id, {"reputation": lender.reputation - amount})
         db.update_user(asker.id, {
             "reputation": asker.reputation + amount,
             "debt": asker.debt + amount,
             "last_loan_at": datetime.now(timezone.utc).isoformat()
         })
+        db.create_debt(lender, asker, amount)
         
         await query.message.edit_text(
             f"🤝 <b>Сделка совершена!</b>\n\n"
             f"{escape_html(lender.display_name)} выручил <b>{amount} 🍪</b> для {escape_html(asker.display_name)}.\n"
-            f"⚠️ Долг записан и должен быть возвращен командой <code>/repay</code>.",
+            f"⚠️ Долг записан и должен быть возвращен командой <code>/repay</code> в течение 48 часов.",
             parse_mode="HTML"
         )
         await query.answer("Вы дали в долг!")
@@ -492,16 +644,161 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
         if user.reputation < amount:
             await message.answer(f"❌ У тебя недостаточно печенек для погашения долга! Нужно <b>{amount} 🍪</b>, а у тебя {user.reputation} 🍪.")
             return
-            
-        db.update_user(user.id, {
-            "reputation": user.reputation - amount,
-            "debt": user.debt - amount
-        })
+
+        result = db.repay_debts(user, amount)
+        paid = int(result.get("paid") or 0)
+        if paid <= 0:
+            db.update_user(user.id, {"reputation": user.reputation - amount, "debt": user.debt - amount})
+            paid = amount
+            payment_lines = ["• кредитор не найден в новой таблице, списан старый общий долг"]
+        else:
+            payment_lines = [
+                f"• {escape_html(p['lender_name'])}: <b>{p['amount']} 🍪</b>"
+                for p in result.get("payments", [])
+            ]
         
         await message.answer(
             f"💰 <b>Долг погашен!</b>\n\n"
-            f"Ты вернул <b>{amount} 🍪</b>. Остаток долга: <b>{user.debt - amount} 🍪</b>.",
+            f"Ты вернул <b>{paid} 🍪</b>.\n"
+            f"{chr(10).join(payment_lines)}\n\n"
+            f"Остаток долга: <b>{max(0, user.debt - paid)} 🍪</b>.",
             parse_mode="HTML"
+        )
+
+    @router.message(Command("debts"))
+    async def debts_command(message: Message) -> None:
+        sender_data = get_sender_data(message)
+        user = db.get_or_create_user(message.chat.id, sender_data)
+        borrowed = db.get_active_debts_for_borrower(message.chat.id, user.user_id)
+        lent = db.get_active_debts_for_lender(message.chat.id, user.user_id)
+
+        lines = ["📒 <b>Долги</b>", ""]
+        if borrowed:
+            lines.append("<b>Ты должен:</b>")
+            for debt in borrowed[:10]:
+                left = int(debt["amount"]) - int(debt.get("paid_amount") or 0) - int(debt.get("forgiven_amount") or 0)
+                due_at = _parse_iso_dt(debt.get("due_at"))
+                overdue = due_at and due_at < datetime.now(timezone.utc)
+                marker = " 🚨 просрочен" if overdue else ""
+                lines.append(f"• {escape_html(debt.get('lender_name') or str(debt['lender_id']))}: <b>{left} 🍪</b>{marker}")
+        else:
+            lines.append("<b>Ты должен:</b> ничего")
+
+        lines.append("")
+        if lent:
+            lines.append("<b>Тебе должны:</b>")
+            for debt in lent[:10]:
+                left = int(debt["amount"]) - int(debt.get("paid_amount") or 0) - int(debt.get("forgiven_amount") or 0)
+                lines.append(f"• {escape_html(debt.get('borrower_name') or str(debt['borrower_id']))}: <b>{left} 🍪</b>")
+        else:
+            lines.append("<b>Тебе должны:</b> ничего")
+        await message.answer("\n".join(lines), parse_mode="HTML")
+
+    @router.message(Command("forgive"))
+    async def forgive_command(message: Message, command: CommandObject) -> None:
+        if not message.reply_to_message or not command.args or not command.args.strip().isdigit():
+            await message.answer("🕊 <b>Простить долг</b>\n\nИспользование: <code>/forgive &lt;сумма&gt;</code> в ответ должнику.", parse_mode="HTML")
+            return
+        amount = int(command.args.strip())
+        if amount <= 0:
+            await message.answer("Сумма должна быть больше нуля.")
+            return
+        lender = db.get_or_create_user(message.chat.id, get_sender_data(message))
+        borrower_id = get_sender_data(message.reply_to_message).user_id
+        result = db.forgive_debts(lender, borrower_id, amount)
+        forgiven = int(result.get("forgiven") or 0)
+        borrower = result.get("borrower")
+        if forgiven <= 0 or not borrower:
+            await message.answer("❌ Активного долга перед тобой не найдено.")
+            return
+        await message.answer(
+            f"🕊 <b>Долг прощён.</b>\n"
+            f"{escape_html(lender.display_name)} простил {escape_html(borrower.display_name)} <b>{forgiven} 🍪</b>.",
+            parse_mode="HTML",
+        )
+
+    @router.message(Command("jail"))
+    async def jail_command(message: Message) -> None:
+        target_data = get_sender_data(message.reply_to_message) if message.reply_to_message else get_sender_data(message)
+        user = db.get_or_create_user(message.chat.id, target_data)
+        remaining = _jail_remaining(user)
+        if not remaining:
+            await message.answer(f"✅ {escape_html(user.display_name)} на свободе.", parse_mode="HTML")
+            return
+        await message.answer(
+            f"🚔 <b>{escape_html(user.display_name)} в тюрьме</b>\n"
+            f"Осталось: <b>{_format_remaining(remaining)}</b>\n"
+            f"Причина: <i>{escape_html(user.jail_reason or 'нарушение')}</i>\n"
+            f"Залог: <b>{_bail_cost(user)} 🍪</b>",
+            parse_mode="HTML",
+        )
+
+    @router.message(Command("judge"))
+    async def judge_command(message: Message, command: CommandObject) -> None:
+        if not await is_admin(message):
+            await message.answer("❌ Судить может только администратор.")
+            return
+        if not message.reply_to_message or not command.args:
+            await message.answer(
+                "⚖️ <b>Суд</b>\n\n"
+                "Использование:\n"
+                "<code>/judge 30 причина</code> — посадить на 30 минут\n"
+                "<code>/judge release</code> — выпустить",
+                parse_mode="HTML",
+            )
+            return
+
+        target = db.get_or_create_user(message.chat.id, get_sender_data(message.reply_to_message))
+        args = command.args.strip().split(maxsplit=1)
+        if args[0].lower() in {"release", "free", "выпустить"}:
+            db.update_user(target.id, {"jailed_until": None, "jail_reason": None, "steal_fail_streak": 0})
+            await message.answer(f"🔓 {escape_html(target.display_name)} выпущен на свободу.", parse_mode="HTML")
+            return
+        if not args[0].isdigit():
+            await message.answer("❌ Укажи минуты: <code>/judge 30 причина</code>", parse_mode="HTML")
+            return
+        minutes = min(24 * 60, max(1, int(args[0])))
+        reason = args[1] if len(args) > 1 else "решение суда"
+        _jail_user(target, minutes, reason)
+        await message.answer(
+            f"⚖️ <b>Приговор исполнен.</b>\n"
+            f"{escape_html(target.display_name)} отправлен в тюрьму на <b>{minutes} мин.</b>\n"
+            f"Причина: <i>{escape_html(reason)}</i>",
+            parse_mode="HTML",
+        )
+
+    @router.message(Command("bail"))
+    async def bail_command(message: Message) -> None:
+        user = db.get_or_create_user(message.chat.id, get_sender_data(message))
+        remaining = _jail_remaining(user)
+        if not remaining:
+            await message.answer("✅ Ты уже на свободе.")
+            return
+        cost = _bail_cost(user)
+        if user.reputation < cost:
+            await message.answer(f"❌ Не хватает на залог. Нужно <b>{cost} 🍪</b>, у тебя <b>{user.reputation} 🍪</b>.", parse_mode="HTML")
+            return
+
+        creditor_part = min(user.debt, max(0, cost // 2))
+        if creditor_part > 0:
+            db.repay_debts(user, creditor_part)
+            user = db.get_user_by_platform_id(message.chat.id, user.user_id) or user
+        fee = cost - creditor_part
+        db.update_user(
+            user.id,
+            {
+                "reputation": max(0, user.reputation - fee),
+                "jailed_until": None,
+                "jail_reason": None,
+                "steal_fail_streak": 0,
+            },
+        )
+        await message.answer(
+            f"🔓 <b>Залог оплачен.</b>\n"
+            f"Стоимость: <b>{cost} 🍪</b>\n"
+            f"Кредиторам ушло: <b>{creditor_part} 🍪</b>\n"
+            f"Ты снова на свободе.",
+            parse_mode="HTML",
         )
 
     @router.message(Command("give"))
@@ -549,27 +846,70 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
             await message.answer("Воровать у самого себя? Ты гений мысли.")
             return
 
+        sender = db.get_or_create_user(message.chat.id, sender_data)
+        target = db.get_or_create_user(message.chat.id, target_data)
+        if await _deny_if_jailed(message, sender, "/steal"):
+            return
+        
+        if target.reputation < 10:
+            await message.answer("🥥 У цели слишком мало печенек. Ниже 10 🍪 воровать нельзя.")
+            return
+
         ok, remaining = db.can_user_use_command(message.chat.id, sender_data.user_id, "steal", 900)
         if not ok:
             await message.answer(f"⏳ Ты ещё не отошёл от прошлого дела. Подожди {remaining} сек.")
             return
 
-        sender = db.get_or_create_user(message.chat.id, sender_data)
-        target = db.get_or_create_user(message.chat.id, target_data)
-        
-        if target.reputation <= 0:
-            await message.answer("🥥 У этого бедняка нечего воровать, карманы пусты.")
+        level_delta = sender.level - target.level
+        success_chance = min(0.45, max(0.15, 0.30 + level_delta * 0.02 + sender.steal_success_streak * 0.01))
+        roll = random.random()
+
+        if roll < success_chance:
+            critical = roll < 0.04
+            max_steal = min(25, max(1, int(target.reputation * 0.08)))
+            amount = random.randint(1, max_steal)
+            if critical:
+                amount = min(target.reputation, amount * 2)
+            db.update_user(target.id, {"reputation": max(0, target.reputation - amount)})
+            db.update_user(
+                sender.id,
+                {
+                    "reputation": sender.reputation + amount,
+                    "steal_success_streak": min(sender.steal_success_streak + 1, 5),
+                    "steal_fail_streak": 0,
+                },
+            )
+            crit_text = "\n✨ <i>Критический успех!</i>" if critical else ""
+            await message.answer(
+                f"🤫 <b>УСПЕХ!</b> {escape_html(sender.display_name)} стащил <b>{amount} 🍪</b> "
+                f"у {escape_html(target.display_name)}.{crit_text}",
+                parse_mode="HTML",
+            )
             return
 
-        chance = random.random()
-        if chance < 0.35: # Success
-            amount = random.randint(1, max(1, int(target.reputation * 0.05)))
-            db.add_reputation(target, -amount)
-            db.add_reputation(sender, amount)
-            await message.answer(f"🤫 <b>УСПЕХ!</b> Ты незаметно стащил <b>{amount} 🍪</b> у {escape_html(target.display_name)}.", parse_mode="HTML")
-        else: # Failure
-            db.add_reputation(sender, -2) # Small penalty for being caught
-            await message.answer(f"🤡 <b>ТЕБЯ ПОЙМАЛИ!</b> {escape_html(sender.display_name)} пытался залезть в карман к {escape_html(target.display_name)}, но споткнулся и выронил 2 🍪.")
+        fail_streak = sender.steal_fail_streak + 1
+        critical_fail = roll > 0.94
+        penalty = min(sender.reputation, max(2, int(max(sender.reputation, 20) * (0.12 if critical_fail else 0.06))))
+        jail_chance = 0.2 + (0.15 if fail_streak >= 3 else 0) + (0.25 if critical_fail else 0)
+        jailed = random.random() < jail_chance
+
+        updates = {
+            "reputation": max(0, sender.reputation - penalty),
+            "steal_fail_streak": fail_streak,
+            "steal_success_streak": 0,
+        }
+        if jailed:
+            jail_minutes = 60 if critical_fail else (30 if fail_streak >= 3 else 15)
+            updates["jailed_until"] = (datetime.now(timezone.utc) + timedelta(minutes=jail_minutes)).isoformat()
+            updates["jail_reason"] = "провал кражи"
+        db.update_user(sender.id, updates)
+
+        jail_text = f"\n🚔 И ещё тебя посадили на <b>{jail_minutes} мин.</b>" if jailed else ""
+        await message.answer(
+            f"🤡 <b>ТЕБЯ ПОЙМАЛИ!</b> {escape_html(sender.display_name)} полез к "
+            f"{escape_html(target.display_name)} и потерял <b>{penalty} 🍪</b>.{jail_text}",
+            parse_mode="HTML",
+        )
 
     @router.message(Command("setflavor", "вкус"))
     async def set_flavor_command(message: Message, command: CommandObject) -> None:
@@ -610,6 +950,8 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
         await message.delete()
         await message.answer(command.args)
 
+    _casino_double_sessions = {}
+
     @router.message(Command("casino", "gamble", "spin", "казино", "ставка"))
     async def casino_command(message: Message, command: CommandObject) -> None:
         if not command.args or not command.args.strip().isdigit():
@@ -623,6 +965,8 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
 
         sender_data = get_sender_data(message)
         sender = db.get_or_create_user(message.chat.id, sender_data)
+        if await _deny_if_jailed(message, sender, "/casino"):
+            return
         
         if sender.reputation < bet:
             await message.answer(f"❌ Недостаточно печенек! У тебя всего: <b>{sender.reputation}</b> 🍪")
@@ -672,9 +1016,14 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
         if r1 == r2 == r3:
             if r1 == "🎰":
                 is_jackpot = True
-                win_total = int(bet * 50) + current_jackpot
+                jackpot_bonus = min(current_jackpot, bet * 10)
+                win_total = int(bet * 50) + jackpot_bonus
                 db.update_chat_settings(message.chat.id, casino_jackpot=500)
-                result_text = f"🌌 <b>ЛЕГЕНДАРНЫЙ ДЖЕКПОТ!!!</b>\n\nТы сорвал куш в <b>{win_total}</b> 🍪! 🎉🍾"
+                result_text = (
+                    f"🌌 <b>ЛЕГЕНДАРНЫЙ ДЖЕКПОТ!!!</b>\n\n"
+                    f"Выигрыш x50 и джекпот-бонус <b>{jackpot_bonus}</b> 🍪!\n"
+                    f"Итого: <b>{win_total}</b> 🍪 🎉🍾"
+                )
             elif r1 == "💎":
                 win_total = bet * 25
                 result_text = "💎 <b>БРИЛЛИАНТОВЫЙ ВЫИГРЫШ!</b> x25!"
@@ -713,8 +1062,11 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
             ])
 
         await msg.edit_text(final_msg, reply_markup=keyboard, parse_mode="HTML")
-
-    _casino_double_locks = set()
+        if win_total > 0 and not is_jackpot:
+            _casino_double_sessions[f"{message.chat.id}_{msg.message_id}"] = {
+                "user_id": sender.user_id,
+                "win_amount": win_total,
+            }
 
     @router.callback_query(F.data.startswith("dice_double_"))
     async def casino_double_callback(query: CallbackQuery) -> None:
@@ -731,10 +1083,13 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
             return
 
         lock_key = f"{query.message.chat.id}_{query.message.message_id}"
-        if lock_key in _casino_double_locks:
-            await query.answer("⏳ Этот риск уже разыгран.", show_alert=True)
+        session = _casino_double_sessions.get(lock_key)
+        if not session:
+            await query.answer("⏳ Этот риск уже недоступен.", show_alert=True)
             return
-        _casino_double_locks.add(lock_key)
+        if session["user_id"] != user_id or session["win_amount"] != win_amount:
+            await query.answer("❌ Кнопка не совпадает с этим выигрышем.", show_alert=True)
+            return
 
         sender = db.get_user_by_platform_id(query.message.chat.id, user_id)
         if not sender: return
@@ -742,6 +1097,8 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
         if sender.reputation < win_amount:
             await query.answer("❌ На балансе уже не хватает этого выигрыша.", show_alert=True)
             return
+
+        _casino_double_sessions.pop(lock_key, None)
         
         if random.random() < 0.45: # 45% chance to double
             new_win = win_amount * 2
@@ -776,13 +1133,18 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
         return "Новичок"
 
     def _get_tower_multiplier(floor: int) -> float:
-        multipliers = [1.0, 1.15, 1.35, 1.7, 2.4, 3.5, 6.0, 12.0, 25.0, 60.0]
+        multipliers = [1.0, 1.03, 1.18, 1.48, 2.1, 3.4, 6.0, 12.0, 25.0, 60.0]
         if floor < 1: return 1.0
         if floor > 10: return multipliers[-1]
         return multipliers[floor-1]
 
+    def _get_tower_reward_multiplier(floor: int, weather: dict) -> float:
+        weather_mod = weather["reward_mod"] if floor > 1 else 1.0
+        return _get_tower_multiplier(floor) * weather_mod
+
     # --- ИГРА: БАШНЯ ФОРТУНЫ (COMPACT & DYNAMIC VERSION) ---
     _tower_locks = {}
+    _tower_sessions = {}
 
     @router.message(Command("tower", "башня", "climb"))
     async def tower_command(message: Message, command: CommandObject) -> None:
@@ -798,6 +1160,8 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
         bet = int(command.args.strip())
         sender_data = get_sender_data(message)
         sender = db.get_or_create_user(message.chat.id, sender_data)
+        if await _deny_if_jailed(message, sender, "/tower"):
+            return
         
         if bet < 5:
             await message.answer("❌ Минимальная ставка: 5 🍪")
@@ -814,14 +1178,21 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
 
         weathers = [
             {"name": "☀️ Ясно", "chance_mod": 0, "reward_mod": 1.0},
-            {"name": "🌫 Туман", "chance_mod": -0.05, "reward_mod": 1.2},
-            {"name": "🌪 Буря", "chance_mod": -0.15, "reward_mod": 1.5},
-            {"name": "🌈 Попутный ветер", "chance_mod": 0.1, "reward_mod": 0.9}
+            {"name": "🌫 Туман", "chance_mod": -0.05, "reward_mod": 1.06},
+            {"name": "🌪 Буря", "chance_mod": -0.12, "reward_mod": 1.15},
+            {"name": "🌈 Попутный ветер", "chance_mod": 0.03, "reward_mod": 0.88}
         ]
         weather = random.choice(weathers)
         
         db.update_user(sender.id, {"reputation": sender.reputation - bet})
-        await _show_tower(message, floor=1, bet=bet, user_id=sender.user_id, is_new=True, weather=weather, event_msg="Ты у подножия башни.")
+        sent_msg = await _show_tower(message, floor=1, bet=bet, user_id=sender.user_id, is_new=True, weather=weather, event_msg="Ты у подножия башни.")
+        if sent_msg:
+            _tower_sessions[f"{message.chat.id}_{sent_msg.message_id}"] = {
+                "user_id": sender.user_id,
+                "floor": 1,
+                "bet": bet,
+                "weather_idx": weathers.index(weather),
+            }
 
     @router.callback_query(F.data.startswith("tower_"))
     async def tower_callback(query: CallbackQuery) -> None:
@@ -838,9 +1209,9 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
         
         weathers = [
             {"name": "☀️ Ясно", "chance_mod": 0, "reward_mod": 1.0},
-            {"name": "🌫 Туман", "chance_mod": -0.05, "reward_mod": 1.2},
-            {"name": "🌪 Буря", "chance_mod": -0.15, "reward_mod": 1.5},
-            {"name": "🌈 Попутный ветер", "chance_mod": 0.1, "reward_mod": 0.9}
+            {"name": "🌫 Туман", "chance_mod": -0.05, "reward_mod": 1.06},
+            {"name": "🌪 Буря", "chance_mod": -0.12, "reward_mod": 1.15},
+            {"name": "🌈 Попутный ветер", "chance_mod": 0.03, "reward_mod": 0.88}
         ]
         if action not in {"up", "take"} or floor < 1 or bet < 1 or weather_idx not in range(len(weathers)):
             await query.answer("❌ Некорректная кнопка.", show_alert=True)
@@ -853,6 +1224,19 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
             
         now = time.time()
         lock_key = f"{query.message.chat.id}_{query.message.message_id}"
+        session = _tower_sessions.get(lock_key)
+        if not session:
+            await query.answer("⏳ Эта башня уже завершена или устарела.", show_alert=True)
+            return
+        if (
+            session["user_id"] != original_user_id
+            or session["floor"] != floor
+            or session["bet"] != bet
+            or session["weather_idx"] != weather_idx
+        ):
+            await query.answer("❌ Этот ход уже неактивен.", show_alert=True)
+            return
+
         if lock_key in _tower_locks and now - _tower_locks[lock_key] < 0.8:
             await query.answer("⏳ Подожди секунду...", show_alert=False)
             return
@@ -862,7 +1246,8 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
         if not sender: return
 
         if action == "take":
-            multiplier = _get_tower_multiplier(floor) * weather["reward_mod"]
+            _tower_sessions.pop(lock_key, None)
+            multiplier = _get_tower_reward_multiplier(floor, weather)
             win = int(bet * multiplier)
             db.update_user(sender.id, {"reputation": sender.reputation + win})
             
@@ -897,26 +1282,32 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
             if random.random() < success_chance:
                 new_floor = floor + 1
                 if new_floor > 10:
-                    multiplier = _get_tower_multiplier(10) * weather["reward_mod"]
+                    multiplier = _get_tower_reward_multiplier(10, weather)
                     win = int(bet * multiplier)
+                    _tower_sessions.pop(lock_key, None)
                     db.update_user(sender.id, {"reputation": sender.reputation + win})
                     await query.message.edit_text(f"🏆 <b>ТЫ ПОКОРИЛ ВЕРШИНУ БАШНИ!</b> (x{multiplier:.1f})\n💰 Твой куш: {win} 🍪", parse_mode="HTML")
+                    await query.answer("🏆 Вершина взята!")
                     return
 
                 try:
                     await _show_tower(query.message, floor=new_floor, bet=bet, user_id=original_user_id, is_new=False, weather=weather, event_msg=event_msg)
+                    _tower_sessions[lock_key]["floor"] = new_floor
                     await query.answer("✅ Успешный подъем!")
-                except Exception: pass
+                except Exception as exc:
+                    print(f"[tower:error] edit failed: {exc}")
+                    await query.answer("❌ Не удалось обновить башню. Попробуй ещё раз.", show_alert=True)
             else:
                 # Чекпоинты
                 safe_win = 0
-                mult = _get_tower_multiplier(floor) * weather["reward_mod"]
+                mult = _get_tower_reward_multiplier(floor, weather)
                 if floor >= 8: safe_win = int(bet * mult * 0.6)
                 elif floor >= 5: safe_win = int(bet * mult * 0.3)
 
                 if safe_win > 0:
                     db.update_user(sender.id, {"reputation": sender.reputation + safe_win})
 
+                _tower_sessions.pop(lock_key, None)
                 await query.message.edit_text(
                     f"💀 <b>ТЫ СОРВАЛСЯ ВНИЗ!</b>\n\n"
                     f"👤 Игрок: <b>{escape_html(sender.display_name)}</b>\n"
@@ -927,15 +1318,15 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
                 )
                 await query.answer("💥 БА-БАХ!", show_alert=True)
 
-    async def _show_tower(msg: Message, floor: int, bet: int, user_id: int, is_new: bool, weather: dict, event_msg: str = "") -> None:
-        multiplier = _get_tower_multiplier(floor) * weather["reward_mod"]
+    async def _show_tower(msg: Message, floor: int, bet: int, user_id: int, is_new: bool, weather: dict, event_msg: str = "") -> Message | None:
+        multiplier = _get_tower_reward_multiplier(floor, weather)
         weathers_list = ["☀️ Ясно", "🌫 Туман", "🌪 Буря", "🌈 Попутный ветер"]
         w_idx = weathers_list.index(weather["name"]) if weather["name"] in weathers_list else 0
 
         # Компактный Радар (показываем только 3 этажа)
         tower_lines = []
         for i in range(min(10, floor + 1), max(0, floor - 2), -1):
-            m = _get_tower_multiplier(i) * weather["reward_mod"]
+            m = _get_tower_reward_multiplier(i, weather)
             m_text = f"x{m:.1f}" if weather["name"] != "🌫 Туман" or i <= floor else "x???"
             
             if i == floor:
@@ -966,7 +1357,9 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
             ]
         ])
         
-        if is_new: await msg.answer(text, reply_markup=kb, parse_mode="HTML")
-        else: await msg.edit_text(text, reply_markup=kb, parse_mode="HTML")
+        if is_new:
+            return await msg.answer(text, reply_markup=kb, parse_mode="HTML")
+        await msg.edit_text(text, reply_markup=kb, parse_mode="HTML")
+        return msg
 
     return router
