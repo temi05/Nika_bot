@@ -126,9 +126,17 @@ def create_app() -> FastAPI:
     async def root() -> dict:
         return {"status": "running", "bot": settings.bot_name}
 
+    @app.head("/")
+    async def root_head() -> None:
+        return None
+
     @app.get("/health")
     async def health() -> dict:
         return {"status": "ok", "memory": await memory.health()}
+
+    @app.head("/health")
+    async def health_head() -> None:
+        return None
 
     @app.get("/api/memory/health")
     async def memory_health() -> dict:
