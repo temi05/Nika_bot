@@ -1071,6 +1071,17 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
         # Символы слотов
         symbols = ["🍒", "🍋", "🍇", "🍉", "🔔", "💎", "🎰"]
         r1, r2, r3 = random.choice(symbols), random.choice(symbols), random.choice(symbols)
+        symbol_rules = {
+            "🍒": {"name": "Вишневый ряд", "triple": 6.0, "pair": 1.05},
+            "🍋": {"name": "Лимонная линия", "triple": 5.0, "pair": 1.00},
+            "🍇": {"name": "Виноградный сбор", "triple": 7.0, "pair": 1.15},
+            "🍉": {"name": "Арбузный куш", "triple": 8.0, "pair": 1.30},
+            "🔔": {"name": "Колокольный звон", "triple": 12.0, "pair": 1.55},
+            "💎": {"name": "Бриллиантовая линия", "triple": 20.0, "pair": 1.90},
+            "🎰": {"name": "Легендарный слот", "triple": 45.0, "pair": 2.30},
+        }
+        fruit_symbols = {"🍒", "🍋", "🍇", "🍉"}
+        premium_symbols = {"🔔", "💎", "🎰"}
         
         # Анимация "Саспенс"
         msg = await message.answer(f"🎰 <b>ИГРОК: {escape_html(sender.display_name)}</b>\n💰 Ставка: <code>{bet}</code> 🍪\n🏆 Джекпот: <code>{current_jackpot}</code>\n\n[ 🎲 | 🎲 | 🎲 ]", parse_mode="HTML")
@@ -1093,29 +1104,35 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
         is_jackpot = False
         consol_xp = 0
 
+        reels = [r1, r2, r3]
+        counts = {symbol: reels.count(symbol) for symbol in symbols}
+        pair_symbol = next((symbol for symbol, count in counts.items() if count == 2), None)
+
         if r1 == r2 == r3:
             if r1 == "🎰":
                 is_jackpot = True
                 jackpot_bonus = min(current_jackpot, bet * 10)
-                win_total = int(bet * 50) + jackpot_bonus
+                win_total = int(bet * symbol_rules[r1]["triple"]) + jackpot_bonus
                 db.update_chat_settings(message.chat.id, casino_jackpot=500)
                 result_text = (
                     f"🌌 <b>ЛЕГЕНДАРНЫЙ ДЖЕКПОТ!!!</b>\n\n"
-                    f"Выигрыш x50 и джекпот-бонус <b>{jackpot_bonus}</b> 🍪!\n"
+                    f"Выигрыш x45 и джекпот-бонус <b>{jackpot_bonus}</b> 🍪!\n"
                     f"Итого: <b>{win_total}</b> 🍪 🎉🍾"
                 )
-            elif r1 == "💎":
-                win_total = bet * 25
-                result_text = "💎 <b>БРИЛЛИАНТОВЫЙ ВЫИГРЫШ!</b> x25!"
-            elif r1 == "🔔":
-                win_total = bet * 15
-                result_text = "🔔 <b>КОЛОКОЛЬНЫЙ ЗВОН!</b> x15!"
             else:
-                win_total = bet * 10
-                result_text = "✨ <b>ТРИ В РЯД!</b> Отличный выигрыш x10!"
-        elif r1 == r2 or r2 == r3 or r1 == r3:
-            win_total = int(bet * 1.5)
-            result_text = "🥂 <b>ПАРА!</b> Небольшой выигрыш x1.5"
+                multiplier = symbol_rules[r1]["triple"]
+                win_total = int(bet * multiplier)
+                result_text = f"✨ <b>{symbol_rules[r1]['name'].upper()}!</b> Три в ряд x{multiplier:g}!"
+        elif pair_symbol:
+            multiplier = symbol_rules[pair_symbol]["pair"]
+            win_total = max(1, int(bet * multiplier))
+            result_text = f"🥂 <b>ПАРА: {pair_symbol}{pair_symbol}</b> {symbol_rules[pair_symbol]['name']} x{multiplier:g}"
+        elif set(reels).issubset(fruit_symbols):
+            win_total = max(1, int(bet * 0.75))
+            result_text = "🍹 <b>ФРУКТОВЫЙ МИКС!</b> Не пара, но автомат вернул часть ставки x0.75"
+        elif set(reels).issubset(premium_symbols):
+            win_total = bet * 2
+            result_text = "⚡ <b>ПРЕМИУМ-ЛИНИЯ!</b> Три разных дорогих символа x2"
         else:
             win_total = 0
             consol_xp = random.randint(2, 5)
