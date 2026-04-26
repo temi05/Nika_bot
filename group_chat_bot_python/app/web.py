@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 import asyncio
+import random
+import time
 from contextlib import asynccontextmanager
 
 from aiogram import Bot, Dispatcher
-from aiogram.types import Update, BotCommand, BotCommandScopeDefault
+from aiogram.types import Update, BotCommand, BotCommandScopeDefault, InlineKeyboardButton, InlineKeyboardMarkup
 from fastapi import FastAPI, HTTPException, Request
 
 from app.bot.admin import build_admin_router
-from app.bot.commands import build_commands_router
+from app.bot.commands import AUTO_DROP_SESSIONS, AUTO_QUIZ_SESSIONS, build_commands_router, make_quiz_question
 from app.bot.messages import build_messages_router
 from app.bot.rp_commands import build_rp_router
 from app.bot.feedback import build_feedback_router
@@ -38,11 +40,12 @@ def create_app() -> FastAPI:
     async def activity_middleware(handler, event, data):
         # Обновляем время активности при каждом сообщении
         db = data.get("db")
-        if db and event.from_user:
-            db.update_last_message_time(event.chat.id, event.from_user.id)
+        if db:
+            db.mark_chat_active(event.chat.id)
         return await handler(event, data)
 
     reminder_task: asyncio.Task | None = None
+    auto_event_task: asyncio.Task | None = None
 
     async def reminders_loop() -> None:
         try:
@@ -79,6 +82,9 @@ def create_app() -> FastAPI:
             BotCommand(command="daily", description="🍪 Собрать ежедневный бонус"),
             BotCommand(command="top", description="🏆 Рейтинг участников"),
             BotCommand(command="casino", description="🎰 Крутить рулетку (ставка)"),
+            BotCommand(command="coin", description="🪙 Орел или решка"),
+            BotCommand(command="rps", description="✊ Камень-ножницы-бумага"),
+            BotCommand(command="fish", description="🎣 Рыбалка за печеньками"),
             BotCommand(command="shop", description="🛒 Магазин печенек"),
             BotCommand(command="loan", description="🤝 Предложить в долг"),
             BotCommand(command="ask_loan", description="🙏 Попросить в долг"),
@@ -88,8 +94,6 @@ def create_app() -> FastAPI:
             BotCommand(command="bail", description="🔓 Оплатить залог"),
             BotCommand(command="give", description="🎁 Подарить печеньки"),
             BotCommand(command="steal", description="🕵️ Попробовать украсть"),
-            BotCommand(command="rp", description="🎭 Ролевые команды (RP)"),
-            BotCommand(command="feedback", description="✉️ Предложения и поддержка"),
         ]
         try:
             await bot.set_my_commands(commands, scope=BotCommandScopeDefault())
@@ -98,7 +102,7 @@ def create_app() -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
-        nonlocal reminder_task
+        nonlocal reminder_task, auto_event_task
         me = await bot.get_me()
         settings.bot_username = me.username
         try:
@@ -106,7 +110,14 @@ def create_app() -> FastAPI:
         except Exception:
             pass
         reminder_task = asyncio.create_task(reminders_loop())
+        auto_event_task = asyncio.create_task(auto_events_loop())
         yield
+        if auto_event_task:
+            auto_event_task.cancel()
+            try:
+                await auto_event_task
+            except Exception:
+                pass
         if reminder_task:
             reminder_task.cancel()
             try:
@@ -121,6 +132,68 @@ def create_app() -> FastAPI:
     app.state.db = db
     app.state.memory = memory
     app.state.settings = settings
+
+    last_auto_drop: dict[int, float] = {}
+    last_auto_quiz: dict[int, float] = {}
+
+    async def auto_events_loop() -> None:
+        try:
+            while True:
+                await asyncio.sleep(60)
+                now = asyncio.get_running_loop().time()
+                for chat_id in db.get_active_chat_ids(minutes=180, limit=30):
+                    try:
+                        if now - last_auto_drop.get(chat_id, 0.0) >= 25 * 60 and random.random() < 0.35:
+                            await send_auto_drop(chat_id)
+                            last_auto_drop[chat_id] = now
+                        if now - last_auto_quiz.get(chat_id, 0.0) >= 35 * 60 and random.random() < 0.25:
+                            await send_auto_quiz(chat_id)
+                            last_auto_quiz[chat_id] = now
+                    except Exception as exc:
+                        print(f"[auto_events:error] chat_id={chat_id} error={exc}")
+        except asyncio.CancelledError:
+            pass
+
+    async def send_auto_drop(chat_id: int) -> None:
+        reward = random.randint(12, 35)
+        msg = await bot.send_message(
+            chat_id,
+            "🍪 <b>Печенька сама упала в чат!</b>\nКто первый нажмет, тот заберет награду.",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text=f"🍪 Забрать {reward}", callback_data="drop_claim")]
+            ]),
+        )
+        AUTO_DROP_SESSIONS[f"{chat_id}_{msg.message_id}"] = {
+            "reward": reward,
+            "created_at": time.time(),
+        }
+
+    async def send_auto_quiz(chat_id: int) -> None:
+        quiz = make_quiz_question()
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(text=str(quiz["options"][0]), callback_data="quiz_answer_0"),
+                InlineKeyboardButton(text=str(quiz["options"][1]), callback_data="quiz_answer_1"),
+            ],
+            [
+                InlineKeyboardButton(text=str(quiz["options"][2]), callback_data="quiz_answer_2"),
+                InlineKeyboardButton(text=str(quiz["options"][3]), callback_data="quiz_answer_3"),
+            ],
+        ])
+        msg = await bot.send_message(
+            chat_id,
+            f"🧠 <b>Авто-викторина</b>\n\n"
+            f"Сколько будет: <code>{quiz['question']}</code>?\n"
+            f"Первый правильный ответ забирает <b>{quiz['reward']}</b> 🍪.",
+            parse_mode="HTML",
+            reply_markup=keyboard,
+        )
+        AUTO_QUIZ_SESSIONS[f"{chat_id}_{msg.message_id}"] = {
+            **quiz,
+            "created_at": time.time(),
+            "wrong_users": set(),
+        }
 
     @app.get("/")
     async def root() -> dict:

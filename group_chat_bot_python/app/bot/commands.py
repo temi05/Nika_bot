@@ -12,14 +12,45 @@ from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKe
 from app.services.ai_service import AIService
 from app.services.supabase_db import SupabaseDB
 from app.bot.admin import is_admin
+from app.models import Sender
 from app.utils import (
     build_progress_bar,
     escape_html,
     get_sender_data,
     human_timedelta,
     parse_birthday_parts,
-    parse_simple_reminder_time,
 )
+
+AUTO_DROP_SESSIONS: dict[str, dict] = {}
+AUTO_QUIZ_SESSIONS: dict[str, dict] = {}
+
+
+def make_quiz_question() -> dict:
+    a = random.randint(3, 18)
+    b = random.randint(2, 15)
+    op = random.choice(["+", "-", "*"])
+    if op == "+":
+        answer = a + b
+        question = f"{a} + {b}"
+    elif op == "-":
+        a, b = max(a, b), min(a, b)
+        answer = a - b
+        question = f"{a} - {b}"
+    else:
+        answer = a * b
+        question = f"{a} × {b}"
+
+    options = {answer}
+    while len(options) < 4:
+        options.add(max(0, answer + random.randint(-12, 12)))
+    option_list = list(options)
+    random.shuffle(option_list)
+    return {
+        "question": question,
+        "answer_idx": option_list.index(answer),
+        "options": option_list,
+        "reward": random.randint(18, 45),
+    }
 
 
 def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Router:
@@ -50,16 +81,17 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
             "🎰 <b>Игры и Развлечения</b>\n\n"
             "• <code>/casino [ставка]</code> — Премиальный слот-автомат\n"
             "• <code>/tower [ставка]</code> — Рискованная Башня (до x60)\n"
-            "• <code>/kto [текст]</code> — Рандомный выбор участника\n"
-            "• <code>/remind [время] [текст]</code> — Напоминания\n"
+            "• <code>/coin [ставка] [орел/решка]</code> — Монетка x1.8\n"
+            "• <code>/rps [ставка] [камень/ножницы/бумага]</code> — Дуэль с ботом\n"
+            "• <code>/fish</code> — Рыбалка за печеньками\n"
+            "• Авто-событие: печенька падает в активный чат\n"
+            "• Авто-событие: викторина, первый правильный ответ получает приз\n"
             "• <code>/rp [действие]</code> — Ролевые взаимодействия"
         ),
         "profile": (
             "👤 <b>Персонализация</b>\n\n"
-            "• <code>/setflavor [вкус]</code> — Твой уникальный вкус\n"
             "• <code>/bio [текст]</code> — Расскажи о себе\n"
-            "• <code>/mybirthday [дата]</code> — Установи день рождения\n"
-            "• <code>/notes</code> — Твоя история в глазах ИИ"
+            "• <code>/mybirthday [дата]</code> — Установи день рождения"
         ),
         "admin": (
             "🛡 <b>Администрирование</b>\n\n"
@@ -1029,6 +1061,292 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
         
         await message.delete()
         await message.answer(command.args)
+
+    _drop_sessions = AUTO_DROP_SESSIONS
+    _quiz_sessions = AUTO_QUIZ_SESSIONS
+
+    def _callback_sender(query: CallbackQuery) -> Sender:
+        user = query.from_user
+        return Sender(
+            user_id=user.id,
+            first_name=user.first_name or "Инкогнито",
+            username=user.username,
+            is_bot=user.is_bot,
+        )
+
+    def _parse_bet_and_choice(args: str | None) -> tuple[int | None, str | None]:
+        if not args:
+            return None, None
+        parts = args.strip().lower().split(maxsplit=1)
+        if len(parts) != 2 or not parts[0].isdigit():
+            return None, None
+        return int(parts[0]), parts[1].strip()
+
+    @router.message(Command("coin", "flip", "монетка"))
+    async def coin_command(message: Message, command: CommandObject) -> None:
+        bet, choice = _parse_bet_and_choice(command.args)
+        aliases = {
+            "орел": "heads",
+            "орёл": "heads",
+            "o": "heads",
+            "heads": "heads",
+            "head": "heads",
+            "h": "heads",
+            "решка": "tails",
+            "tails": "tails",
+            "tail": "tails",
+            "t": "tails",
+        }
+        if not bet or bet <= 0 or choice not in aliases:
+            await message.answer(
+                "🪙 <b>Монетка</b>\n\n"
+                "Использование: <code>/coin &lt;ставка&gt; &lt;орел/решка&gt;</code>\n"
+                "Победа дает x1.8.",
+                parse_mode="HTML",
+            )
+            return
+
+        sender = db.get_or_create_user(message.chat.id, get_sender_data(message))
+        if await _deny_if_jailed(message, sender, "/coin"):
+            return
+        if sender.reputation < bet:
+            await message.answer(f"❌ Не хватает печенек. Баланс: <b>{sender.reputation}</b> 🍪", parse_mode="HTML")
+            return
+        allowed, remaining = db.can_user_use_command(message.chat.id, sender.user_id, "coin", 20)
+        if not allowed:
+            await message.answer(f"⏳ Монетка еще крутится. Подожди {remaining} сек.")
+            return
+
+        player_side = aliases[choice]
+        result_side = random.choice(["heads", "tails"])
+        result_text = "орел" if result_side == "heads" else "решка"
+        if player_side == result_side:
+            win = int(bet * 1.8)
+            new_balance = sender.reputation - bet + win
+            db.update_user(sender.id, {"reputation": new_balance})
+            await message.answer(
+                f"🪙 Выпало: <b>{result_text}</b>\n"
+                f"✅ {escape_html(sender.display_name)} выиграл <b>{win}</b> 🍪\n"
+                f"Баланс: <b>{new_balance}</b> 🍪",
+                parse_mode="HTML",
+            )
+        else:
+            new_balance = sender.reputation - bet
+            db.update_user(sender.id, {"reputation": new_balance})
+            await message.answer(
+                f"🪙 Выпало: <b>{result_text}</b>\n"
+                f"❌ Ставка <b>{bet}</b> 🍪 сгорела.\n"
+                f"Баланс: <b>{new_balance}</b> 🍪",
+                parse_mode="HTML",
+            )
+
+    @router.message(Command("rps", "кнб"))
+    async def rps_command(message: Message, command: CommandObject) -> None:
+        bet, choice = _parse_bet_and_choice(command.args)
+        aliases = {
+            "камень": "rock",
+            "rock": "rock",
+            "r": "rock",
+            "ножницы": "scissors",
+            "scissors": "scissors",
+            "s": "scissors",
+            "бумага": "paper",
+            "paper": "paper",
+            "p": "paper",
+        }
+        labels = {"rock": "камень", "scissors": "ножницы", "paper": "бумага"}
+        beats = {"rock": "scissors", "scissors": "paper", "paper": "rock"}
+        if not bet or bet <= 0 or choice not in aliases:
+            await message.answer(
+                "✊ <b>Камень-ножницы-бумага</b>\n\n"
+                "Использование: <code>/rps &lt;ставка&gt; &lt;камень/ножницы/бумага&gt;</code>\n"
+                "Победа дает x1.8, ничья возвращает ставку.",
+                parse_mode="HTML",
+            )
+            return
+
+        sender = db.get_or_create_user(message.chat.id, get_sender_data(message))
+        if await _deny_if_jailed(message, sender, "/rps"):
+            return
+        if sender.reputation < bet:
+            await message.answer(f"❌ Не хватает печенек. Баланс: <b>{sender.reputation}</b> 🍪", parse_mode="HTML")
+            return
+        allowed, remaining = db.can_user_use_command(message.chat.id, sender.user_id, "rps", 20)
+        if not allowed:
+            await message.answer(f"⏳ Подожди {remaining} сек. перед новой дуэлью.")
+            return
+
+        player = aliases[choice]
+        bot_choice = random.choice(list(labels.keys()))
+        if player == bot_choice:
+            await message.answer(
+                f"🤝 Ничья.\nТы: <b>{labels[player]}</b>, бот: <b>{labels[bot_choice]}</b>\n"
+                f"Ставка возвращена.",
+                parse_mode="HTML",
+            )
+        elif beats[player] == bot_choice:
+            win = int(bet * 1.8)
+            new_balance = sender.reputation - bet + win
+            db.update_user(sender.id, {"reputation": new_balance})
+            await message.answer(
+                f"✊ <b>Победа!</b>\nТы: <b>{labels[player]}</b>, бот: <b>{labels[bot_choice]}</b>\n"
+                f"Выигрыш: <b>{win}</b> 🍪\nБаланс: <b>{new_balance}</b> 🍪",
+                parse_mode="HTML",
+            )
+        else:
+            new_balance = sender.reputation - bet
+            db.update_user(sender.id, {"reputation": new_balance})
+            await message.answer(
+                f"💥 <b>Проигрыш.</b>\nТы: <b>{labels[player]}</b>, бот: <b>{labels[bot_choice]}</b>\n"
+                f"Потеряно: <b>{bet}</b> 🍪\nБаланс: <b>{new_balance}</b> 🍪",
+                parse_mode="HTML",
+            )
+
+    @router.message(Command("fish", "рыбалка"))
+    async def fish_command(message: Message) -> None:
+        sender = db.get_or_create_user(message.chat.id, get_sender_data(message))
+        if await _deny_if_jailed(message, sender, "/fish"):
+            return
+        allowed, remaining = db.can_user_use_command(message.chat.id, sender.user_id, "fish", 30 * 60)
+        if not allowed:
+            await message.answer(f"🎣 Рыба пока не клюет. Возвращайся через {remaining // 60 + 1} мин.")
+            return
+
+        roll = random.random()
+        if roll < 0.18:
+            reward, xp, text = 0, random.randint(2, 5), "🪣 Поймал старое ведро. Зато опыт есть."
+        elif roll < 0.62:
+            reward, xp, text = random.randint(6, 16), random.randint(5, 9), "🐟 Обычная рыбка."
+        elif roll < 0.88:
+            reward, xp, text = random.randint(18, 35), random.randint(8, 14), "🐠 Редкий улов."
+        elif roll < 0.98:
+            reward, xp, text = random.randint(45, 80), random.randint(12, 20), "🦑 Очень жирный улов."
+        else:
+            reward, xp, text = random.randint(120, 180), random.randint(20, 35), "🧰 Сундук со дна!"
+
+        db.update_user(sender.id, {"reputation": sender.reputation + reward, "xp": sender.xp + xp})
+        await message.answer(
+            f"🎣 <b>Рыбалка</b>\n\n"
+            f"{text}\n"
+            f"Награда: <b>{reward}</b> 🍪 и <b>{xp}</b> XP\n"
+            f"Баланс: <b>{sender.reputation + reward}</b> 🍪",
+            parse_mode="HTML",
+        )
+
+    @router.message(Command("drop", "cookie_drop"))
+    async def drop_command(message: Message) -> None:
+        allowed, remaining = db.can_use_command(message.chat.id, "cookie_drop", 20 * 60)
+        if not allowed:
+            await message.answer(f"🍪 Следующая печенька упадет примерно через {remaining // 60 + 1} мин.")
+            return
+        reward = random.randint(12, 35)
+        msg = await message.answer(
+            "🍪 <b>Печенька упала в чат!</b>\nКто первый нажмет, тот заберет награду.",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text=f"🍪 Забрать {reward}", callback_data="drop_claim")]
+            ]),
+        )
+        _drop_sessions[f"{message.chat.id}_{msg.message_id}"] = {
+            "reward": reward,
+            "created_at": time.time(),
+        }
+
+    @router.callback_query(F.data == "drop_claim")
+    async def drop_callback(query: CallbackQuery) -> None:
+        if not query.message:
+            await query.answer("Печенька уже исчезла.", show_alert=True)
+            return
+        key = f"{query.message.chat.id}_{query.message.message_id}"
+        session = _drop_sessions.get(key)
+        if not session or time.time() - session["created_at"] > 180:
+            _drop_sessions.pop(key, None)
+            await query.answer("Печенька уже исчезла.", show_alert=True)
+            return
+
+        user = db.get_or_create_user(query.message.chat.id, _callback_sender(query))
+        if _jail_remaining(user):
+            await query.answer("Из тюрьмы печеньки не ловятся.", show_alert=True)
+            return
+        _drop_sessions.pop(key, None)
+        reward = int(session["reward"])
+        db.update_user(user.id, {"reputation": user.reputation + reward})
+        await query.message.edit_text(
+            f"🍪 <b>{escape_html(user.display_name)} забрал печеньку!</b>\n"
+            f"Награда: <b>{reward}</b> 🍪",
+            parse_mode="HTML",
+        )
+        await query.answer(f"+{reward} 🍪")
+
+    @router.message(Command("quiz", "викторина"))
+    async def quiz_command(message: Message) -> None:
+        allowed, remaining = db.can_use_command(message.chat.id, "quiz", 5 * 60)
+        if not allowed:
+            await message.answer(f"🧠 Следующий вопрос через {remaining // 60 + 1} мин.")
+            return
+        quiz = make_quiz_question()
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(text=str(quiz["options"][0]), callback_data="quiz_answer_0"),
+                InlineKeyboardButton(text=str(quiz["options"][1]), callback_data="quiz_answer_1"),
+            ],
+            [
+                InlineKeyboardButton(text=str(quiz["options"][2]), callback_data="quiz_answer_2"),
+                InlineKeyboardButton(text=str(quiz["options"][3]), callback_data="quiz_answer_3"),
+            ],
+        ])
+        msg = await message.answer(
+            f"🧠 <b>Викторина</b>\n\n"
+            f"Сколько будет: <code>{quiz['question']}</code>?\n"
+            f"Награда: <b>{quiz['reward']}</b> 🍪",
+            parse_mode="HTML",
+            reply_markup=keyboard,
+        )
+        _quiz_sessions[f"{message.chat.id}_{msg.message_id}"] = {
+            **quiz,
+            "created_at": time.time(),
+            "wrong_users": set(),
+        }
+
+    @router.callback_query(F.data.startswith("quiz_answer_"))
+    async def quiz_callback(query: CallbackQuery) -> None:
+        if not query.message or not query.data:
+            await query.answer("Вопрос уже исчез.", show_alert=True)
+            return
+        try:
+            answer_idx = int(query.data.rsplit("_", 1)[1])
+        except ValueError:
+            await query.answer("Кнопка устарела.", show_alert=True)
+            return
+
+        key = f"{query.message.chat.id}_{query.message.message_id}"
+        session = _quiz_sessions.get(key)
+        if not session or time.time() - session["created_at"] > 180:
+            _quiz_sessions.pop(key, None)
+            await query.answer("Вопрос уже устарел.", show_alert=True)
+            return
+        if query.from_user.id in session["wrong_users"]:
+            await query.answer("У тебя уже была попытка.", show_alert=True)
+            return
+        if answer_idx != session["answer_idx"]:
+            session["wrong_users"].add(query.from_user.id)
+            await query.answer("Мимо. Одна попытка на человека.", show_alert=True)
+            return
+
+        user = db.get_or_create_user(query.message.chat.id, _callback_sender(query))
+        if _jail_remaining(user):
+            await query.answer("Из тюрьмы в викторине не участвуют.", show_alert=True)
+            return
+        _quiz_sessions.pop(key, None)
+        reward = int(session["reward"])
+        db.update_user(user.id, {"reputation": user.reputation + reward, "xp": user.xp + 8})
+        await query.message.edit_text(
+            f"🧠 <b>Правильный ответ: {session['options'][session['answer_idx']]}</b>\n"
+            f"Победитель: <b>{escape_html(user.display_name)}</b>\n"
+            f"Награда: <b>{reward}</b> 🍪 и <b>8</b> XP",
+            parse_mode="HTML",
+        )
+        await query.answer(f"+{reward} 🍪")
 
     _casino_double_sessions = {}
 
