@@ -23,6 +23,7 @@ from app.utils import (
 
 AUTO_DROP_SESSIONS: dict[str, dict] = {}
 AUTO_QUIZ_SESSIONS: dict[str, dict] = {}
+AUTO_CLAIMED_EVENTS: set[str] = set()
 
 
 def make_quiz_question() -> dict:
@@ -1074,6 +1075,10 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
             is_bot=user.is_bot,
         )
 
+    def _is_group_chat(message: Message) -> bool:
+        chat_type = getattr(message.chat, "type", "")
+        return getattr(chat_type, "value", str(chat_type)) in {"group", "supergroup"}
+
     def _parse_bet_and_choice(args: str | None) -> tuple[int | None, str | None]:
         if not args:
             return None, None
@@ -1235,21 +1240,25 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
 
     @router.message(Command("drop", "cookie_drop"))
     async def drop_command(message: Message) -> None:
+        if not _is_group_chat(message):
+            await message.answer("🍪 Печеньки в чат падают только в группах.")
+            return
         allowed, remaining = db.can_use_command(message.chat.id, "cookie_drop", 20 * 60)
         if not allowed:
             await message.answer(f"🍪 Следующая печенька упадет примерно через {remaining // 60 + 1} мин.")
             return
         reward = random.randint(12, 35)
+        created_at = int(time.time())
         msg = await message.answer(
             "🍪 <b>Печенька упала в чат!</b>\nКто первый нажмет, тот заберет награду.",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text=f"🍪 Забрать {reward}", callback_data="drop_claim")]
+                [InlineKeyboardButton(text=f"🍪 Забрать {reward}", callback_data=f"drop_claim_{reward}_{created_at}")]
             ]),
         )
         _drop_sessions[f"{message.chat.id}_{msg.message_id}"] = {
             "reward": reward,
-            "created_at": time.time(),
+            "created_at": created_at,
         }
 
     @router.callback_query(F.data == "drop_claim")
@@ -1258,8 +1267,23 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
             await query.answer("Печенька уже исчезла.", show_alert=True)
             return
         key = f"{query.message.chat.id}_{query.message.message_id}"
+        event_key = f"drop_{key}"
+        if event_key in AUTO_CLAIMED_EVENTS:
+            await query.answer("Печеньку уже забрали.", show_alert=True)
+            return
         session = _drop_sessions.get(key)
-        if not session or time.time() - session["created_at"] > 180:
+        reward = None
+        created_at = None
+        if session:
+            reward = int(session["reward"])
+            created_at = int(session["created_at"])
+        elif query.data:
+            parts = query.data.split("_")
+            if len(parts) == 4 and parts[2].isdigit() and parts[3].isdigit():
+                reward = int(parts[2])
+                created_at = int(parts[3])
+
+        if reward is None or created_at is None or time.time() - created_at > 10 * 60:
             _drop_sessions.pop(key, None)
             await query.answer("Печенька уже исчезла.", show_alert=True)
             return
@@ -1268,8 +1292,8 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
         if _jail_remaining(user):
             await query.answer("Из тюрьмы печеньки не ловятся.", show_alert=True)
             return
+        AUTO_CLAIMED_EVENTS.add(event_key)
         _drop_sessions.pop(key, None)
-        reward = int(session["reward"])
         db.update_user(user.id, {"reputation": user.reputation + reward})
         await query.message.edit_text(
             f"🍪 <b>{escape_html(user.display_name)} забрал печеньку!</b>\n"
@@ -1280,19 +1304,23 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
 
     @router.message(Command("quiz", "викторина"))
     async def quiz_command(message: Message) -> None:
+        if not _is_group_chat(message):
+            await message.answer("🧠 Викторина запускается только в группах.")
+            return
         allowed, remaining = db.can_use_command(message.chat.id, "quiz", 5 * 60)
         if not allowed:
             await message.answer(f"🧠 Следующий вопрос через {remaining // 60 + 1} мин.")
             return
         quiz = make_quiz_question()
+        created_at = int(time.time())
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [
-                InlineKeyboardButton(text=str(quiz["options"][0]), callback_data="quiz_answer_0"),
-                InlineKeyboardButton(text=str(quiz["options"][1]), callback_data="quiz_answer_1"),
+                InlineKeyboardButton(text=str(quiz["options"][0]), callback_data=f"quiz_answer_0_{quiz['answer_idx']}_{quiz['reward']}_{created_at}_{quiz['options'][quiz['answer_idx']]}"),
+                InlineKeyboardButton(text=str(quiz["options"][1]), callback_data=f"quiz_answer_1_{quiz['answer_idx']}_{quiz['reward']}_{created_at}_{quiz['options'][quiz['answer_idx']]}"),
             ],
             [
-                InlineKeyboardButton(text=str(quiz["options"][2]), callback_data="quiz_answer_2"),
-                InlineKeyboardButton(text=str(quiz["options"][3]), callback_data="quiz_answer_3"),
+                InlineKeyboardButton(text=str(quiz["options"][2]), callback_data=f"quiz_answer_2_{quiz['answer_idx']}_{quiz['reward']}_{created_at}_{quiz['options'][quiz['answer_idx']]}"),
+                InlineKeyboardButton(text=str(quiz["options"][3]), callback_data=f"quiz_answer_3_{quiz['answer_idx']}_{quiz['reward']}_{created_at}_{quiz['options'][quiz['answer_idx']]}"),
             ],
         ])
         msg = await message.answer(
@@ -1304,7 +1332,7 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
         )
         _quiz_sessions[f"{message.chat.id}_{msg.message_id}"] = {
             **quiz,
-            "created_at": time.time(),
+            "created_at": created_at,
             "wrong_users": set(),
         }
 
@@ -1314,14 +1342,39 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
             await query.answer("Вопрос уже исчез.", show_alert=True)
             return
         try:
-            answer_idx = int(query.data.rsplit("_", 1)[1])
-        except ValueError:
+            parts = query.data.split("_")
+            answer_idx = int(parts[2])
+        except (IndexError, ValueError):
             await query.answer("Кнопка устарела.", show_alert=True)
             return
 
         key = f"{query.message.chat.id}_{query.message.message_id}"
+        event_key = f"quiz_{key}"
+        if event_key in AUTO_CLAIMED_EVENTS:
+            await query.answer("Приз уже забрали.", show_alert=True)
+            return
         session = _quiz_sessions.get(key)
-        if not session or time.time() - session["created_at"] > 180:
+        answer_value = None
+        if (
+            not session
+            and len(parts) == 7
+            and parts[3].isdigit()
+            and parts[4].isdigit()
+            and parts[5].isdigit()
+            and parts[6].isdigit()
+        ):
+            session = {
+                "answer_idx": int(parts[3]),
+                "reward": int(parts[4]),
+                "created_at": int(parts[5]),
+                "options": [None, None, None, None],
+                "wrong_users": set(),
+            }
+            answer_value = parts[6]
+        if session:
+            answer_value = answer_value or str(session["options"][session["answer_idx"]])
+
+        if not session or time.time() - int(session["created_at"]) > 10 * 60:
             _quiz_sessions.pop(key, None)
             await query.answer("Вопрос уже устарел.", show_alert=True)
             return
@@ -1337,11 +1390,12 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
         if _jail_remaining(user):
             await query.answer("Из тюрьмы в викторине не участвуют.", show_alert=True)
             return
+        AUTO_CLAIMED_EVENTS.add(event_key)
         _quiz_sessions.pop(key, None)
         reward = int(session["reward"])
         db.update_user(user.id, {"reputation": user.reputation + reward, "xp": user.xp + 8})
         await query.message.edit_text(
-            f"🧠 <b>Правильный ответ: {session['options'][session['answer_idx']]}</b>\n"
+            f"🧠 <b>Правильный ответ: {answer_value}</b>\n"
             f"Победитель: <b>{escape_html(user.display_name)}</b>\n"
             f"Награда: <b>{reward}</b> 🍪 и <b>8</b> XP",
             parse_mode="HTML",

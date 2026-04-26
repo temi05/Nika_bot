@@ -39,8 +39,9 @@ def create_app() -> FastAPI:
     @dispatcher.message.outer_middleware()
     async def activity_middleware(handler, event, data):
         # Обновляем время активности при каждом сообщении
-        db = data.get("db")
-        if db:
+        chat_type = getattr(event.chat, "type", "")
+        chat_type_value = getattr(chat_type, "value", str(chat_type))
+        if chat_type_value in {"group", "supergroup"}:
             db.mark_chat_active(event.chat.id)
         return await handler(event, data)
 
@@ -133,22 +134,30 @@ def create_app() -> FastAPI:
     app.state.memory = memory
     app.state.settings = settings
 
-    last_auto_drop: dict[int, float] = {}
-    last_auto_quiz: dict[int, float] = {}
+    next_auto_drop: dict[int, float] = {}
+    next_auto_quiz: dict[int, float] = {}
 
     async def auto_events_loop() -> None:
         try:
             while True:
                 await asyncio.sleep(60)
                 now = asyncio.get_running_loop().time()
-                for chat_id in db.get_active_chat_ids(minutes=180, limit=30):
+                active_chat_ids = db.get_active_chat_ids(minutes=10, limit=30)
+                for chat_id in list(next_auto_drop):
+                    if chat_id not in active_chat_ids:
+                        next_auto_drop.pop(chat_id, None)
+                        next_auto_quiz.pop(chat_id, None)
+                for chat_id in active_chat_ids:
                     try:
-                        if now - last_auto_drop.get(chat_id, 0.0) >= 25 * 60 and random.random() < 0.35:
+                        next_auto_drop.setdefault(chat_id, now + 25 * 60 + random.randint(0, 5 * 60))
+                        next_auto_quiz.setdefault(chat_id, now + 35 * 60 + random.randint(0, 10 * 60))
+
+                        if now >= next_auto_drop[chat_id]:
                             await send_auto_drop(chat_id)
-                            last_auto_drop[chat_id] = now
-                        if now - last_auto_quiz.get(chat_id, 0.0) >= 35 * 60 and random.random() < 0.25:
+                            next_auto_drop[chat_id] = now + 25 * 60 + random.randint(0, 10 * 60)
+                        if now >= next_auto_quiz[chat_id]:
                             await send_auto_quiz(chat_id)
-                            last_auto_quiz[chat_id] = now
+                            next_auto_quiz[chat_id] = now + 35 * 60 + random.randint(0, 15 * 60)
                     except Exception as exc:
                         print(f"[auto_events:error] chat_id={chat_id} error={exc}")
         except asyncio.CancelledError:
@@ -156,29 +165,31 @@ def create_app() -> FastAPI:
 
     async def send_auto_drop(chat_id: int) -> None:
         reward = random.randint(12, 35)
+        created_at = int(time.time())
         msg = await bot.send_message(
             chat_id,
             "🍪 <b>Печенька сама упала в чат!</b>\nКто первый нажмет, тот заберет награду.",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text=f"🍪 Забрать {reward}", callback_data="drop_claim")]
+                [InlineKeyboardButton(text=f"🍪 Забрать {reward}", callback_data=f"drop_claim_{reward}_{created_at}")]
             ]),
         )
         AUTO_DROP_SESSIONS[f"{chat_id}_{msg.message_id}"] = {
             "reward": reward,
-            "created_at": time.time(),
+            "created_at": created_at,
         }
 
     async def send_auto_quiz(chat_id: int) -> None:
         quiz = make_quiz_question()
+        created_at = int(time.time())
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [
-                InlineKeyboardButton(text=str(quiz["options"][0]), callback_data="quiz_answer_0"),
-                InlineKeyboardButton(text=str(quiz["options"][1]), callback_data="quiz_answer_1"),
+                InlineKeyboardButton(text=str(quiz["options"][0]), callback_data=f"quiz_answer_0_{quiz['answer_idx']}_{quiz['reward']}_{created_at}_{quiz['options'][quiz['answer_idx']]}"),
+                InlineKeyboardButton(text=str(quiz["options"][1]), callback_data=f"quiz_answer_1_{quiz['answer_idx']}_{quiz['reward']}_{created_at}_{quiz['options'][quiz['answer_idx']]}"),
             ],
             [
-                InlineKeyboardButton(text=str(quiz["options"][2]), callback_data="quiz_answer_2"),
-                InlineKeyboardButton(text=str(quiz["options"][3]), callback_data="quiz_answer_3"),
+                InlineKeyboardButton(text=str(quiz["options"][2]), callback_data=f"quiz_answer_2_{quiz['answer_idx']}_{quiz['reward']}_{created_at}_{quiz['options'][quiz['answer_idx']]}"),
+                InlineKeyboardButton(text=str(quiz["options"][3]), callback_data=f"quiz_answer_3_{quiz['answer_idx']}_{quiz['reward']}_{created_at}_{quiz['options'][quiz['answer_idx']]}"),
             ],
         ])
         msg = await bot.send_message(
@@ -191,7 +202,7 @@ def create_app() -> FastAPI:
         )
         AUTO_QUIZ_SESSIONS[f"{chat_id}_{msg.message_id}"] = {
             **quiz,
-            "created_at": time.time(),
+            "created_at": created_at,
             "wrong_users": set(),
         }
 

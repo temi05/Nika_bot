@@ -156,7 +156,6 @@ class SupabaseDB:
 
     def update_last_message_time(self, chat_id: int, user_id: int) -> None:
         now = int(time.time())
-        self.active_chats[chat_id] = float(now)
         self._safe_execute(
             self._users().update({"last_message_time": now}).eq("chat_id", chat_id).eq("user_id", user_id),
             fallback=None,
@@ -368,35 +367,11 @@ class SupabaseDB:
     def get_active_chat_ids(self, minutes: int = 180, limit: int = 50) -> list[int]:
         now = time.time()
         since_float = now - minutes * 60
-        memory_chat_ids: list[int] = []
+        chat_ids: list[int] = []
         for chat_id, last_seen in sorted(self.active_chats.items(), key=lambda item: item[1], reverse=True):
             if last_seen < since_float:
                 self.active_chats.pop(chat_id, None)
                 continue
-            memory_chat_ids.append(chat_id)
-            if len(memory_chat_ids) >= limit:
-                return memory_chat_ids
-
-        since = int(time.time()) - minutes * 60
-        response = self._safe_execute(
-            self._users()
-            .select("chat_id,last_message_time")
-            .gt("last_message_time", since)
-            .order("last_message_time", desc=True)
-            .limit(500),
-            fallback=None,
-            context=f"get_active_chat_ids minutes={minutes}",
-        )
-        if not response:
-            return []
-
-        chat_ids: list[int] = list(memory_chat_ids)
-        seen: set[int] = set(memory_chat_ids)
-        for row in response.data or []:
-            chat_id = int(row.get("chat_id") or 0)
-            if not chat_id or chat_id in seen:
-                continue
-            seen.add(chat_id)
             chat_ids.append(chat_id)
             if len(chat_ids) >= limit:
                 break
