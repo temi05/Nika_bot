@@ -95,6 +95,20 @@ class SupabaseDB:
             steal_success_streak=int(row.get("steal_success_streak") or 0),
         )
 
+    def _fallback_user(self, chat_id: int, sender: Sender) -> ChatUser:
+        return ChatUser(
+            id=0,
+            chat_id=chat_id,
+            user_id=sender.user_id,
+            first_name=sender.first_name or "Unknown",
+            username=sender.username,
+            xp=0,
+            level=1,
+            reputation=0,
+            warns=0,
+            last_message_time=0,
+        )
+
     def _reminder_from_row(self, row: dict[str, Any]) -> Reminder:
         return Reminder(
             id=row["id"],
@@ -136,13 +150,7 @@ class SupabaseDB:
         )
         if created and created.data:
             return self._user_from_row(created.data[0])
-        return ChatUser(
-            id=0,
-            chat_id=chat_id,
-            user_id=sender.user_id,
-            first_name=sender.first_name or "Unknown",
-            username=sender.username,
-        )
+        return self._fallback_user(chat_id, sender)
 
     def get_user_by_platform_id(self, chat_id: int, user_id: int) -> ChatUser | None:
         response = self._safe_execute(
