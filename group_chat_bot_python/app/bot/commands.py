@@ -1261,7 +1261,7 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
             "created_at": created_at,
         }
 
-    @router.callback_query(F.data == "drop_claim")
+    @router.callback_query(F.data.startswith("drop_claim"))
     async def drop_callback(query: CallbackQuery) -> None:
         if not query.message:
             await query.answer("Печенька уже исчезла.", show_alert=True)
