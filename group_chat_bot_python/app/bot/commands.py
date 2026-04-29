@@ -375,7 +375,7 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
             "   Команда: <code>/aiimage описание картинки</code>\n\n"
             f"5. Сигна от человека — цена автора, минимум <code>{ai.settings.human_sign_min_price} 🍪</code>\n"
             "   Базовая цена: <code>/setsignprice сумма</code>\n"
-            "   Тариф: <code>/setsignprice название | цена | описание</code>\n"
+            "   Тариф: <code>/setsignprice название цена описание</code>\n"
             "   Цены: ответь человеку <code>/signprice</code>\n"
             "   Заказ: ответь человеку <code>/signreq текст</code> или <code>/signreq # текст</code>\n"
             "   На human-сигне должен быть автор, у которого заказали\n"
@@ -1700,18 +1700,31 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
             await message.answer("✍️ Цена сигны отключена.")
             return
 
+        def _parse_sign_option(value: str) -> tuple[str, int, str] | None:
+            if "|" in value:
+                parts = [part.strip() for part in value.split("|")]
+                if len(parts) >= 2 and parts[1].isdigit():
+                    return parts[0], int(parts[1]), parts[2] if len(parts) >= 3 else ""
+                return None
+            parts = value.split()
+            price_index = next((idx for idx, part in enumerate(parts) if part.isdigit()), None)
+            if price_index is None or price_index == 0:
+                return None
+            title = " ".join(parts[:price_index]).strip()
+            amount = int(parts[price_index])
+            description = " ".join(parts[price_index + 1 :]).strip()
+            return title, amount, description
+
         if "|" in raw_arg:
-            parts = [part.strip() for part in raw_arg.split("|")]
-            if len(parts) < 2 or not parts[1].isdigit():
+            parsed_option = _parse_sign_option(raw_arg)
+            if not parsed_option:
                 await message.answer(
-                    "Формат тарифа: <code>/setsignprice название | цена | описание</code>\n"
-                    "Пример: <code>/setsignprice срочная | 900 | сделаю сегодня</code>",
+                    "Формат тарифа: <code>/setsignprice название цена описание</code>\n"
+                    "Пример: <code>/setsignprice срочная 900 сделаю сегодня</code>",
                     parse_mode="HTML",
                 )
                 return
-            title = parts[0]
-            amount = int(parts[1])
-            description = parts[2] if len(parts) >= 3 else ""
+            title, amount, description = parsed_option
             if len(title) < 2:
                 await message.answer("❌ Название тарифа слишком короткое.")
                 return
@@ -1730,11 +1743,31 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
             return
 
         if not arg.isdigit():
+            parsed_option = _parse_sign_option(raw_arg)
+            if not parsed_option:
+                await message.answer(
+                    "Использование:\n"
+                    f"• базовая цена: <code>/setsignprice сумма</code>\n"
+                    "• тариф: <code>/setsignprice название цена описание</code>\n"
+                    "Пример: <code>/setsignprice срочная 900 сделаю сегодня</code>\n"
+                    f"Минимум: <b>{ai.settings.human_sign_min_price}</b> 🍪",
+                    parse_mode="HTML",
+                )
+                return
+            title, amount, description = parsed_option
+            if len(title) < 2:
+                await message.answer("❌ Название тарифа слишком короткое.")
+                return
+            if amount < ai.settings.human_sign_min_price:
+                await message.answer(f"❌ Минимальная цена сигны: <b>{ai.settings.human_sign_min_price}</b> 🍪", parse_mode="HTML")
+                return
+            option = db.create_sign_price_option(sender, title, amount, description)
+            if not option:
+                await message.answer("❌ Не смог сохранить тариф. Проверь SQL sign_price_options.")
+                return
             await message.answer(
-                "Использование:\n"
-                f"• базовая цена: <code>/setsignprice сумма</code>\n"
-                "• отдельный тариф: <code>/setsignprice название | цена | описание</code>\n"
-                f"Минимум: <b>{ai.settings.human_sign_min_price}</b> 🍪",
+                f"✅ Тариф добавлен: <b>#{option['id']} {escape_html(title)}</b> — <b>{amount}</b> 🍪"
+                + (f"\n<i>{escape_html(description)}</i>" if description else ""),
                 parse_mode="HTML",
             )
             return
