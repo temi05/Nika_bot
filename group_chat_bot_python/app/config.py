@@ -30,7 +30,7 @@ class Settings(BaseSettings):
 
     ai_model: str = Field(default="gpt-4o-mini", alias="AI_MODEL")
     ai_fallback_model: str = Field(default="gpt-4o-mini", alias="AI_FALLBACK_MODEL")
-    ai_image_model: str = Field(default="gpt-image-1.5", alias="AI_IMAGE_MODEL")
+    ai_image_model: str = Field(default="openai/gpt-image-1.5", alias="AI_IMAGE_MODEL")
     ai_temperature: float = Field(default=0.7, alias="AI_TEMPERATURE")
     ai_max_tokens: int = Field(default=220, alias="AI_MAX_TOKENS")
     ai_timeout_seconds: int = Field(default=45, alias="AI_TIMEOUT_SECONDS")

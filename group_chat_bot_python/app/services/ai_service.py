@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import asyncio
 import json
 import random
 import re
@@ -45,6 +46,15 @@ class AIService:
             )
             if settings.effective_ai_api_key
             else None
+        )
+        self.image_client = (
+            AsyncOpenAI(
+                api_key=settings.openai_api_key,
+                base_url="https://api.openai.com/v1",
+                timeout=settings.ai_timeout_seconds,
+            )
+            if settings.openai_api_key
+            else self.client
         )
         self.chat_buffers: dict[int, deque[str]] = defaultdict(lambda: deque(maxlen=25))
         self.recent_bot_replies: dict[int, deque[str]] = defaultdict(lambda: deque(maxlen=8))
@@ -129,13 +139,20 @@ class AIService:
         self._log("flush_memory_done", chat_id=chat_id)
 
     async def generate_image(self, prompt: str, reference_images: list[tuple[bytes, str]] | None = None) -> bytes | None:
-        if not self.client:
+        refs = reference_images or []
+        if self.settings.polza_api_key and not self.settings.openai_api_key:
+            return await self._generate_polza_media(prompt, refs)
+
+        client = self.image_client or self.client
+        if not client:
             return None
         clean_prompt = prompt.strip()
         if not clean_prompt:
             return None
+        if refs and not self.settings.openai_api_key:
+            self._log("image_reference_skip", reason="OPENAI_API_KEY_missing")
+            refs = []
         try:
-            refs = reference_images or []
             if refs:
                 image_files = []
                 for index, (payload, mime_type) in enumerate(refs[:4], start=1):
@@ -147,21 +164,124 @@ class AIService:
                     buffer = BytesIO(payload)
                     buffer.name = f"reference_{index}.{suffix}"
                     image_files.append(buffer)
-                response = await self.client.images.edit(
+                response = await client.images.edit(
                     model=self.settings.ai_image_model,
                     image=image_files,
                     prompt=clean_prompt[:3500],
                     size="1024x1024",
                 )
             else:
-                response = await self.client.images.generate(
+                response = await client.images.generate(
                     model=self.settings.ai_image_model,
                     prompt=clean_prompt[:3500],
                     size="1024x1024",
                 )
             return await self._read_image_response(response)
         except Exception as exc:
-            self._log("image_error", error=str(exc))
+            self._log("image_error", used_reference=bool(refs), error=str(exc))
+            if refs:
+                try:
+                    self._log("image_retry_without_reference")
+                    response = await client.images.generate(
+                        model=self.settings.ai_image_model,
+                        prompt=clean_prompt[:3500],
+                        size="1024x1024",
+                    )
+                    return await self._read_image_response(response)
+                except Exception as retry_exc:
+                    self._log("image_retry_error", error=str(retry_exc))
+        return None
+
+    async def _generate_polza_media(self, prompt: str, reference_images: list[tuple[bytes, str]]) -> bytes | None:
+        clean_prompt = prompt.strip()
+        if not clean_prompt or not self.settings.polza_api_key:
+            return None
+
+        model = self.settings.ai_image_model
+        if model in {"gpt-image-1.5", "gpt-image-1", "gpt-image-1-mini"}:
+            model = f"openai/{model}"
+
+        images = []
+        for payload, mime_type in reference_images[:16]:
+            encoded = base64.b64encode(payload).decode("ascii")
+            images.append({"type": "base64", "data": f"data:{mime_type};base64,{encoded}"})
+
+        headers = {
+            "Authorization": f"Bearer {self.settings.polza_api_key}",
+            "Content-Type": "application/json",
+        }
+        body = {
+            "model": model,
+            "input": {
+                "prompt": clean_prompt[:3500],
+                "aspect_ratio": "1:1",
+                "quality": "medium",
+                "images": images,
+                "output_format": "png",
+                "max_images": 1,
+            },
+            "async": True,
+        }
+
+        try:
+            async with httpx.AsyncClient(timeout=self.settings.ai_timeout_seconds) as client:
+                created = await client.post("https://polza.ai/api/v1/media", headers=headers, json=body)
+                created.raise_for_status()
+                payload = created.json()
+                media_id = payload.get("id")
+                if not media_id:
+                    return await self._read_polza_media_result(client, payload)
+                for _ in range(45):
+                    status_response = await client.get(f"https://polza.ai/api/v1/media/{media_id}", headers=headers)
+                    status_response.raise_for_status()
+                    status_payload = status_response.json()
+                    status = status_payload.get("status")
+                    if status == "completed":
+                        return await self._read_polza_media_result(client, status_payload)
+                    if status in {"failed", "cancelled"}:
+                        self._log("polza_media_failed", status=status, error=status_payload.get("error"))
+                        break
+                    await asyncio.sleep(3)
+        except Exception as exc:
+            self._log("polza_media_error", used_reference=bool(images), error=str(exc))
+            if images:
+                try:
+                    self._log("polza_media_retry_without_reference")
+                    return await self._generate_polza_media(clean_prompt, [])
+                except Exception as retry_exc:
+                    self._log("polza_media_retry_error", error=str(retry_exc))
+        return None
+
+    async def _read_polza_media_result(self, client: httpx.AsyncClient, payload: dict[str, Any]) -> bytes | None:
+        image_url = self._extract_image_url(payload.get("data"))
+        if not image_url:
+            image_url = self._extract_image_url(payload)
+        if not image_url:
+            self._log("polza_media_no_url", keys=list(payload.keys()))
+            return None
+        downloaded = await client.get(image_url)
+        downloaded.raise_for_status()
+        return downloaded.content
+
+    def _extract_image_url(self, value: Any) -> str | None:
+        if isinstance(value, str):
+            if value.startswith("http://") or value.startswith("https://"):
+                return value
+            return None
+        if isinstance(value, dict):
+            for key in ("url", "image_url", "output_url"):
+                candidate = value.get(key)
+                if isinstance(candidate, str) and candidate.startswith(("http://", "https://")):
+                    return candidate
+            for nested in value.values():
+                found = self._extract_image_url(nested)
+                if found:
+                    return found
+        if isinstance(value, list):
+            for item in value:
+                found = self._extract_image_url(item)
+                if found:
+                    return found
         return None
 
     async def _read_image_response(self, response: Any) -> bytes | None:

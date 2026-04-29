@@ -33,7 +33,7 @@ BOT_PERSONALITY_MODE=hard
 ```env
 AI_MODEL=gpt-4o-mini
 AI_FALLBACK_MODEL=gpt-4o-mini
-AI_IMAGE_MODEL=gpt-image-1.5
+AI_IMAGE_MODEL=openai/gpt-image-1.5
 MEMORY_MODEL=
 MEMORY_EXTRACTION_ENABLED=true
 MEMORY_EXTRACTION_MAX_FACTS=6
@@ -44,7 +44,7 @@ MEMORY_CAPTURE_ALL_MESSAGES=false
 
 - `AI_MODEL` — диалог, самый совместимый вариант для текущего `chat.completions`-кода: `gpt-4o-mini`
 - `AI_FALLBACK_MODEL` — запасная модель, если основной ответ пришел пустым
-- `AI_IMAGE_MODEL` — генерация ИИ-картинок и ИИ-сигн, рекомендуемо `gpt-image-1.5`
+- `AI_IMAGE_MODEL` — генерация ИИ-картинок и ИИ-сигн, для Polza рекомендуемо `openai/gpt-image-1.5`
 - `MEMORY_MODEL` — можно задать отдельный более дешевый/точный слой
 - `MEMORY_FACT_MIN_CONFIDENCE` — фильтрует мусорные факты
 - `MEMORY_RETRIEVAL_LIMIT` — сколько фактов тащить в prompt
@@ -90,6 +90,8 @@ RENDER_EXTERNAL_URL=https://your-service.onrender.com
 WEBHOOK_SECRET_TOKEN=some-long-random-string
 OPENAI_API_KEY=...
 ```
+
+Для Polza.ai картинки идут через `POST /api/v1/media`, а референсы передаются как base64 в `input.images`. OpenAI-compatible `/images/edits` используется только если задан `OPENAI_API_KEY`.
 
 ## Supabase tables
 
