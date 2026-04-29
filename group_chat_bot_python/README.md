@@ -31,7 +31,8 @@ BOT_PERSONALITY_MODE=hard
 ## Memory Tuning
 
 ```env
-AI_MODEL=gpt-5-mini
+AI_MODEL=gpt-4o-mini
+AI_FALLBACK_MODEL=gpt-4o-mini
 AI_IMAGE_MODEL=gpt-image-1.5
 MEMORY_MODEL=
 MEMORY_EXTRACTION_ENABLED=true
@@ -41,7 +42,8 @@ MEMORY_RETRIEVAL_LIMIT=6
 MEMORY_CAPTURE_ALL_MESSAGES=false
 ```
 
-- `AI_MODEL` — диалог, рекомендуемый баланс цены и качества: `gpt-5-mini`
+- `AI_MODEL` — диалог, самый совместимый вариант для текущего `chat.completions`-кода: `gpt-4o-mini`
+- `AI_FALLBACK_MODEL` — запасная модель, если основной ответ пришел пустым
 - `AI_IMAGE_MODEL` — генерация ИИ-картинок и ИИ-сигн, рекомендуемо `gpt-image-1.5`
 - `MEMORY_MODEL` — можно задать отдельный более дешевый/точный слой
 - `MEMORY_FACT_MIN_CONFIDENCE` — фильтрует мусорные факты

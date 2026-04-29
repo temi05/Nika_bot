@@ -2,8 +2,10 @@ from __future__ import annotations
 import time
 
 import asyncio
+import base64
 import random
 from datetime import datetime, timezone, timedelta
+from io import BytesIO
 
 from aiogram import Router, F
 from aiogram.filters import Command, CommandObject
@@ -25,6 +27,7 @@ AUTO_DROP_SESSIONS: dict[str, dict] = {}
 AUTO_QUIZ_SESSIONS: dict[str, dict] = {}
 AUTO_CLAIMED_EVENTS: set[str] = set()
 DUEL_SESSIONS: dict[str, dict] = {}
+NIKA_REFERENCE_ASSET_KEY = "nika_reference"
 
 
 def make_quiz_question() -> dict:
@@ -366,12 +369,14 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
             "2. Снять все предупреждения — <code>200 🍪</code>\n"
             "   Команда: <code>/buy 2</code>\n\n"
             f"3. ИИ-сигна — <code>{ai.settings.ai_sign_price} 🍪</code>\n"
-            "   Команда: <code>/signai текст на сигне</code>\n\n"
+            "   Команда: <code>/signai текст на сигне</code>\n"
+            "   На сигне будет Ника в случайной позе/локации\n\n"
             f"4. ИИ-картинка — <code>{ai.settings.ai_image_price} 🍪</code>\n"
             "   Команда: <code>/aiimage описание картинки</code>\n\n"
             f"5. Сигна от человека — цена автора, минимум <code>{ai.settings.human_sign_min_price} 🍪</code>\n"
             "   Своя цена: <code>/setsignprice сумма</code>\n"
             "   Заказ: ответь человеку <code>/signreq текст</code>\n"
+            "   На human-сигне должен быть автор, у которого заказали\n"
             "   Мои заказы: <code>/signorders</code>, <code>/signorders мои</code>\n\n"
             "<i>Печеньки зарабатываются за спасибо, плюсики, активность и мини-игры.</i>",
             parse_mode="HTML",
@@ -1385,6 +1390,212 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
         updated = db.update_user(fresh.id, {"reputation": fresh.reputation - price})
         return bool(updated), (updated.reputation if updated else fresh.reputation - price)
 
+    def _reference_image_spec(message: Message) -> tuple[str, str] | None:
+        if message.photo:
+            return message.photo[-1].file_id, "image/jpeg"
+        if message.sticker and not message.sticker.is_animated and not message.sticker.is_video:
+            return message.sticker.file_id, "image/webp"
+        if message.document and (message.document.mime_type or "").startswith("image/"):
+            return message.document.file_id, message.document.mime_type or "image/jpeg"
+        return None
+
+    async def _download_reference_images(message: Message, *, max_images: int = 2) -> list[tuple[bytes, str]]:
+        specs: list[tuple[str, str]] = []
+        current = _reference_image_spec(message)
+        if current:
+            specs.append(current)
+        if message.reply_to_message:
+            replied = _reference_image_spec(message.reply_to_message)
+            if replied:
+                specs.append(replied)
+
+        refs: list[tuple[bytes, str]] = []
+        for file_id, mime_type in specs[:max_images]:
+            try:
+                file_info = await message.bot.get_file(file_id)
+                if file_info.file_size and file_info.file_size > ai.settings.ai_vision_max_bytes:
+                    continue
+                buffer = BytesIO()
+                await message.bot.download_file(file_info.file_path, destination=buffer)
+                payload = buffer.getvalue()
+                if payload and len(payload) <= ai.settings.ai_vision_max_bytes:
+                    refs.append((payload, mime_type))
+            except Exception as exc:
+                print(f"[AI:image_reference_download_error] error={exc}")
+        return refs
+
+    async def _download_single_reference_image(message: Message) -> tuple[bytes, str] | None:
+        spec = _reference_image_spec(message)
+        if not spec:
+            return None
+        file_id, mime_type = spec
+        try:
+            file_info = await message.bot.get_file(file_id)
+            if file_info.file_size and file_info.file_size > ai.settings.ai_vision_max_bytes:
+                return None
+            buffer = BytesIO()
+            await message.bot.download_file(file_info.file_path, destination=buffer)
+            payload = buffer.getvalue()
+            if not payload or len(payload) > ai.settings.ai_vision_max_bytes:
+                return None
+            return payload, mime_type
+        except Exception as exc:
+            print(f"[AI:nika_reference_download_error] error={exc}")
+            return None
+
+    def _load_saved_nika_reference() -> tuple[bytes, str] | None:
+        asset = db.get_bot_asset(NIKA_REFERENCE_ASSET_KEY)
+        if not asset:
+            return None
+        try:
+            payload = base64.b64decode(str(asset.get("payload_base64") or ""))
+        except Exception:
+            return None
+        if not payload:
+            return None
+        return payload, str(asset.get("mime_type") or "image/png")
+
+    def _reference_caption(has_identity: bool, has_pose: bool) -> str:
+        parts = []
+        if has_identity:
+            parts.append("внешность Ники взята из сохраненного референса")
+        if has_pose:
+            parts.append("reply-картинка использована для позы/ракурса")
+        return "\n" + "; ".join(parts) + "." if parts else ""
+
+    def _nika_character_prompt() -> str:
+        return (
+            "NeuroNika, an original anime cyberpunk punk girl mascot: long vivid electric-blue hair with purple glow, "
+            "violet eyes, black glossy leather punk outfit, black cat-ear hood with small skull details, chains, belts, "
+            "purple neon accents, confident playful expression. Keep her recognizable across images, but do not copy any "
+            "specific existing character or real person."
+        )
+
+    def _random_nika_scene() -> tuple[str, str, str]:
+        places = [
+            "on a rainy neon rooftop at night",
+            "inside a cozy streamer room with purple LED light",
+            "in a futuristic arcade full of slot machines",
+            "near a glowing vending machine in a cyberpunk alley",
+            "sitting on a motorcycle under blue and violet neon",
+            "at a small cafe table with cookies and a phone",
+            "in a music studio with black acoustic panels",
+            "on a train platform with holographic ads",
+            "in a bedroom mirror selfie setup with soft neon",
+            "at a graffiti wall with purple paint splashes",
+        ]
+        poses = [
+            "holding the sign with both hands close to the camera",
+            "leaning sideways and showing the sign on a clipboard",
+            "sitting cross-legged while holding a small card",
+            "winking and pointing at the handwritten sign",
+            "standing full-body with one boot forward and the sign in one hand",
+            "taking a mirror selfie while the sign is visible",
+            "resting one elbow on a table and sliding the sign toward the viewer",
+            "crouching in a streetwear pose with the sign hanging from a chain clip",
+            "holding a polaroid-style sign near her face",
+            "pinning the sign to a neon-lit board behind her",
+        ]
+        cameras = [
+            "portrait composition, crisp readable text",
+            "dynamic three-quarter view, high detail",
+            "medium shot, cinematic lighting",
+            "full-body fashion illustration, readable sign",
+            "close-up with shallow depth of field, sign fully visible",
+        ]
+        return random.choice(places), random.choice(poses), random.choice(cameras)
+
+    def _wants_nika_in_image(prompt: str) -> bool:
+        lowered = prompt.lower()
+        markers = ("ника", "нейроника", "nika", "neuronika", "с ней", "с тобой", "с никой", "ты на")
+        return any(marker in lowered for marker in markers)
+
+    def _build_ai_image_prompt(user_prompt: str) -> str:
+        place, pose, camera = _random_nika_scene()
+        nika_part = ""
+        if _wants_nika_in_image(user_prompt):
+            nika_part = (
+                f"Include {_nika_character_prompt()} She is {pose} {place}. "
+                "Vary the pose, outfit details, camera angle and location from previous generations. "
+            )
+        reference_part = (
+            "If a reference image is provided, use it only as a pose/composition/environment reference: "
+            "borrow the body pose, camera angle, framing, gesture or location mood. "
+            "Do not borrow the person's identity, face, hair, outfit or exact appearance from the reference. "
+        )
+        return (
+            "Create a high quality Telegram reward image. "
+            f"{reference_part}"
+            f"{nika_part}"
+            "Use rich composition, strong lighting, no watermark, no fake UI, no unreadable random text. "
+            f"Camera/style: {camera}. "
+            f"User request: {user_prompt[:1000]}"
+        )
+
+    def _build_ai_sign_prompt(sign_text: str) -> str:
+        place, pose, camera = _random_nika_scene()
+        return (
+            "Create an AI signa image for a Telegram economy bot. "
+            f"Main character: {_nika_character_prompt()} "
+            "If multiple reference images are provided: the first reference is NeuroNika's identity reference and must define her face, hair, outfit, color palette and anime style; "
+            "any later reference image is only for pose, gesture, camera angle, scene layout or location mood. "
+            "NeuroNika's identity must always stay the same: electric-blue/purple hair, violet eyes, black punk cyber outfit, cat-ear hood, neon purple accents. "
+            "Never copy identity, face, hair, body, clothes or exact appearance from pose-only references. "
+            f"Scene: she is {pose} {place}. "
+            "The sign must be a physical paper/card/phone note naturally held by NeuroNika, not a floating caption. "
+            f"The sign text must be clearly readable and exactly: {sign_text[:120]!r}. "
+            "Every generation should feel different: vary pose, background, props, framing, facial expression and lighting. "
+            f"Camera/style: {camera}. "
+            "No watermark, no extra random letters, no fake app interface, no real person likeness."
+        )
+
+    @router.message(Command("setnika"))
+    async def set_nika_reference_command(message: Message) -> None:
+        sender = get_sender_data(message)
+        if not await is_admin(message.bot, message.chat.id, sender.user_id):
+            await message.answer("❌ Менять референс Ники может только админ.")
+            return
+        source = message.reply_to_message or message
+        image = await _download_single_reference_image(source)
+        if not image:
+            await message.answer(
+                "Ответь командой <code>/setnika</code> на картинку/стикер/изображение-документ Ники.",
+                parse_mode="HTML",
+            )
+            return
+        payload, mime_type = image
+        ok = db.save_bot_asset(
+            NIKA_REFERENCE_ASSET_KEY,
+            base64.b64encode(payload).decode("ascii"),
+            mime_type,
+            updated_by=sender.user_id,
+        )
+        if not ok:
+            await message.answer("❌ Не смогла сохранить референс. Проверь SQL bot_assets в signs_and_ai_images.sql.")
+            return
+        await message.answer(
+            f"✅ Референс Ники сохранен.\n"
+            f"Тип: <code>{escape_html(mime_type)}</code>\n"
+            f"Размер: <b>{len(payload) // 1024}</b> KB\n\n"
+            "Теперь /signai всегда берет внешность из него, а reply-картинка нужна только для позы/ракурса.",
+            parse_mode="HTML",
+        )
+
+    @router.message(Command("nika"))
+    async def nika_reference_status_command(message: Message) -> None:
+        asset = db.get_bot_asset(NIKA_REFERENCE_ASSET_KEY)
+        if not asset:
+            await message.answer("Референс Ники еще не сохранен. Админ может ответить на картинку командой <code>/setnika</code>.", parse_mode="HTML")
+            return
+        payload_size = len(str(asset.get("payload_base64") or "")) * 3 // 4
+        await message.answer(
+            "🖼️ <b>Референс Ники сохранен</b>\n\n"
+            f"Тип: <code>{escape_html(str(asset.get('mime_type') or 'unknown'))}</code>\n"
+            f"Размер: <b>{payload_size // 1024}</b> KB\n"
+            f"Обновлен: <code>{escape_html(str(asset.get('updated_at') or 'unknown'))}</code>",
+            parse_mode="HTML",
+        )
+
     @router.message(Command("aiimage", "картинка"))
     async def ai_image_command(message: Message, command: CommandObject) -> None:
         prompt = (command.args or "").strip()
@@ -1392,7 +1603,8 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
             await message.answer(
                 "🖼️ <b>ИИ-картинка</b>\n\n"
                 f"Цена: <b>{ai.settings.ai_image_price}</b> 🍪\n"
-                "Использование: <code>/aiimage описание картинки</code>",
+                "Использование: <code>/aiimage описание картинки</code>\n"
+                "Если ответить командой на картинку, она станет референсом позы/ракурса, а не внешности.",
                 parse_mode="HTML",
             )
             return
@@ -1407,10 +1619,13 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
             await message.bot.send_chat_action(message.chat.id, "upload_photo")
         except Exception:
             pass
-        image_bytes = await ai.generate_image(
-            "Telegram chat reward image. Create a high quality, polished image from this request. "
-            "Do not add watermarks or fake UI. Request: " + prompt
-        )
+        saved_nika_reference = _load_saved_nika_reference()
+        pose_references = await _download_reference_images(message)
+        reference_images = []
+        if saved_nika_reference and _wants_nika_in_image(prompt):
+            reference_images.append(saved_nika_reference)
+        reference_images.extend(pose_references)
+        image_bytes = await ai.generate_image(_build_ai_image_prompt(prompt), reference_images=reference_images)
         if not image_bytes:
             await message.answer("❌ Не получилось сгенерировать картинку. Печеньки не списаны.")
             return
@@ -1431,7 +1646,9 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
             await message.answer(
                 "✍️ <b>ИИ-сигна</b>\n\n"
                 f"Цена: <b>{ai.settings.ai_sign_price}</b> 🍪\n"
-                "Использование: <code>/signai текст на сигне</code>",
+                "Использование: <code>/signai текст на сигне</code>\n"
+                "На картинке будет Ника, но сцена/поза/место каждый раз меняются.\n"
+                "Внешность берется из сохраненного /setnika, а reply-картинка дает только позу/ракурс.",
                 parse_mode="HTML",
             )
             return
@@ -1447,11 +1664,13 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
         except Exception:
             pass
         safe_text = text[:120]
-        image_bytes = await ai.generate_image(
-            "Create a tasteful AI-made signa image for a Telegram economy bot: a clean paper/card held in a cozy scene, "
-            "with clearly readable handwritten text exactly: "
-            f"{safe_text!r}. No real person likeness, no watermark, no extra text."
-        )
+        saved_nika_reference = _load_saved_nika_reference()
+        pose_references = await _download_reference_images(message)
+        reference_images = []
+        if saved_nika_reference:
+            reference_images.append(saved_nika_reference)
+        reference_images.extend(pose_references)
+        image_bytes = await ai.generate_image(_build_ai_sign_prompt(safe_text), reference_images=reference_images)
         if not image_bytes:
             await message.answer("❌ Не получилось сгенерировать ИИ-сигну. Печеньки не списаны.")
             return
@@ -1461,7 +1680,11 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
             return
         await message.answer_photo(
             BufferedInputFile(image_bytes, filename="nika_ai_sign.png"),
-            caption=f"✍️ ИИ-сигна готова. Списано <b>{price}</b> 🍪\nБаланс: <b>{balance}</b> 🍪",
+            caption=(
+                f"✍️ ИИ-сигна готова. Списано <b>{price}</b> 🍪\n"
+                f"Баланс: <b>{balance}</b> 🍪"
+                + _reference_caption(bool(saved_nika_reference), bool(pose_references))
+            ),
             parse_mode="HTML",
         )
 
@@ -1606,7 +1829,8 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
             f"Покупатель: {escape_html(buyer.display_name)}\n"
             f"Цена: <b>{price}</b> 🍪\n"
             f"Текст: <i>{escape_html(text[:300])}</i>\n\n"
-            "Автор должен принять заказ кнопкой. Деньги уйдут в эскроу и попадут автору после подтверждения.",
+            "Автор должен принять заказ кнопкой. На сигне должен быть сам автор заказа: фото/рисунок/стиль на его выбор, "
+            "но табличка с текстом должна быть видна. Деньги уйдут в эскроу и попадут автору после подтверждения.",
             reply_markup=keyboard,
             parse_mode="HTML",
         )

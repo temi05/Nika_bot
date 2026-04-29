@@ -7,6 +7,7 @@ import re
 from collections import defaultdict, deque
 from datetime import datetime, timedelta
 from difflib import SequenceMatcher
+from io import BytesIO
 from typing import Any
 
 import httpx
@@ -127,32 +128,55 @@ class AIService:
         self.chat_buffers[chat_id].clear()
         self._log("flush_memory_done", chat_id=chat_id)
 
-    async def generate_image(self, prompt: str) -> bytes | None:
+    async def generate_image(self, prompt: str, reference_images: list[tuple[bytes, str]] | None = None) -> bytes | None:
         if not self.client:
             return None
         clean_prompt = prompt.strip()
         if not clean_prompt:
             return None
         try:
-            response = await self.client.images.generate(
-                model=self.settings.ai_image_model,
-                prompt=clean_prompt[:3500],
-                size="1024x1024",
-            )
-            image = response.data[0] if response.data else None
-            if not image:
-                return None
-            b64_json = getattr(image, "b64_json", None)
-            if b64_json:
-                return base64.b64decode(b64_json)
-            image_url = getattr(image, "url", None)
-            if image_url:
-                async with httpx.AsyncClient(timeout=self.settings.ai_timeout_seconds) as client:
-                    download = await client.get(image_url)
-                    download.raise_for_status()
-                    return download.content
+            refs = reference_images or []
+            if refs:
+                image_files = []
+                for index, (payload, mime_type) in enumerate(refs[:4], start=1):
+                    suffix = "png"
+                    if "jpeg" in mime_type or "jpg" in mime_type:
+                        suffix = "jpg"
+                    elif "webp" in mime_type:
+                        suffix = "webp"
+                    buffer = BytesIO(payload)
+                    buffer.name = f"reference_{index}.{suffix}"
+                    image_files.append(buffer)
+                response = await self.client.images.edit(
+                    model=self.settings.ai_image_model,
+                    image=image_files,
+                    prompt=clean_prompt[:3500],
+                    size="1024x1024",
+                )
+            else:
+                response = await self.client.images.generate(
+                    model=self.settings.ai_image_model,
+                    prompt=clean_prompt[:3500],
+                    size="1024x1024",
+                )
+            return await self._read_image_response(response)
         except Exception as exc:
             self._log("image_error", error=str(exc))
+        return None
+
+    async def _read_image_response(self, response: Any) -> bytes | None:
+        image = response.data[0] if getattr(response, "data", None) else None
+        if not image:
+            return None
+        b64_json = getattr(image, "b64_json", None)
+        if b64_json:
+            return base64.b64decode(b64_json)
+        image_url = getattr(image, "url", None)
+        if image_url:
+            async with httpx.AsyncClient(timeout=self.settings.ai_timeout_seconds) as client:
+                download = await client.get(image_url)
+                download.raise_for_status()
+                return download.content
         return None
 
     async def generate_reply(
@@ -272,7 +296,16 @@ class AIService:
                 response = await self.client.chat.completions.create(**request_kwargs)
                 message = response.choices[0].message
                 tool_calls = list(message.tool_calls or [])
-                self._log("model_response", chat_id=chat_id, round=round_index + 1, tool_calls=len(tool_calls))
+                self._log(
+                    "model_response",
+                    chat_id=chat_id,
+                    round=round_index + 1,
+                    model=self.settings.ai_model,
+                    finish_reason=getattr(response.choices[0], "finish_reason", None),
+                    content_type=type(message.content).__name__,
+                    content_len=len(message.content) if isinstance(message.content, str) else 0,
+                    tool_calls=len(tool_calls),
+                )
 
                 if tool_calls:
                     if not self._tool_calls_have_valid_json(tool_calls):
@@ -981,6 +1014,24 @@ class AIService:
         except Exception:
             return ""
 
+    async def _simple_completion(self, *, model: str, messages: list[dict[str, Any]], temperature: float, max_tokens: int) -> str:
+        response = await self.client.chat.completions.create(
+            model=model,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+        choice = response.choices[0]
+        message = choice.message
+        self._log(
+            "simple_completion",
+            model=model,
+            finish_reason=getattr(choice, "finish_reason", None),
+            content_type=type(message.content).__name__,
+            content_len=len(message.content) if isinstance(message.content, str) else 0,
+        )
+        return self._coerce_model_content(message.content)
+
     def _coerce_model_content(self, content: Any) -> str:
         if isinstance(content, str):
             return content.strip()
@@ -1006,11 +1057,36 @@ class AIService:
             },
         ]
         try:
-            response = await self.client.chat.completions.create(
-                model=self.settings.ai_model, messages=retry_messages, temperature=self.settings.ai_temperature, max_tokens=min(self.settings.ai_max_tokens, 140)
+            raw_text = await self._simple_completion(
+                model=self.settings.ai_model,
+                messages=retry_messages,
+                temperature=self.settings.ai_temperature,
+                max_tokens=min(self.settings.ai_max_tokens, 140),
             )
-            raw_text = self._coerce_model_content(response.choices[0].message.content)
-            return self._finalize_reply(raw_text, user_text=user_text)
+            finalized = self._finalize_reply(raw_text, user_text=user_text)
+            if finalized:
+                return finalized
+            fallback_model = self.settings.ai_fallback_model
+            if fallback_model and fallback_model != self.settings.ai_model:
+                raw_text = await self._simple_completion(
+                    model=fallback_model,
+                    messages=retry_messages,
+                    temperature=self.settings.ai_temperature,
+                    max_tokens=min(self.settings.ai_max_tokens, 140),
+                )
+                return self._finalize_reply(raw_text, user_text=user_text)
         except Exception as e:
             self._log("retry_empty_error", error=str(e))
-            return ""
+            fallback_model = self.settings.ai_fallback_model
+            if fallback_model and fallback_model != self.settings.ai_model:
+                try:
+                    raw_text = await self._simple_completion(
+                        model=fallback_model,
+                        messages=retry_messages,
+                        temperature=self.settings.ai_temperature,
+                        max_tokens=min(self.settings.ai_max_tokens, 140),
+                    )
+                    return self._finalize_reply(raw_text, user_text=user_text)
+                except Exception as fallback_exc:
+                    self._log("retry_empty_fallback_error", error=str(fallback_exc))
+        return ""

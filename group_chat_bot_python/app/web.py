@@ -90,6 +90,7 @@ def create_app() -> FastAPI:
             BotCommand(command="fish", description="🎣 Рыбалка за печеньками"),
             BotCommand(command="aiimage", description="🖼️ ИИ-картинка за печеньки"),
             BotCommand(command="signai", description="✍️ ИИ-сигна за печеньки"),
+            BotCommand(command="nika", description="🖼️ Референс Ники"),
             BotCommand(command="setsignprice", description="✍️ Цена своей сигны"),
             BotCommand(command="signorders", description="📋 Заказы сигн"),
             BotCommand(command="signstats", description="📊 Статистика сигн"),

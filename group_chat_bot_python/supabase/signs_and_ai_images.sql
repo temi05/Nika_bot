@@ -26,3 +26,11 @@ on public.sign_orders (chat_id, author_id, status);
 
 create index if not exists idx_sign_orders_chat_buyer
 on public.sign_orders (chat_id, buyer_id, status);
+
+create table if not exists public.bot_assets (
+    asset_key text primary key,
+    mime_type text not null,
+    payload_base64 text not null,
+    updated_at timestamptz not null default now(),
+    updated_by bigint
+);

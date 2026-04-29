@@ -54,6 +54,9 @@ class SupabaseDB:
     def _sign_orders(self):
         return self.client.table("sign_orders")
 
+    def _bot_assets(self):
+        return self.client.table("bot_assets")
+
 
     def _safe_execute(self, query_builder, *, fallback=None, context: str = ""):
         """
@@ -560,6 +563,33 @@ class SupabaseDB:
 
     def set_sign_price(self, user: ChatUser, amount: int) -> ChatUser | None:
         return self.update_user(user.id, {"sign_price": max(0, amount)})
+
+    def save_bot_asset(self, asset_key: str, payload_base64: str, mime_type: str, updated_by: int | None = None) -> bool:
+        now = datetime.now(timezone.utc).isoformat()
+        result = self._safe_execute(
+            self._bot_assets().upsert(
+                {
+                    "asset_key": asset_key,
+                    "mime_type": mime_type,
+                    "payload_base64": payload_base64,
+                    "updated_at": now,
+                    "updated_by": updated_by,
+                }
+            ),
+            fallback=None,
+            context=f"save_bot_asset key={asset_key}",
+        )
+        return bool(result and result.data)
+
+    def get_bot_asset(self, asset_key: str) -> dict[str, Any] | None:
+        result = self._safe_execute(
+            self._bot_assets().select("*").eq("asset_key", asset_key).limit(1),
+            fallback=None,
+            context=f"get_bot_asset key={asset_key}",
+        )
+        if result and result.data:
+            return result.data[0]
+        return None
 
     def create_sign_order(self, buyer: ChatUser, author: ChatUser, price: int, text: str) -> dict[str, Any] | None:
         now = datetime.now(timezone.utc).isoformat()

@@ -28,7 +28,8 @@ class Settings(BaseSettings):
     polza_api_key: str | None = Field(default=None, validation_alias="POLZA_API_KEY")
     openai_base_url: str = Field(default="https://api.openai.com/v1", alias="OPENAI_BASE_URL")
 
-    ai_model: str = Field(default="gpt-5-mini", alias="AI_MODEL")
+    ai_model: str = Field(default="gpt-4o-mini", alias="AI_MODEL")
+    ai_fallback_model: str = Field(default="gpt-4o-mini", alias="AI_FALLBACK_MODEL")
     ai_image_model: str = Field(default="gpt-image-1.5", alias="AI_IMAGE_MODEL")
     ai_temperature: float = Field(default=0.7, alias="AI_TEMPERATURE")
     ai_max_tokens: int = Field(default=220, alias="AI_MAX_TOKENS")
