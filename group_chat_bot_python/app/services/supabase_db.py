@@ -278,8 +278,12 @@ class SupabaseDB:
                 return {"success": False, "hours": hours, "minutes": minutes}
 
         bonus_xp = random.randint(self.settings.daily_xp_min, self.settings.daily_xp_max)
-        is_rep_gained = random.random() < 0.1
-        new_reputation = user.reputation + (1 if is_rep_gained else 0)
+        level_bonus = min(60, max(0, user.level - 1) * 4)
+        bonus_reputation = random.randint(90, 160) + level_bonus
+        lucky_bonus = 100 if random.random() < 0.06 else 0
+        bonus_reputation += lucky_bonus
+        is_rep_gained = bonus_reputation > 0
+        new_reputation = user.reputation + bonus_reputation
         xp = user.xp + bonus_xp
         level = user.level
         level_up = False
@@ -299,6 +303,8 @@ class SupabaseDB:
         return {
             "success": True,
             "bonus_xp": bonus_xp,
+            "bonus_reputation": bonus_reputation,
+            "lucky_bonus": lucky_bonus,
             "is_rep_gained": is_rep_gained,
             "new_reputation": new_reputation,
             "new_level": updated.level if updated else level,
@@ -890,13 +896,13 @@ class SupabaseDB:
 
     def purchase_item(self, user: ChatUser, item_id: int) -> tuple[bool, str]:
         if item_id == 1:
-            cost = 500
+            cost = 1200
             if user.reputation < cost:
                 return False, f"Недостаточно печенек. Нужно {cost} 🍪."
             self.update_user(user.id, {"level": user.level + 1, "xp": 0, "reputation": user.reputation - cost})
             return True, f"Уровень куплен. Теперь у тебя {user.level + 1} уровень."
         if item_id == 2:
-            cost = 200
+            cost = 600
             if user.reputation < cost:
                 return False, "Недостаточно печенек."
             self.update_user(user.id, {"warns": 0, "reputation": user.reputation - cost, "last_warn_at": None})

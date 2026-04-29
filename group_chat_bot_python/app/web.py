@@ -145,22 +145,22 @@ def create_app() -> FastAPI:
                         next_auto_quiz.pop(chat_id, None)
                 for chat_id in active_chat_ids:
                     try:
-                        next_auto_drop.setdefault(chat_id, now + 25 * 60 + random.randint(0, 5 * 60))
-                        next_auto_quiz.setdefault(chat_id, now + 35 * 60 + random.randint(0, 10 * 60))
+                        next_auto_drop.setdefault(chat_id, now + 35 * 60 + random.randint(0, 10 * 60))
+                        next_auto_quiz.setdefault(chat_id, now + 45 * 60 + random.randint(0, 15 * 60))
 
                         if now >= next_auto_drop[chat_id]:
                             await send_auto_drop(chat_id)
-                            next_auto_drop[chat_id] = now + 25 * 60 + random.randint(0, 10 * 60)
+                            next_auto_drop[chat_id] = now + 35 * 60 + random.randint(0, 15 * 60)
                         if now >= next_auto_quiz[chat_id]:
                             await send_auto_quiz(chat_id)
-                            next_auto_quiz[chat_id] = now + 35 * 60 + random.randint(0, 15 * 60)
+                            next_auto_quiz[chat_id] = now + 45 * 60 + random.randint(0, 20 * 60)
                     except Exception as exc:
                         print(f"[auto_events:error] chat_id={chat_id} error={exc}")
         except asyncio.CancelledError:
             pass
 
     async def send_auto_drop(chat_id: int) -> None:
-        reward = random.randint(12, 35)
+        reward = random.randint(10, 28)
         created_at = int(time.time())
         msg = await bot.send_message(
             chat_id,
