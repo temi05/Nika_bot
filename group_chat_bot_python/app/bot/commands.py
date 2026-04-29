@@ -374,8 +374,10 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
             f"4. ИИ-картинка — <code>{ai.settings.ai_image_price} 🍪</code>\n"
             "   Команда: <code>/aiimage описание картинки</code>\n\n"
             f"5. Сигна от человека — цена автора, минимум <code>{ai.settings.human_sign_min_price} 🍪</code>\n"
-            "   Своя цена: <code>/setsignprice сумма</code>\n"
-            "   Заказ: ответь человеку <code>/signreq текст</code>\n"
+            "   Базовая цена: <code>/setsignprice сумма</code>\n"
+            "   Тариф: <code>/setsignprice название | цена | описание</code>\n"
+            "   Цены: ответь человеку <code>/signprice</code>\n"
+            "   Заказ: ответь человеку <code>/signreq текст</code> или <code>/signreq # текст</code>\n"
             "   На human-сигне должен быть автор, у которого заказали\n"
             "   Мои заказы: <code>/signorders</code>, <code>/signorders мои</code>\n\n"
             "<i>Печеньки зарабатываются за спасибо, плюсики, активность и мини-игры.</i>",
@@ -1690,15 +1692,49 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
 
     @router.message(Command("setsignprice", "signprice_set"))
     async def set_sign_price_command(message: Message, command: CommandObject) -> None:
-        arg = (command.args or "").strip().lower()
+        raw_arg = (command.args or "").strip()
+        arg = raw_arg.lower()
         sender = db.get_or_create_user(message.chat.id, get_sender_data(message))
         if arg in {"off", "0", "выкл"}:
             db.set_sign_price(sender, 0)
             await message.answer("✍️ Цена сигны отключена.")
             return
+
+        if "|" in raw_arg:
+            parts = [part.strip() for part in raw_arg.split("|")]
+            if len(parts) < 2 or not parts[1].isdigit():
+                await message.answer(
+                    "Формат тарифа: <code>/setsignprice название | цена | описание</code>\n"
+                    "Пример: <code>/setsignprice срочная | 900 | сделаю сегодня</code>",
+                    parse_mode="HTML",
+                )
+                return
+            title = parts[0]
+            amount = int(parts[1])
+            description = parts[2] if len(parts) >= 3 else ""
+            if len(title) < 2:
+                await message.answer("❌ Название тарифа слишком короткое.")
+                return
+            if amount < ai.settings.human_sign_min_price:
+                await message.answer(f"❌ Минимальная цена сигны: <b>{ai.settings.human_sign_min_price}</b> 🍪", parse_mode="HTML")
+                return
+            option = db.create_sign_price_option(sender, title, amount, description)
+            if not option:
+                await message.answer("❌ Не смог сохранить тариф. Проверь SQL sign_price_options.")
+                return
+            await message.answer(
+                f"✅ Тариф добавлен: <b>#{option['id']} {escape_html(title)}</b> — <b>{amount}</b> 🍪"
+                + (f"\n<i>{escape_html(description)}</i>" if description else ""),
+                parse_mode="HTML",
+            )
+            return
+
         if not arg.isdigit():
             await message.answer(
-                f"Использование: <code>/setsignprice сумма</code>\nМинимум: <b>{ai.settings.human_sign_min_price}</b> 🍪",
+                "Использование:\n"
+                f"• базовая цена: <code>/setsignprice сумма</code>\n"
+                "• отдельный тариф: <code>/setsignprice название | цена | описание</code>\n"
+                f"Минимум: <b>{ai.settings.human_sign_min_price}</b> 🍪",
                 parse_mode="HTML",
             )
             return
@@ -1710,14 +1746,44 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
         if not updated:
             await message.answer("❌ Не смог сохранить цену. Проверь, применена ли миграция signs_and_ai_images.sql.")
             return
-        await message.answer(f"✍️ Твоя цена за сигну: <b>{amount}</b> 🍪", parse_mode="HTML")
+        await message.answer(f"✍️ Твоя базовая цена за сигну: <b>{amount}</b> 🍪", parse_mode="HTML")
 
-    @router.message(Command("signprice"))
+    @router.message(Command("delsignprice", "signprice_del"))
+    async def delete_sign_price_command(message: Message, command: CommandObject) -> None:
+        sender = db.get_or_create_user(message.chat.id, get_sender_data(message))
+        arg = (command.args or "").strip()
+        if not arg.isdigit():
+            await message.answer("Использование: <code>/delsignprice номер_тарифа</code>", parse_mode="HTML")
+            return
+        ok = db.disable_sign_price_option(message.chat.id, sender.user_id, int(arg))
+        await message.answer("✅ Тариф отключен." if ok else "❌ Не нашла такой твой активный тариф.")
+
+    @router.message(Command("signprice", "signprices"))
     async def sign_price_command(message: Message) -> None:
         target_message = message.reply_to_message if message.reply_to_message and message.reply_to_message.from_user else message
         target = db.get_or_create_user(message.chat.id, get_sender_data(target_message))
         price = target.sign_price or ai.settings.human_sign_min_price
-        await message.answer(f"✍️ Цена сигны у {escape_html(target.display_name)}: <b>{price}</b> 🍪", parse_mode="HTML")
+        options = db.list_sign_price_options(message.chat.id, target.user_id)
+        lines = [
+            f"✍️ <b>Цены сигн у {escape_html(target.display_name)}</b>",
+            "",
+            f"Базовая: <b>{price}</b> 🍪",
+        ]
+        if options:
+            lines.append("")
+            lines.append("<b>Тарифы:</b>")
+            for option in options:
+                description = str(option.get("description") or "").strip()
+                lines.append(
+                    f"#{option['id']} — <b>{escape_html(str(option.get('title') or 'сигна'))}</b>: "
+                    f"<b>{int(option.get('price') or 0)}</b> 🍪"
+                    + (f"\n<i>{escape_html(description)}</i>" if description else "")
+                )
+            lines.append("")
+            lines.append("Заказ по тарифу: ответь автору <code>/signreq # текст</code>")
+        else:
+            lines.append("Отдельных тарифов пока нет.")
+        await message.answer("\n".join(lines), parse_mode="HTML")
 
     def _sign_status_label(status: str) -> str:
         return {
@@ -1731,10 +1797,12 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
     def _format_sign_order(row: dict, *, role: str) -> str:
         other = row.get("buyer_name") if role == "author" else row.get("author_name")
         other_label = "Покупатель" if role == "author" else "Автор"
+        option_line = f"Тариф: <b>{escape_html(str(row.get('option_title')))}</b>\n" if row.get("option_title") else ""
         return (
             f"#{row.get('id')} | <b>{_sign_status_label(str(row.get('status')))}</b> | "
             f"<b>{int(row.get('price') or 0)}</b> 🍪\n"
             f"{other_label}: {escape_html(str(other or 'unknown'))}\n"
+            f"{option_line}"
             f"Текст: <i>{escape_html(str(row.get('text') or '')[:120])}</i>"
         )
 
@@ -1796,11 +1864,11 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
     @router.message(Command("signreq", "signrequest"))
     async def sign_request_command(message: Message, command: CommandObject) -> None:
         if not message.reply_to_message or not message.reply_to_message.from_user:
-            await message.answer("Ответь на сообщение автора сигны: <code>/signreq текст для сигны</code>", parse_mode="HTML")
+            await message.answer("Ответь на сообщение автора сигны: <code>/signreq текст</code> или <code>/signreq номер_тарифа текст</code>", parse_mode="HTML")
             return
-        text = (command.args or "").strip()
-        if not text:
-            await message.answer("Напиши текст заказа: <code>/signreq текст для сигны</code>", parse_mode="HTML")
+        raw_text = (command.args or "").strip()
+        if not raw_text:
+            await message.answer("Напиши текст заказа: <code>/signreq текст</code> или <code>/signreq номер_тарифа текст</code>", parse_mode="HTML")
             return
         buyer = db.get_or_create_user(message.chat.id, get_sender_data(message))
         target_sender = get_sender_data(message.reply_to_message)
@@ -1808,11 +1876,25 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
             await message.answer("❌ Заказывать сигну можно только у другого человека.")
             return
         target = db.get_or_create_user(message.chat.id, target_sender)
+        option_id = None
+        option_title = None
+        text = raw_text
+        first_part, _, rest = raw_text.partition(" ")
+        normalized_option = first_part.lstrip("#")
         price = target.sign_price or ai.settings.human_sign_min_price
+        if normalized_option.isdigit() and rest.strip():
+            option = db.get_sign_price_option(message.chat.id, target.user_id, int(normalized_option))
+            if not option:
+                await message.answer("❌ У автора нет такого активного тарифа. Посмотри цены: ответь ему <code>/signprice</code>", parse_mode="HTML")
+                return
+            option_id = int(option["id"])
+            option_title = str(option.get("title") or "")
+            price = int(option.get("price") or price)
+            text = rest.strip()
         if buyer.reputation < price:
             await message.answer(f"❌ Нужно <b>{price}</b> 🍪. Баланс: <b>{buyer.reputation}</b> 🍪", parse_mode="HTML")
             return
-        order = db.create_sign_order(buyer, target, price, text)
+        order = db.create_sign_order(buyer, target, price, text, option_id=option_id, option_title=option_title)
         if not order:
             await message.answer("❌ Не смог создать заказ. Проверь, применена ли миграция signs_and_ai_images.sql.")
             return
@@ -1823,10 +1905,12 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
                 InlineKeyboardButton(text="Отказать", callback_data=f"sign_decline_{order_id}"),
             ]
         ])
+        option_line = f"Тариф: <b>{escape_html(option_title)}</b>\n" if option_title else ""
         await message.answer(
             f"✍️ <b>Заказ сигны #{order_id}</b>\n\n"
             f"Автор: {escape_html(target.display_name)}\n"
             f"Покупатель: {escape_html(buyer.display_name)}\n"
+            f"{option_line}"
             f"Цена: <b>{price}</b> 🍪\n"
             f"Текст: <i>{escape_html(text[:300])}</i>\n\n"
             "Автор должен принять заказ кнопкой. На сигне должен быть сам автор заказа: фото/рисунок/стиль на его выбор, "
@@ -1887,9 +1971,11 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
                 db.update_user(buyer.id, {"reputation": buyer.reputation})
                 await query.answer("Не смог обновить заказ, списание откатил.", show_alert=True)
                 return
+            option_line = f"Тариф: <b>{escape_html(str(order.get('option_title')))}</b>\n" if order.get("option_title") else ""
             await query.message.edit_text(
                 f"✍️ <b>Заказ #{order_id} принят</b>\n\n"
                 f"Цена <b>{price}</b> 🍪 лежит в эскроу.\n"
+                f"{option_line}"
                 f"Текст: <i>{escape_html(str(order.get('text') or ''))}</i>\n\n"
                 f"Когда сигна готова, автор жмет: <code>/signorders</code> → <b>Готово #{order_id}</b>.",
                 parse_mode="HTML",

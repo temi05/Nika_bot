@@ -54,6 +54,9 @@ class SupabaseDB:
     def _sign_orders(self):
         return self.client.table("sign_orders")
 
+    def _sign_price_options(self):
+        return self.client.table("sign_price_options")
+
     def _bot_assets(self):
         return self.client.table("bot_assets")
 
@@ -591,7 +594,76 @@ class SupabaseDB:
             return result.data[0]
         return None
 
-    def create_sign_order(self, buyer: ChatUser, author: ChatUser, price: int, text: str) -> dict[str, Any] | None:
+    def create_sign_price_option(self, user: ChatUser, title: str, price: int, description: str = "") -> dict[str, Any] | None:
+        now = datetime.now(timezone.utc).isoformat()
+        result = self._safe_execute(
+            self._sign_price_options().insert(
+                {
+                    "chat_id": user.chat_id,
+                    "user_id": user.user_id,
+                    "title": title[:80],
+                    "description": description[:300],
+                    "price": price,
+                    "is_active": True,
+                    "created_at": now,
+                    "updated_at": now,
+                }
+            ),
+            fallback=None,
+            context=f"create_sign_price_option chat_id={user.chat_id} user_id={user.user_id}",
+        )
+        if result and result.data:
+            return result.data[0]
+        return None
+
+    def list_sign_price_options(self, chat_id: int, user_id: int, *, active_only: bool = True) -> list[dict[str, Any]]:
+        query = self._sign_price_options().select("*").eq("chat_id", chat_id).eq("user_id", user_id)
+        if active_only:
+            query = query.eq("is_active", True)
+        result = self._safe_execute(
+            query.order("price", desc=False).order("created_at", desc=False),
+            fallback=None,
+            context=f"list_sign_price_options chat_id={chat_id} user_id={user_id}",
+        )
+        return list(result.data) if result and result.data else []
+
+    def get_sign_price_option(self, chat_id: int, user_id: int, option_id: int) -> dict[str, Any] | None:
+        result = self._safe_execute(
+            self._sign_price_options()
+            .select("*")
+            .eq("chat_id", chat_id)
+            .eq("user_id", user_id)
+            .eq("id", option_id)
+            .eq("is_active", True)
+            .limit(1),
+            fallback=None,
+            context=f"get_sign_price_option chat_id={chat_id} option_id={option_id}",
+        )
+        if result and result.data:
+            return result.data[0]
+        return None
+
+    def disable_sign_price_option(self, chat_id: int, user_id: int, option_id: int) -> bool:
+        result = self._safe_execute(
+            self._sign_price_options()
+            .update({"is_active": False, "updated_at": datetime.now(timezone.utc).isoformat()})
+            .eq("chat_id", chat_id)
+            .eq("user_id", user_id)
+            .eq("id", option_id),
+            fallback=None,
+            context=f"disable_sign_price_option chat_id={chat_id} option_id={option_id}",
+        )
+        return bool(result and result.data)
+
+    def create_sign_order(
+        self,
+        buyer: ChatUser,
+        author: ChatUser,
+        price: int,
+        text: str,
+        option_id: int | None = None,
+        option_title: str | None = None,
+    ) -> dict[str, Any] | None:
         now = datetime.now(timezone.utc).isoformat()
         result = self._safe_execute(
             self._sign_orders().insert(
@@ -602,6 +674,8 @@ class SupabaseDB:
                     "author_id": author.user_id,
                     "author_name": author.display_name,
                     "price": price,
+                    "option_id": option_id,
+                    "option_title": option_title,
                     "escrow_amount": 0,
                     "text": text[:500],
                     "status": "pending",
