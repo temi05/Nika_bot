@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import random
 import re
@@ -8,6 +9,7 @@ from datetime import datetime, timedelta
 from difflib import SequenceMatcher
 from typing import Any
 
+import httpx
 from aiogram import Bot
 from aiogram.types import ChatPermissions
 from openai import AsyncOpenAI
@@ -114,8 +116,8 @@ class AIService:
         ]
         return random.choice(messages)
 
-    async def flush_passive_memory(self, chat_id: int) -> None:
-        if len(self.chat_buffers[chat_id]) < 20:
+    async def flush_passive_memory(self, chat_id: int, *, force: bool = False) -> None:
+        if len(self.chat_buffers[chat_id]) < (1 if force else 20):
             return
 
         transcript = "\n".join(self.chat_buffers[chat_id])
@@ -124,6 +126,34 @@ class AIService:
         await self.memory.save_transcript(chat_id, transcript, participants)
         self.chat_buffers[chat_id].clear()
         self._log("flush_memory_done", chat_id=chat_id)
+
+    async def generate_image(self, prompt: str) -> bytes | None:
+        if not self.client:
+            return None
+        clean_prompt = prompt.strip()
+        if not clean_prompt:
+            return None
+        try:
+            response = await self.client.images.generate(
+                model=self.settings.ai_image_model,
+                prompt=clean_prompt[:3500],
+                size="1024x1024",
+            )
+            image = response.data[0] if response.data else None
+            if not image:
+                return None
+            b64_json = getattr(image, "b64_json", None)
+            if b64_json:
+                return base64.b64decode(b64_json)
+            image_url = getattr(image, "url", None)
+            if image_url:
+                async with httpx.AsyncClient(timeout=self.settings.ai_timeout_seconds) as client:
+                    download = await client.get(image_url)
+                    download.raise_for_status()
+                    return download.content
+        except Exception as exc:
+            self._log("image_error", error=str(exc))
+        return None
 
     async def generate_reply(
         self,

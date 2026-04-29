@@ -31,6 +31,8 @@ BOT_PERSONALITY_MODE=hard
 ## Memory Tuning
 
 ```env
+AI_MODEL=gpt-5-mini
+AI_IMAGE_MODEL=gpt-image-1.5
 MEMORY_MODEL=
 MEMORY_EXTRACTION_ENABLED=true
 MEMORY_EXTRACTION_MAX_FACTS=6
@@ -39,11 +41,12 @@ MEMORY_RETRIEVAL_LIMIT=6
 MEMORY_CAPTURE_ALL_MESSAGES=false
 ```
 
-- `AI_MODEL` — диалог
+- `AI_MODEL` — диалог, рекомендуемый баланс цены и качества: `gpt-5-mini`
+- `AI_IMAGE_MODEL` — генерация ИИ-картинок и ИИ-сигн, рекомендуемо `gpt-image-1.5`
 - `MEMORY_MODEL` — можно задать отдельный более дешевый/точный слой
 - `MEMORY_FACT_MIN_CONFIDENCE` — фильтрует мусорные факты
 - `MEMORY_RETRIEVAL_LIMIT` — сколько фактов тащить в prompt
-- `MEMORY_CAPTURE_ALL_MESSAGES=false` — память только по ответам бота (экономит токены)
+- `MEMORY_CAPTURE_ALL_MESSAGES=false` — память по ответам бота и по сообщениям, похожим на важные факты; `true` сохраняет намного больше
 
 ## Cost Tuning
 
@@ -53,6 +56,9 @@ AI_HISTORY_LINES=4
 AI_COMPACT_PROMPT=true
 AI_GROUP_COOLDOWN_SECONDS=12
 AI_MIN_MESSAGE_LEN=4
+AI_IMAGE_PRICE=650
+AI_SIGN_PRICE=450
+HUMAN_SIGN_MIN_PRICE=300
 ```
 
 ## Run Local
@@ -88,3 +94,4 @@ OPENAI_API_KEY=...
 Необходимые таблицы создаются SQL-скриптами в папке `supabase/`:
 - `supabase/message_logs.sql`
 - `supabase/bot_persona_state.sql`
+- `supabase/signs_and_ai_images.sql`

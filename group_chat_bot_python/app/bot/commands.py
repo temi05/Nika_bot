@@ -7,12 +7,12 @@ from datetime import datetime, timezone, timedelta
 
 from aiogram import Router, F
 from aiogram.filters import Command, CommandObject
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import BufferedInputFile, Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 
 from app.services.ai_service import AIService
 from app.services.supabase_db import SupabaseDB
 from app.bot.admin import is_admin
-from app.models import Sender
+from app.models import MemoryRecord, Sender
 from app.utils import (
     build_progress_bar,
     escape_html,
@@ -24,6 +24,7 @@ from app.utils import (
 AUTO_DROP_SESSIONS: dict[str, dict] = {}
 AUTO_QUIZ_SESSIONS: dict[str, dict] = {}
 AUTO_CLAIMED_EVENTS: set[str] = set()
+DUEL_SESSIONS: dict[str, dict] = {}
 
 
 def make_quiz_question() -> dict:
@@ -84,7 +85,11 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
             "• <code>/tower [ставка]</code> — Рискованная Башня (до x60)\n"
             "• <code>/coin [ставка] [орел/решка]</code> — Монетка x1.8\n"
             "• <code>/rps [ставка] [камень/ножницы/бумага]</code> — Дуэль с ботом\n"
+            "• <code>/duel [ставка] [камень/ножницы/бумага]</code> — Дуэль с игроком (реплаем)\n"
             "• <code>/fish</code> — Рыбалка за печеньками\n"
+            "• <code>/aiimage [описание]</code> — ИИ-картинка за печеньки\n"
+            "• <code>/signai [текст]</code> — ИИ-сигна за печеньки\n"
+            "• <code>/setsignprice</code>, <code>/signreq</code>, <code>/signorders</code> — Сигны от людей\n"
             "• Авто-событие: печенька падает в активный чат\n"
             "• Авто-событие: викторина, первый правильный ответ получает приз\n"
             "• <code>/rp [действие]</code> — Ролевые взаимодействия"
@@ -92,7 +97,8 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
         "profile": (
             "👤 <b>Персонализация</b>\n\n"
             "• <code>/bio [текст]</code> — Расскажи о себе\n"
-            "• <code>/mybirthday [дата]</code> — Установи день рождения"
+            "• <code>/mybirthday [дата]</code> — Установи день рождения\n"
+            "• <code>/remember [факт]</code> — Явно сохранить важный факт"
         ),
         "admin": (
             "🛡 <b>Администрирование</b>\n\n"
@@ -301,6 +307,25 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
             parse_mode="HTML",
         )
 
+    @router.message(Command("remember", "запомни"))
+    async def remember_command(message: Message, command: CommandObject) -> None:
+        fact = (command.args or "").strip()
+        if not fact:
+            await message.answer("Использование: <code>/remember факт, который надо запомнить</code>", parse_mode="HTML")
+            return
+        sender = get_sender_data(message)
+        db.get_or_create_user(message.chat.id, sender)
+        db.store_memory(
+            message.chat.id,
+            MemoryRecord(
+                fact=f"{sender.display_name}: {fact[:500]}",
+                source="manual_memory",
+                confidence=0.98,
+                meta={"user_id": sender.user_id, "user_name": sender.display_name},
+            ),
+        )
+        await message.answer("🧠 Запомнила. Лишнего вокруг этого сообщения в память не беру.")
+
     @router.message(Command("mood"))
     async def mood_command(message: Message) -> None:
         mood = ai.moods[message.chat.id]
@@ -340,7 +365,15 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
             "   Команда: <code>/buy 1</code>\n\n"
             "2. Снять все предупреждения — <code>200 🍪</code>\n"
             "   Команда: <code>/buy 2</code>\n\n"
-            "<i>Печеньки зарабатываются за спасибо, плюсики и активность.</i>",
+            f"3. ИИ-сигна — <code>{ai.settings.ai_sign_price} 🍪</code>\n"
+            "   Команда: <code>/signai текст на сигне</code>\n\n"
+            f"4. ИИ-картинка — <code>{ai.settings.ai_image_price} 🍪</code>\n"
+            "   Команда: <code>/aiimage описание картинки</code>\n\n"
+            f"5. Сигна от человека — цена автора, минимум <code>{ai.settings.human_sign_min_price} 🍪</code>\n"
+            "   Своя цена: <code>/setsignprice сумма</code>\n"
+            "   Заказ: ответь человеку <code>/signreq текст</code>\n"
+            "   Мои заказы: <code>/signorders</code>, <code>/signorders мои</code>\n\n"
+            "<i>Печеньки зарабатываются за спасибо, плюсики, активность и мини-игры.</i>",
             parse_mode="HTML",
         )
 
@@ -1206,6 +1239,486 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
                 f"Потеряно: <b>{bet}</b> 🍪\nБаланс: <b>{new_balance}</b> 🍪",
                 parse_mode="HTML",
             )
+
+    @router.message(Command("duel", "дуэль"))
+    async def duel_command(message: Message, command: CommandObject) -> None:
+        bet, choice = _parse_bet_and_choice(command.args)
+        aliases = {
+            "камень": "rock",
+            "rock": "rock",
+            "r": "rock",
+            "ножницы": "scissors",
+            "scissors": "scissors",
+            "s": "scissors",
+            "бумага": "paper",
+            "paper": "paper",
+            "p": "paper",
+        }
+        labels = {"rock": "камень", "scissors": "ножницы", "paper": "бумага"}
+        if not message.reply_to_message or not message.reply_to_message.from_user:
+            await message.answer(
+                "⚔️ <b>Дуэль с игроком</b>\n\n"
+                "Ответь на сообщение соперника: <code>/duel сумма камень</code>\n"
+                "Можно выбрать: камень, ножницы, бумага. Соперник подтвердит дуэль кнопкой.",
+                parse_mode="HTML",
+            )
+            return
+        if not bet or bet <= 0 or choice not in aliases:
+            await message.answer("Использование: ответом на игрока <code>/duel сумма камень/ножницы/бумага</code>", parse_mode="HTML")
+            return
+
+        target_sender = get_sender_data(message.reply_to_message)
+        if target_sender.is_bot or target_sender.user_id == message.from_user.id:
+            await message.answer("❌ Дуэль нужна между двумя живыми игроками.")
+            return
+
+        sender = db.get_or_create_user(message.chat.id, get_sender_data(message))
+        target = db.get_or_create_user(message.chat.id, target_sender)
+        if await _deny_if_jailed(message, sender, "/duel"):
+            return
+        if _jail_remaining(target):
+            await message.answer("❌ Соперник сейчас в тюрьме и не может принять дуэль.")
+            return
+        if sender.reputation < bet:
+            await message.answer(f"❌ Не хватает печенек. Баланс: <b>{sender.reputation}</b> 🍪", parse_mode="HTML")
+            return
+
+        key = f"{abs(message.chat.id) % 1_000_000}{sender.user_id % 1_000_000}{target.user_id % 1_000_000}{random.randint(100, 999)}"
+        DUEL_SESSIONS[key] = {
+            "chat_id": message.chat.id,
+            "challenger_id": sender.user_id,
+            "target_id": target.user_id,
+            "bet": bet,
+            "choice": aliases[choice],
+            "created_at": time.time(),
+        }
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(text="🪨 Камень", callback_data=f"duel_{key}_rock"),
+                InlineKeyboardButton(text="✂️ Ножницы", callback_data=f"duel_{key}_scissors"),
+                InlineKeyboardButton(text="📄 Бумага", callback_data=f"duel_{key}_paper"),
+            ],
+            [InlineKeyboardButton(text="Отказаться", callback_data=f"duel_{key}_decline")],
+        ])
+        await message.answer(
+            f"⚔️ <b>Дуэль на {bet} 🍪</b>\n\n"
+            f"{escape_html(sender.display_name)} бросает вызов {escape_html(target.display_name)}.\n"
+            f"Выбор вызывающего скрыт. У соперника 15 минут на ответ.",
+            reply_markup=keyboard,
+            parse_mode="HTML",
+        )
+
+    @router.callback_query(F.data.startswith("duel_"))
+    async def duel_callback(query: CallbackQuery) -> None:
+        parts = (query.data or "").split("_", 2)
+        if len(parts) != 3:
+            await query.answer("Дуэль устарела.", show_alert=True)
+            return
+        key, target_choice = parts[1], parts[2]
+        session = DUEL_SESSIONS.get(key)
+        if not session or time.time() - session["created_at"] > 15 * 60:
+            DUEL_SESSIONS.pop(key, None)
+            await query.answer("Дуэль устарела.", show_alert=True)
+            return
+        if query.from_user.id != session["target_id"]:
+            await query.answer("Эта дуэль не тебе.", show_alert=True)
+            return
+        if target_choice == "decline":
+            DUEL_SESSIONS.pop(key, None)
+            await query.message.edit_text("⚔️ Дуэль отклонена.")
+            await query.answer()
+            return
+
+        challenger = db.get_user_by_platform_id(session["chat_id"], session["challenger_id"])
+        target = db.get_user_by_platform_id(session["chat_id"], session["target_id"])
+        if not challenger or not target:
+            DUEL_SESSIONS.pop(key, None)
+            await query.answer("Не вижу одного из игроков в базе.", show_alert=True)
+            return
+        if _jail_remaining(challenger) or _jail_remaining(target):
+            DUEL_SESSIONS.pop(key, None)
+            await query.message.edit_text("⚔️ Дуэль отменена: один из игроков сейчас в тюрьме.")
+            await query.answer()
+            return
+        bet = int(session["bet"])
+        if challenger.reputation < bet or target.reputation < bet:
+            DUEL_SESSIONS.pop(key, None)
+            await query.message.edit_text("⚔️ Дуэль отменена: у одного из игроков уже не хватает печенек.")
+            await query.answer()
+            return
+
+        labels = {"rock": "камень", "scissors": "ножницы", "paper": "бумага"}
+        beats = {"rock": "scissors", "scissors": "paper", "paper": "rock"}
+        challenger_choice = session["choice"]
+        DUEL_SESSIONS.pop(key, None)
+        if challenger_choice == target_choice:
+            await query.message.edit_text(
+                f"🤝 <b>Ничья!</b>\n"
+                f"{escape_html(challenger.display_name)}: <b>{labels[challenger_choice]}</b>\n"
+                f"{escape_html(target.display_name)}: <b>{labels[target_choice]}</b>\n"
+                "Печеньки остаются на месте.",
+                parse_mode="HTML",
+            )
+            await query.answer()
+            return
+
+        if beats[challenger_choice] == target_choice:
+            winner, loser = challenger, target
+        else:
+            winner, loser = target, challenger
+        db.update_user(winner.id, {"reputation": winner.reputation + bet})
+        db.update_user(loser.id, {"reputation": loser.reputation - bet})
+        await query.message.edit_text(
+            f"⚔️ <b>Дуэль завершена</b>\n"
+            f"{escape_html(challenger.display_name)}: <b>{labels[challenger_choice]}</b>\n"
+            f"{escape_html(target.display_name)}: <b>{labels[target_choice]}</b>\n\n"
+            f"Победитель: <b>{escape_html(winner.display_name)}</b>\n"
+            f"Выигрыш: <b>{bet}</b> 🍪",
+            parse_mode="HTML",
+        )
+        await query.answer()
+
+    async def _charge_after_success(user_id: int, chat_id: int, price: int) -> tuple[bool, int]:
+        fresh = db.get_user_by_platform_id(chat_id, user_id)
+        if not fresh or fresh.reputation < price:
+            return False, fresh.reputation if fresh else 0
+        updated = db.update_user(fresh.id, {"reputation": fresh.reputation - price})
+        return bool(updated), (updated.reputation if updated else fresh.reputation - price)
+
+    @router.message(Command("aiimage", "картинка"))
+    async def ai_image_command(message: Message, command: CommandObject) -> None:
+        prompt = (command.args or "").strip()
+        if not prompt:
+            await message.answer(
+                "🖼️ <b>ИИ-картинка</b>\n\n"
+                f"Цена: <b>{ai.settings.ai_image_price}</b> 🍪\n"
+                "Использование: <code>/aiimage описание картинки</code>",
+                parse_mode="HTML",
+            )
+            return
+        sender = db.get_or_create_user(message.chat.id, get_sender_data(message))
+        if await _deny_if_jailed(message, sender, "/aiimage"):
+            return
+        price = max(1, ai.settings.ai_image_price)
+        if sender.reputation < price:
+            await message.answer(f"❌ Для ИИ-картинки нужно <b>{price}</b> 🍪. Баланс: <b>{sender.reputation}</b> 🍪", parse_mode="HTML")
+            return
+        try:
+            await message.bot.send_chat_action(message.chat.id, "upload_photo")
+        except Exception:
+            pass
+        image_bytes = await ai.generate_image(
+            "Telegram chat reward image. Create a high quality, polished image from this request. "
+            "Do not add watermarks or fake UI. Request: " + prompt
+        )
+        if not image_bytes:
+            await message.answer("❌ Не получилось сгенерировать картинку. Печеньки не списаны.")
+            return
+        ok, balance = await _charge_after_success(sender.user_id, message.chat.id, price)
+        if not ok:
+            await message.answer("❌ Пока картинка генерировалась, печенек уже не хватило. Картинку не списываю.")
+            return
+        await message.answer_photo(
+            BufferedInputFile(image_bytes, filename="nika_ai_image.png"),
+            caption=f"🖼️ Готово. Списано <b>{price}</b> 🍪\nБаланс: <b>{balance}</b> 🍪",
+            parse_mode="HTML",
+        )
+
+    @router.message(Command("signai", "aisign", "сигнаии"))
+    async def ai_sign_command(message: Message, command: CommandObject) -> None:
+        text = (command.args or "").strip()
+        if not text:
+            await message.answer(
+                "✍️ <b>ИИ-сигна</b>\n\n"
+                f"Цена: <b>{ai.settings.ai_sign_price}</b> 🍪\n"
+                "Использование: <code>/signai текст на сигне</code>",
+                parse_mode="HTML",
+            )
+            return
+        sender = db.get_or_create_user(message.chat.id, get_sender_data(message))
+        if await _deny_if_jailed(message, sender, "/signai"):
+            return
+        price = max(1, ai.settings.ai_sign_price)
+        if sender.reputation < price:
+            await message.answer(f"❌ Для ИИ-сигны нужно <b>{price}</b> 🍪. Баланс: <b>{sender.reputation}</b> 🍪", parse_mode="HTML")
+            return
+        try:
+            await message.bot.send_chat_action(message.chat.id, "upload_photo")
+        except Exception:
+            pass
+        safe_text = text[:120]
+        image_bytes = await ai.generate_image(
+            "Create a tasteful AI-made signa image for a Telegram economy bot: a clean paper/card held in a cozy scene, "
+            "with clearly readable handwritten text exactly: "
+            f"{safe_text!r}. No real person likeness, no watermark, no extra text."
+        )
+        if not image_bytes:
+            await message.answer("❌ Не получилось сгенерировать ИИ-сигну. Печеньки не списаны.")
+            return
+        ok, balance = await _charge_after_success(sender.user_id, message.chat.id, price)
+        if not ok:
+            await message.answer("❌ Пока сигна генерировалась, печенек уже не хватило. Ничего не списано.")
+            return
+        await message.answer_photo(
+            BufferedInputFile(image_bytes, filename="nika_ai_sign.png"),
+            caption=f"✍️ ИИ-сигна готова. Списано <b>{price}</b> 🍪\nБаланс: <b>{balance}</b> 🍪",
+            parse_mode="HTML",
+        )
+
+    @router.message(Command("setsignprice", "signprice_set"))
+    async def set_sign_price_command(message: Message, command: CommandObject) -> None:
+        arg = (command.args or "").strip().lower()
+        sender = db.get_or_create_user(message.chat.id, get_sender_data(message))
+        if arg in {"off", "0", "выкл"}:
+            db.set_sign_price(sender, 0)
+            await message.answer("✍️ Цена сигны отключена.")
+            return
+        if not arg.isdigit():
+            await message.answer(
+                f"Использование: <code>/setsignprice сумма</code>\nМинимум: <b>{ai.settings.human_sign_min_price}</b> 🍪",
+                parse_mode="HTML",
+            )
+            return
+        amount = int(arg)
+        if amount < ai.settings.human_sign_min_price:
+            await message.answer(f"❌ Минимальная цена сигны: <b>{ai.settings.human_sign_min_price}</b> 🍪", parse_mode="HTML")
+            return
+        updated = db.set_sign_price(sender, amount)
+        if not updated:
+            await message.answer("❌ Не смог сохранить цену. Проверь, применена ли миграция signs_and_ai_images.sql.")
+            return
+        await message.answer(f"✍️ Твоя цена за сигну: <b>{amount}</b> 🍪", parse_mode="HTML")
+
+    @router.message(Command("signprice"))
+    async def sign_price_command(message: Message) -> None:
+        target_message = message.reply_to_message if message.reply_to_message and message.reply_to_message.from_user else message
+        target = db.get_or_create_user(message.chat.id, get_sender_data(target_message))
+        price = target.sign_price or ai.settings.human_sign_min_price
+        await message.answer(f"✍️ Цена сигны у {escape_html(target.display_name)}: <b>{price}</b> 🍪", parse_mode="HTML")
+
+    def _sign_status_label(status: str) -> str:
+        return {
+            "pending": "ждет автора",
+            "accepted": "в работе",
+            "delivered": "ждет подтверждения",
+            "paid": "оплачен",
+            "cancelled": "отменен",
+        }.get(status, status)
+
+    def _format_sign_order(row: dict, *, role: str) -> str:
+        other = row.get("buyer_name") if role == "author" else row.get("author_name")
+        other_label = "Покупатель" if role == "author" else "Автор"
+        return (
+            f"#{row.get('id')} | <b>{_sign_status_label(str(row.get('status')))}</b> | "
+            f"<b>{int(row.get('price') or 0)}</b> 🍪\n"
+            f"{other_label}: {escape_html(str(other or 'unknown'))}\n"
+            f"Текст: <i>{escape_html(str(row.get('text') or '')[:120])}</i>"
+        )
+
+    def _sign_order_keyboard(rows: list[dict], *, viewer_id: int) -> InlineKeyboardMarkup | None:
+        buttons = []
+        for row in rows:
+            order_id = int(row.get("id") or 0)
+            status = row.get("status")
+            if status == "pending" and int(row.get("author_id") or 0) == viewer_id:
+                buttons.append([
+                    InlineKeyboardButton(text=f"Принять #{order_id}", callback_data=f"sign_accept_{order_id}"),
+                    InlineKeyboardButton(text=f"Отказать #{order_id}", callback_data=f"sign_decline_{order_id}"),
+                ])
+            elif status == "accepted" and int(row.get("author_id") or 0) == viewer_id:
+                buttons.append([
+                    InlineKeyboardButton(text=f"Готово #{order_id}", callback_data=f"sign_done_{order_id}"),
+                    InlineKeyboardButton(text=f"Отменить #{order_id}", callback_data=f"sign_cancel_{order_id}"),
+                ])
+            elif status == "delivered" and int(row.get("buyer_id") or 0) == viewer_id:
+                buttons.append([InlineKeyboardButton(text=f"Подтвердить оплату #{order_id}", callback_data=f"sign_pay_{order_id}")])
+        if not buttons:
+            return None
+        return InlineKeyboardMarkup(inline_keyboard=buttons[:10])
+
+    @router.message(Command("signorders"))
+    async def sign_orders_command(message: Message, command: CommandObject) -> None:
+        user = db.get_or_create_user(message.chat.id, get_sender_data(message))
+        arg = (command.args or "").strip().lower()
+        role = "buyer" if arg in {"buy", "buyer", "bought", "мои", "купил", "заказал"} else "author"
+        rows = db.list_sign_orders(message.chat.id, user.user_id, role=role, limit=10)
+        if not rows:
+            text = "Тебе пока не заказывали сигны." if role == "author" else "Ты пока не заказывал(а) сигны."
+            await message.answer(text)
+            return
+        title = "✍️ <b>Сигны, которые заказали у тебя</b>" if role == "author" else "✍️ <b>Сигны, которые заказал(а) ты</b>"
+        body = "\n\n".join(_format_sign_order(row, role=role) for row in rows)
+        await message.answer(
+            f"{title}\n\n{body}",
+            reply_markup=_sign_order_keyboard(rows, viewer_id=user.user_id),
+            parse_mode="HTML",
+        )
+
+    @router.message(Command("signstats"))
+    async def sign_stats_command(message: Message) -> None:
+        user = db.get_or_create_user(message.chat.id, get_sender_data(message))
+        stats = db.sign_order_stats(message.chat.id, user.user_id)
+        await message.answer(
+            "📊 <b>Статистика сигн</b>\n\n"
+            f"Тебе заказали: <b>{stats['authored_total']}</b>\n"
+            f"Активных у тебя: <b>{stats['authored_active']}</b>\n"
+            f"Оплаченных тобой сделанных: <b>{stats['authored_paid']}</b>\n"
+            f"Заработано: <b>{stats['earned']}</b> 🍪\n\n"
+            f"Ты заказал(а): <b>{stats['bought_total']}</b>\n"
+            f"Твои активные заказы: <b>{stats['bought_active']}</b>\n"
+            f"Потрачено: <b>{stats['spent']}</b> 🍪",
+            parse_mode="HTML",
+        )
+
+    @router.message(Command("signreq", "signrequest"))
+    async def sign_request_command(message: Message, command: CommandObject) -> None:
+        if not message.reply_to_message or not message.reply_to_message.from_user:
+            await message.answer("Ответь на сообщение автора сигны: <code>/signreq текст для сигны</code>", parse_mode="HTML")
+            return
+        text = (command.args or "").strip()
+        if not text:
+            await message.answer("Напиши текст заказа: <code>/signreq текст для сигны</code>", parse_mode="HTML")
+            return
+        buyer = db.get_or_create_user(message.chat.id, get_sender_data(message))
+        target_sender = get_sender_data(message.reply_to_message)
+        if target_sender.is_bot or target_sender.user_id == buyer.user_id:
+            await message.answer("❌ Заказывать сигну можно только у другого человека.")
+            return
+        target = db.get_or_create_user(message.chat.id, target_sender)
+        price = target.sign_price or ai.settings.human_sign_min_price
+        if buyer.reputation < price:
+            await message.answer(f"❌ Нужно <b>{price}</b> 🍪. Баланс: <b>{buyer.reputation}</b> 🍪", parse_mode="HTML")
+            return
+        order = db.create_sign_order(buyer, target, price, text)
+        if not order:
+            await message.answer("❌ Не смог создать заказ. Проверь, применена ли миграция signs_and_ai_images.sql.")
+            return
+        order_id = int(order["id"])
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(text="Принять", callback_data=f"sign_accept_{order_id}"),
+                InlineKeyboardButton(text="Отказать", callback_data=f"sign_decline_{order_id}"),
+            ]
+        ])
+        await message.answer(
+            f"✍️ <b>Заказ сигны #{order_id}</b>\n\n"
+            f"Автор: {escape_html(target.display_name)}\n"
+            f"Покупатель: {escape_html(buyer.display_name)}\n"
+            f"Цена: <b>{price}</b> 🍪\n"
+            f"Текст: <i>{escape_html(text[:300])}</i>\n\n"
+            "Автор должен принять заказ кнопкой. Деньги уйдут в эскроу и попадут автору после подтверждения.",
+            reply_markup=keyboard,
+            parse_mode="HTML",
+        )
+
+    @router.callback_query(F.data.startswith("sign_"))
+    async def sign_callback(query: CallbackQuery) -> None:
+        parts = (query.data or "").split("_", 2)
+        if len(parts) != 3 or not parts[2].isdigit():
+            await query.answer("Заказ устарел.", show_alert=True)
+            return
+        action, order_id = parts[1], int(parts[2])
+        order = db.get_sign_order(query.message.chat.id, order_id)
+        if not order:
+            await query.answer("Заказ не найден.", show_alert=True)
+            return
+        status = str(order.get("status"))
+        author_id = int(order.get("author_id") or 0)
+        buyer_id = int(order.get("buyer_id") or 0)
+        price = int(order.get("price") or 0)
+        now = datetime.now(timezone.utc).isoformat()
+
+        if action in {"accept", "decline", "done", "cancel"} and query.from_user.id != author_id:
+            await query.answer("Это может подтвердить только автор сигны.", show_alert=True)
+            return
+        if action == "pay" and query.from_user.id != buyer_id:
+            await query.answer("Оплату подтверждает только покупатель.", show_alert=True)
+            return
+
+        if action == "decline":
+            if status != "pending":
+                await query.answer("Этот заказ уже нельзя отклонить.", show_alert=True)
+                return
+            db.update_sign_order(order_id, {"status": "cancelled", "cancelled_at": now, "cancel_reason": "declined_by_author"})
+            await query.message.edit_text(f"✍️ Заказ сигны #{order_id} отклонён.")
+            await query.answer()
+            return
+
+        if action == "accept":
+            if status != "pending":
+                await query.answer("Заказ уже обработан.", show_alert=True)
+                return
+            buyer = db.get_user_by_platform_id(int(order["chat_id"]), buyer_id)
+            if not buyer or buyer.reputation < price:
+                db.update_sign_order(order_id, {"status": "cancelled", "cancelled_at": now, "cancel_reason": "buyer_has_no_cookies"})
+                await query.message.edit_text(f"✍️ Заказ #{order_id} отменён: у покупателя уже не хватает печенек.")
+                await query.answer()
+                return
+            charged = db.update_user(buyer.id, {"reputation": buyer.reputation - price})
+            if not charged:
+                await query.answer("Не смог списать печеньки у покупателя.", show_alert=True)
+                return
+            updated = db.update_sign_order(order_id, {"status": "accepted", "escrow_amount": price, "accepted_at": now})
+            if not updated:
+                db.update_user(buyer.id, {"reputation": buyer.reputation})
+                await query.answer("Не смог обновить заказ, списание откатил.", show_alert=True)
+                return
+            await query.message.edit_text(
+                f"✍️ <b>Заказ #{order_id} принят</b>\n\n"
+                f"Цена <b>{price}</b> 🍪 лежит в эскроу.\n"
+                f"Текст: <i>{escape_html(str(order.get('text') or ''))}</i>\n\n"
+                f"Когда сигна готова, автор жмет: <code>/signorders</code> → <b>Готово #{order_id}</b>.",
+                parse_mode="HTML",
+            )
+            await query.answer()
+            return
+
+        if action == "done":
+            if status != "accepted":
+                await query.answer("Готовым можно отметить только заказ в работе.", show_alert=True)
+                return
+            db.update_sign_order(order_id, {"status": "delivered", "delivered_at": now})
+            await query.message.edit_text(
+                f"✍️ <b>Заказ #{order_id} отмечен готовым</b>\n\n"
+                "Покупатель должен подтвердить получение через <code>/signorders мои</code>.",
+                parse_mode="HTML",
+            )
+            await query.answer("Готово отмечено.")
+            return
+
+        if action == "cancel":
+            if status not in {"pending", "accepted"}:
+                await query.answer("Этот заказ уже нельзя отменить.", show_alert=True)
+                return
+            buyer = db.get_user_by_platform_id(int(order["chat_id"]), buyer_id)
+            escrow = int(order.get("escrow_amount") or 0)
+            if buyer and escrow > 0:
+                db.update_user(buyer.id, {"reputation": buyer.reputation + escrow})
+            db.update_sign_order(order_id, {"status": "cancelled", "escrow_amount": 0, "cancelled_at": now, "cancel_reason": "cancelled_by_author"})
+            await query.message.edit_text(f"✍️ Заказ #{order_id} отменён. Эскроу возвращён покупателю.")
+            await query.answer()
+            return
+
+        if action == "pay":
+            if status != "delivered":
+                await query.answer("Оплатить можно только готовый заказ.", show_alert=True)
+                return
+            author = db.get_user_by_platform_id(int(order["chat_id"]), author_id)
+            escrow = int(order.get("escrow_amount") or price)
+            if not author or escrow <= 0:
+                await query.answer("Не смог найти автора или сумму оплаты.", show_alert=True)
+                return
+            paid_author = db.update_user(author.id, {"reputation": author.reputation + escrow})
+            if not paid_author:
+                await query.answer("Не смог начислить печеньки автору.", show_alert=True)
+                return
+            db.update_sign_order(order_id, {"status": "paid", "escrow_amount": 0, "paid_at": now})
+            await query.message.edit_text(
+                f"✍️ <b>Заказ #{order_id} закрыт</b>\n\n"
+                f"{escape_html(author.display_name)} получил(а) <b>{escrow}</b> 🍪.",
+                parse_mode="HTML",
+            )
+            await query.answer("Оплата подтверждена.")
 
     @router.message(Command("fish", "рыбалка"))
     async def fish_command(message: Message) -> None:

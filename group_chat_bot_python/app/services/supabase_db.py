@@ -51,6 +51,9 @@ class SupabaseDB:
     def _debts(self):
         return self.client.table("bot_debts")
 
+    def _sign_orders(self):
+        return self.client.table("sign_orders")
+
 
     def _safe_execute(self, query_builder, *, fallback=None, context: str = ""):
         """
@@ -93,6 +96,7 @@ class SupabaseDB:
             jail_reason=row.get("jail_reason"),
             steal_fail_streak=int(row.get("steal_fail_streak") or 0),
             steal_success_streak=int(row.get("steal_success_streak") or 0),
+            sign_price=int(row.get("sign_price") or 0),
         )
 
     def _fallback_user(self, chat_id: int, sender: Sender) -> ChatUser:
@@ -553,6 +557,85 @@ class SupabaseDB:
         self.update_user(sender.id, {"reputation": sender.reputation - amount})
         self.update_user(receiver.id, {"reputation": receiver.reputation + amount})
         return True
+
+    def set_sign_price(self, user: ChatUser, amount: int) -> ChatUser | None:
+        return self.update_user(user.id, {"sign_price": max(0, amount)})
+
+    def create_sign_order(self, buyer: ChatUser, author: ChatUser, price: int, text: str) -> dict[str, Any] | None:
+        now = datetime.now(timezone.utc).isoformat()
+        result = self._safe_execute(
+            self._sign_orders().insert(
+                {
+                    "chat_id": buyer.chat_id,
+                    "buyer_id": buyer.user_id,
+                    "buyer_name": buyer.display_name,
+                    "author_id": author.user_id,
+                    "author_name": author.display_name,
+                    "price": price,
+                    "escrow_amount": 0,
+                    "text": text[:500],
+                    "status": "pending",
+                    "created_at": now,
+                    "updated_at": now,
+                }
+            ),
+            fallback=None,
+            context=f"create_sign_order chat_id={buyer.chat_id}",
+        )
+        if result and result.data:
+            return result.data[0]
+        return None
+
+    def get_sign_order(self, chat_id: int, order_id: int) -> dict[str, Any] | None:
+        result = self._safe_execute(
+            self._sign_orders().select("*").eq("chat_id", chat_id).eq("id", order_id).limit(1),
+            fallback=None,
+            context=f"get_sign_order chat_id={chat_id} order_id={order_id}",
+        )
+        if result and result.data:
+            return result.data[0]
+        return None
+
+    def update_sign_order(self, order_id: int, updates: dict[str, Any]) -> dict[str, Any] | None:
+        payload = dict(updates)
+        payload["updated_at"] = datetime.now(timezone.utc).isoformat()
+        result = self._safe_execute(
+            self._sign_orders().update(payload).eq("id", order_id),
+            fallback=None,
+            context=f"update_sign_order order_id={order_id}",
+        )
+        if result and result.data:
+            return result.data[0]
+        return None
+
+    def list_sign_orders(self, chat_id: int, user_id: int, role: str = "author", limit: int = 10) -> list[dict[str, Any]]:
+        column = "buyer_id" if role == "buyer" else "author_id"
+        result = self._safe_execute(
+            self._sign_orders()
+            .select("*")
+            .eq("chat_id", chat_id)
+            .eq(column, user_id)
+            .order("created_at", desc=True)
+            .limit(limit),
+            fallback=None,
+            context=f"list_sign_orders chat_id={chat_id} user_id={user_id} role={role}",
+        )
+        return list(result.data) if result and result.data else []
+
+    def sign_order_stats(self, chat_id: int, user_id: int) -> dict[str, int]:
+        authored = self.list_sign_orders(chat_id, user_id, "author", limit=100)
+        bought = self.list_sign_orders(chat_id, user_id, "buyer", limit=100)
+        earned = sum(int(row.get("price") or 0) for row in authored if row.get("status") == "paid")
+        spent = sum(int(row.get("price") or 0) for row in bought if row.get("status") == "paid")
+        return {
+            "authored_total": len(authored),
+            "authored_active": sum(1 for row in authored if row.get("status") in {"pending", "accepted", "delivered"}),
+            "authored_paid": sum(1 for row in authored if row.get("status") == "paid"),
+            "bought_total": len(bought),
+            "bought_active": sum(1 for row in bought if row.get("status") in {"pending", "accepted", "delivered"}),
+            "earned": earned,
+            "spent": spent,
+        }
 
     def create_debt(self, lender: ChatUser, borrower: ChatUser, amount: int, due_hours: int = 48) -> dict[str, Any] | None:
         now = datetime.now(timezone.utc)

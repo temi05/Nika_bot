@@ -17,6 +17,45 @@ from app.services.supabase_db import SupabaseDB
 from app.utils import birthday_age_text, build_captcha_image, escape_html, generate_captcha_code, get_sender_data
 
 
+def _looks_like_memory_signal(text: str) -> bool:
+    clean = re.sub(r"\s+", " ", text.strip().lower())
+    if len(clean) < 10 or clean.startswith("/"):
+        return False
+    if clean.count("http://") or clean.count("https://"):
+        return False
+
+    strong_markers = (
+        "запомни",
+        "запиши",
+        "сохрани",
+        "не забудь",
+        "меня зовут",
+        "мой ник",
+        "мой день рождения",
+        "мне нравится",
+        "я люблю",
+        "я не люблю",
+        "я ненавижу",
+        "у меня",
+        "я из ",
+        "я живу",
+        "я учусь",
+        "я работаю",
+        "remember",
+        "my name is",
+        "i like",
+        "i don't like",
+    )
+    if any(marker in clean for marker in strong_markers):
+        return True
+
+    if re.search(r"\bмне\s+\d{1,2}\s+(год|года|лет)\b", clean):
+        return True
+    if re.search(r"\b(мой|моя|мои)\s+.{3,40}\s*[-—:]\s*.{2,80}", clean):
+        return True
+    return False
+
+
 def build_messages_router(bot: Bot, settings: Settings, db: SupabaseDB, ai: AIService) -> Router:
     router = Router(name="messages")
 
@@ -263,14 +302,16 @@ def build_messages_router(bot: Bot, settings: Settings, db: SupabaseDB, ai: AISe
             should_reply = is_private_chat or is_reply_to_bot or is_mentioned
             
             print(f"🔍 [DEBUG] should_reply={should_reply}, is_private={is_private_chat}")
+            memory_signal = _looks_like_memory_signal(memory_input_text)
             should_capture_memory = (
                 settings.memory_capture_all_messages
                 or should_reply
+                or memory_signal
             )
             if should_capture_memory:
                 ai.remember_message(message.chat.id, sender, memory_input_text)
                 try:
-                    await ai.flush_passive_memory(message.chat.id)
+                    await ai.flush_passive_memory(message.chat.id, force=memory_signal)
                 except Exception as exc:
                     print(f"[AI:flush_memory_error] chat_id={message.chat.id} error={exc}")
             reply = None

@@ -42,6 +42,7 @@ class ChatUser:
     jail_reason: str | None = None
     steal_fail_streak: int = 0
     steal_success_streak: int = 0
+    sign_price: int = 0
 
     @property
     def display_name(self) -> str:

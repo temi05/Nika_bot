@@ -28,7 +28,8 @@ class Settings(BaseSettings):
     polza_api_key: str | None = Field(default=None, validation_alias="POLZA_API_KEY")
     openai_base_url: str = Field(default="https://api.openai.com/v1", alias="OPENAI_BASE_URL")
 
-    ai_model: str = Field(default="gpt-4o-mini", alias="AI_MODEL")
+    ai_model: str = Field(default="gpt-5-mini", alias="AI_MODEL")
+    ai_image_model: str = Field(default="gpt-image-1.5", alias="AI_IMAGE_MODEL")
     ai_temperature: float = Field(default=0.7, alias="AI_TEMPERATURE")
     ai_max_tokens: int = Field(default=220, alias="AI_MAX_TOKENS")
     ai_timeout_seconds: int = Field(default=45, alias="AI_TIMEOUT_SECONDS")
@@ -47,6 +48,10 @@ class Settings(BaseSettings):
     memory_fact_min_confidence: float = Field(default=0.72, alias="MEMORY_FACT_MIN_CONFIDENCE")
     memory_retrieval_limit: int = Field(default=6, alias="MEMORY_RETRIEVAL_LIMIT")
     memory_capture_all_messages: bool = Field(default=False, alias="MEMORY_CAPTURE_ALL_MESSAGES")
+
+    ai_image_price: int = Field(default=7000, alias="AI_IMAGE_PRICE")
+    ai_sign_price: int = Field(default=15000, alias="AI_SIGN_PRICE")
+    human_sign_min_price: int = Field(default=3000, alias="HUMAN_SIGN_MIN_PRICE")
 
     # Провайдер памяти: только "database" (Supabase)
     memory_provider: str = Field(default="database", alias="MEMORY_PROVIDER")
