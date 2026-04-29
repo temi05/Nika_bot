@@ -1379,14 +1379,17 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
             winner, loser = challenger, target
         else:
             winner, loser = target, challenger
-        db.update_user(winner.id, {"reputation": winner.reputation + bet})
-        db.update_user(loser.id, {"reputation": loser.reputation - bet})
+        loser_refund = max(1, int(bet * 0.15)) if bet >= 7 else 0
+        winner_profit = bet - loser_refund
+        db.update_user(winner.id, {"reputation": winner.reputation + winner_profit})
+        db.update_user(loser.id, {"reputation": loser.reputation - bet + loser_refund})
         await query.message.edit_text(
             f"⚔️ <b>Дуэль завершена</b>\n"
             f"{escape_html(challenger.display_name)}: <b>{labels[challenger_choice]}</b>\n"
             f"{escape_html(target.display_name)}: <b>{labels[target_choice]}</b>\n\n"
             f"Победитель: <b>{escape_html(winner.display_name)}</b>\n"
-            f"Выигрыш: <b>{bet}</b> 🍪",
+            f"Выигрыш: <b>{winner_profit}</b> 🍪\n"
+            f"Утешение проигравшему: <b>{loser_refund}</b> 🍪",
             parse_mode="HTML",
         )
         await query.answer()
@@ -2455,12 +2458,15 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
             )
             await query.answer("💰 Удвоено!")
         else:
-            new_balance = sender.reputation - win_amount
+            refund = max(1, int(win_amount * 0.25)) if win_amount >= 4 else 0
+            loss = win_amount - refund
+            new_balance = sender.reputation - loss
             db.update_user(sender.id, {"reputation": new_balance})
             await query.message.edit_text(
                 f"🃏 <b>РИСК НЕ ОПРАВДАН...</b>\n\n"
                 f"👤 Игрок: <b>{escape_html(sender.display_name)}</b>\n"
-                f"💀 Ты потерял всё: <b>{win_amount}</b> 🍪\n"
+                f"💀 Потеряно: <b>{loss}</b> 🍪\n"
+                f"🛟 Сохранено: <b>{refund}</b> 🍪\n"
                 f"📉 Баланс: <b>{new_balance}</b> 🍪",
                 parse_mode="HTML"
             )
@@ -2475,7 +2481,7 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
         return "Новичок"
 
     def _get_tower_multiplier(floor: int) -> float:
-        multipliers = [1.0, 1.03, 1.18, 1.48, 2.1, 3.4, 6.0, 12.0, 25.0, 60.0]
+        multipliers = [1.0, 1.08, 1.28, 1.65, 2.35, 3.7, 6.5, 12.5, 26.0, 62.0]
         if floor < 1: return 1.0
         if floor > 10: return multipliers[-1]
         return multipliers[floor-1]
@@ -2519,10 +2525,10 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
             return
 
         weathers = [
-            {"name": "☀️ Ясно", "chance_mod": 0.02, "reward_mod": 1.0},
+            {"name": "☀️ Ясно", "chance_mod": 0.03, "reward_mod": 1.0},
             {"name": "🌫 Туман", "chance_mod": -0.03, "reward_mod": 1.08},
             {"name": "🌪 Буря", "chance_mod": -0.08, "reward_mod": 1.18},
-            {"name": "🌈 Попутный ветер", "chance_mod": 0.06, "reward_mod": 0.92}
+            {"name": "🌈 Попутный ветер", "chance_mod": 0.07, "reward_mod": 0.9}
         ]
         weather = random.choice(weathers)
         
@@ -2550,10 +2556,10 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
             return
         
         weathers = [
-            {"name": "☀️ Ясно", "chance_mod": 0.02, "reward_mod": 1.0},
+            {"name": "☀️ Ясно", "chance_mod": 0.03, "reward_mod": 1.0},
             {"name": "🌫 Туман", "chance_mod": -0.03, "reward_mod": 1.08},
             {"name": "🌪 Буря", "chance_mod": -0.08, "reward_mod": 1.18},
-            {"name": "🌈 Попутный ветер", "chance_mod": 0.06, "reward_mod": 0.92}
+            {"name": "🌈 Попутный ветер", "chance_mod": 0.07, "reward_mod": 0.9}
         ]
         if action not in {"up", "take"} or floor < 1 or bet < 1 or weather_idx not in range(len(weathers)):
             await query.answer("❌ Некорректная кнопка.", show_alert=True)
@@ -2604,7 +2610,7 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
             await query.answer("💰 Приз в кармане!")
             
         elif action == "up":
-            chances = [0.98, 0.90, 0.84, 0.76, 0.68, 0.59, 0.50, 0.40, 0.30, 0.20]
+            chances = [0.98, 0.91, 0.85, 0.78, 0.69, 0.60, 0.51, 0.41, 0.31, 0.20]
             base_chance = chances[floor-1] if floor <= len(chances) else 0.2
             success_chance = min(0.95, max(0.1, base_chance + weather["chance_mod"]))
             
@@ -2615,7 +2621,7 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
                     ("🎁 Нашел старую заначку! (+15 🍪)", lambda u: db.update_user(u.id, {"reputation": u.reputation + 15})),
                     ("🍪 Карманный бонус! (+8 🍪)", lambda u: db.update_user(u.id, {"reputation": u.reputation + 8})),
                     ("🪤 Наступил на ловушку! (-3 🍪)", lambda u: db.update_user(u.id, {"reputation": max(0, u.reputation - 3)})),
-                    ("🔮 Загадочная аура...", lambda u: None)
+                    ("🔮 Загадочная аура: следующий шаг будто легче.", lambda u: None)
                 ]
                 ev_text, ev_action = random.choice(events)
                 event_msg = ev_text
