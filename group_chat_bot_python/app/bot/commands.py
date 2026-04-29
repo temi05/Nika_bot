@@ -2490,6 +2490,15 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
         weather_mod = weather["reward_mod"] if floor > 1 else 1.0
         return _get_tower_multiplier(floor) * weather_mod
 
+    def _get_tower_success_chance(floor: int, weather: dict) -> float:
+        chances = [0.98, 0.91, 0.85, 0.78, 0.69, 0.60, 0.51, 0.41, 0.31, 0.20]
+        base_chance = chances[floor - 1] if 1 <= floor <= len(chances) else 0.20
+        return min(0.95, max(0.10, base_chance + weather["chance_mod"]))
+
+    def _format_tower_chance(chance: float) -> str:
+        percent = round(chance * 100, 1)
+        return f"{percent:.0f}%" if percent.is_integer() else f"{percent:.1f}%"
+
     # --- ИГРА: БАШНЯ ФОРТУНЫ (COMPACT & DYNAMIC VERSION) ---
     _tower_locks = {}
     _tower_sessions = {}
@@ -2610,9 +2619,7 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
             await query.answer("💰 Приз в кармане!")
             
         elif action == "up":
-            chances = [0.98, 0.91, 0.85, 0.78, 0.69, 0.60, 0.51, 0.41, 0.31, 0.20]
-            base_chance = chances[floor-1] if floor <= len(chances) else 0.2
-            success_chance = min(0.95, max(0.1, base_chance + weather["chance_mod"]))
+            success_chance = _get_tower_success_chance(floor, weather)
             
             # Случайные события (Random Encounters)
             event_msg = ""
@@ -2621,7 +2628,7 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
                     ("🎁 Нашел старую заначку! (+15 🍪)", lambda u: db.update_user(u.id, {"reputation": u.reputation + 15})),
                     ("🍪 Карманный бонус! (+8 🍪)", lambda u: db.update_user(u.id, {"reputation": u.reputation + 8})),
                     ("🪤 Наступил на ловушку! (-3 🍪)", lambda u: db.update_user(u.id, {"reputation": max(0, u.reputation - 3)})),
-                    ("🔮 Загадочная аура: следующий шаг будто легче.", lambda u: None)
+                    ("🔮 Загадочная аура: башня на секунду стала тише.", lambda u: None)
                 ]
                 ev_text, ev_action = random.choice(events)
                 event_msg = ev_text
@@ -2678,7 +2685,7 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
         tower_lines = []
         for i in range(min(10, floor + 1), max(0, floor - 2), -1):
             m = _get_tower_reward_multiplier(i, weather)
-            m_text = f"x{m:.1f}" if weather["name"] != "🌫 Туман" or i <= floor else "x???"
+            m_text = f"x{m:.1f}"
             
             if i == floor:
                 line = f"▶️ <b>[{i:02}] {m_text} 🏃 ТЫ ТУТ</b>"
@@ -2691,6 +2698,16 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
 
         progress = "▰" * floor + "▱" * (10 - floor)
         event_block = f"\n<i>{event_msg}</i>\n" if event_msg else ""
+        success_chance = _get_tower_success_chance(floor, weather)
+        fail_chance = 1.0 - success_chance
+        next_floor = min(10, floor + 1)
+        next_multiplier = _get_tower_reward_multiplier(next_floor, weather)
+        next_prize = int(bet * next_multiplier)
+        current_prize = int(bet * multiplier)
+        if floor >= 10:
+            next_result_text = f"🏆 При успехе: <b>вершина</b>, куш <b>{next_prize} 🍪</b>\n"
+        else:
+            next_result_text = f"🪜 При успехе: <b>{next_floor}/10</b>, куш <b>{next_prize} 🍪</b>\n"
         
         text = (
             f"🏰 <b>БАШНЯ ФОРТУНЫ</b>\n"
@@ -2698,7 +2715,9 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
             f"<code>{progress}</code> {floor}/10\n"
             f"{event_block}\n"
             + "\n".join(tower_lines) + "\n\n" +
-            f"💰 Ставка: <code>{bet}</code> 🍪 | 💵 Текущий куш: <b>{int(bet * multiplier)} 🍪</b>\n"
+            f"💰 Ставка: <code>{bet}</code> 🍪 | 💵 Текущий куш: <b>{current_prize} 🍪</b>\n"
+            f"🎯 Следующий подъем: ✅ <b>{_format_tower_chance(success_chance)}</b> / 💥 <b>{_format_tower_chance(fail_chance)}</b>\n"
+            f"{next_result_text}"
         )
         
         kb = InlineKeyboardMarkup(inline_keyboard=[
