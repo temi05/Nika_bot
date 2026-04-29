@@ -2491,9 +2491,11 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
         return _get_tower_multiplier(floor) * weather_mod
 
     def _get_tower_success_chance(floor: int, weather: dict) -> float:
-        chances = [0.98, 0.91, 0.85, 0.78, 0.69, 0.60, 0.51, 0.41, 0.31, 0.20]
+        if floor <= 1:
+            return 0.99
+        chances = [0.99, 0.96, 0.89, 0.80, 0.70, 0.60, 0.50, 0.40, 0.30, 0.20]
         base_chance = chances[floor - 1] if 1 <= floor <= len(chances) else 0.20
-        return min(0.95, max(0.10, base_chance + weather["chance_mod"]))
+        return min(0.98, max(0.10, base_chance + weather["chance_mod"]))
 
     def _format_tower_chance(chance: float) -> str:
         percent = round(chance * 100, 1)
@@ -2657,7 +2659,9 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
                 # Чекпоинты
                 safe_win = 0
                 mult = _get_tower_reward_multiplier(floor, weather)
-                if floor >= 8: safe_win = int(bet * mult * 0.75)
+                if floor <= 1: safe_win = int(bet * 0.75)
+                elif floor == 2: safe_win = int(bet * 0.55)
+                elif floor >= 8: safe_win = int(bet * mult * 0.75)
                 elif floor >= 5: safe_win = int(bet * mult * 0.45)
                 elif floor >= 3: safe_win = int(bet * 0.35)
                 else: safe_win = max(1, int(bet * 0.15)) if bet >= 5 else 0
@@ -2716,7 +2720,7 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
             f"{event_block}\n"
             + "\n".join(tower_lines) + "\n\n" +
             f"💰 Ставка: <code>{bet}</code> 🍪 | 💵 Текущий куш: <b>{current_prize} 🍪</b>\n"
-            f"🎯 Следующий подъем: ✅ <b>{_format_tower_chance(success_chance)}</b> / 💥 <b>{_format_tower_chance(fail_chance)}</b>\n"
+            f"🎯 Шанс кнопки: ✅ <b>{_format_tower_chance(success_chance)}</b> пройти / 💥 <b>{_format_tower_chance(fail_chance)}</b> сорваться\n"
             f"{next_result_text}"
         )
         
