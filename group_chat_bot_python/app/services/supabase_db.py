@@ -185,6 +185,11 @@ class SupabaseDB:
 
     def update_user(self, db_id: int, updates: dict[str, Any]) -> ChatUser | None:
         payload = dict(updates)
+        for field in ("reputation", "debt", "warns", "xp"):
+            if field in payload and payload[field] is not None:
+                payload[field] = max(0, int(payload[field]))
+        if "level" in payload and payload["level"] is not None:
+            payload["level"] = max(1, int(payload["level"]))
         try:
             result = self._safe_execute(
                 self._users().update(payload).eq("id", db_id),
