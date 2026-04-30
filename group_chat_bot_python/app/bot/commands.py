@@ -86,6 +86,7 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
             "🎰 <b>Игры и Развлечения</b>\n\n"
             "• <code>/casino [ставка]</code> — Премиальный слот-автомат\n"
             "• <code>/tower [ставка]</code> — Рискованная Башня (до x40)\n"
+            "• <code>/dice [ставка] [чет/нечет/дубль/2-12]</code> — Кубики с разными выплатами\n"
             "• <code>/coin [ставка] [орел/решка]</code> — Монетка x1.9\n"
             "• <code>/rps [ставка] [камень/ножницы/бумага]</code> — Дуэль с ботом\n"
             "• <code>/duel [ставка] [камень/ножницы/бумага]</code> — Дуэль с игроком (реплаем)\n"
@@ -1217,6 +1218,140 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
                 f"Баланс: <b>{new_balance}</b> 🍪",
                 parse_mode="HTML",
             )
+
+    @router.message(Command("dice", "кубики", "кости"))
+    async def dice_command(message: Message, command: CommandObject) -> None:
+        bet, choice = _parse_bet_and_choice(command.args)
+        if not bet or bet <= 0 or not choice:
+            await message.answer(
+                "🎲 <b>Кубики</b>\n\n"
+                "Использование: <code>/dice &lt;ставка&gt; &lt;чет/нечет/дубль/2-12&gt;</code>\n"
+                "• чет/нечет — выплата x1.85\n"
+                "• дубль — выплата x5.2\n"
+                "• точная сумма 2-12 — выплата от x5 до x28",
+                parse_mode="HTML",
+            )
+            return
+
+        normalized_choice = choice.replace("ё", "е").strip().lower()
+        aliases = {
+            "чет": "even",
+            "четное": "even",
+            "четная": "even",
+            "чёт": "even",
+            "чётное": "even",
+            "чётная": "even",
+            "even": "even",
+            "e": "even",
+            "нечет": "odd",
+            "нечетное": "odd",
+            "нечетная": "odd",
+            "нечёт": "odd",
+            "нечётное": "odd",
+            "нечётная": "odd",
+            "odd": "odd",
+            "o": "odd",
+            "дубль": "double",
+            "дубли": "double",
+            "double": "double",
+            "doubles": "double",
+            "pair": "double",
+        }
+
+        target_sum = None
+        mode = aliases.get(normalized_choice)
+        if mode is None and normalized_choice.isdigit():
+            target_sum = int(normalized_choice)
+            if 2 <= target_sum <= 12:
+                mode = "sum"
+
+        if mode is None:
+            await message.answer(
+                "🎲 <b>Кубики</b>\n\n"
+                "Выбери: <code>чет</code>, <code>нечет</code>, <code>дубль</code> или сумму <code>2-12</code>.\n"
+                "Пример: <code>/dice 100 нечет</code>",
+                parse_mode="HTML",
+            )
+            return
+
+        sender = db.get_or_create_user(message.chat.id, get_sender_data(message))
+        if await _deny_if_jailed(message, sender, "/dice"):
+            return
+        if await _deny_bad_bet(message, sender, bet):
+            return
+        if sender.reputation < bet:
+            await message.answer(f"❌ Не хватает печенек. Баланс: <b>{sender.reputation}</b> 🍪", parse_mode="HTML")
+            return
+        allowed, remaining = db.can_user_use_command(message.chat.id, sender.user_id, "dice", 20)
+        if not allowed:
+            await message.answer(f"⏳ Кубики еще катятся. Подожди {remaining} сек.")
+            return
+
+        die_1 = random.randint(1, 6)
+        die_2 = random.randint(1, 6)
+        total = die_1 + die_2
+        is_double = die_1 == die_2
+        is_even = total % 2 == 0
+
+        labels = {
+            "even": "чет",
+            "odd": "нечет",
+            "double": "дубль",
+            "sum": f"сумма {target_sum}",
+        }
+        multipliers_by_sum = {
+            2: 28.0,
+            3: 14.0,
+            4: 9.0,
+            5: 7.0,
+            6: 5.8,
+            7: 5.0,
+            8: 5.8,
+            9: 7.0,
+            10: 9.0,
+            11: 14.0,
+            12: 28.0,
+        }
+
+        if mode == "even":
+            won = is_even
+            multiplier = 1.85
+        elif mode == "odd":
+            won = not is_even
+            multiplier = 1.85
+        elif mode == "double":
+            won = is_double
+            multiplier = 5.2
+        else:
+            won = total == target_sum
+            multiplier = multipliers_by_sum[target_sum or 7]
+
+        result_line = f"🎲 Выпало: <b>{die_1}</b> + <b>{die_2}</b> = <b>{total}</b>"
+        extra_line = "Пара на кубиках." if is_double else ("Сумма четная." if is_even else "Сумма нечетная.")
+        if won:
+            win = int(bet * multiplier)
+            new_balance = sender.reputation - bet + win
+            db.update_user(sender.id, {"reputation": new_balance})
+            await message.answer(
+                f"{result_line}\n"
+                f"<i>{extra_line}</i>\n\n"
+                f"✅ Ставка на <b>{labels[mode]}</b> сыграла: x{multiplier:g}\n"
+                f"Выигрыш: <b>{win}</b> 🍪\n"
+                f"Баланс: <b>{new_balance}</b> 🍪",
+                parse_mode="HTML",
+            )
+            return
+
+        new_balance = sender.reputation - bet
+        db.update_user(sender.id, {"reputation": new_balance})
+        await message.answer(
+            f"{result_line}\n"
+            f"<i>{extra_line}</i>\n\n"
+            f"❌ Ставка на <b>{labels[mode]}</b> не зашла.\n"
+            f"Потеряно: <b>{bet}</b> 🍪\n"
+            f"Баланс: <b>{new_balance}</b> 🍪",
+            parse_mode="HTML",
+        )
 
     @router.message(Command("rps", "кнб"))
     async def rps_command(message: Message, command: CommandObject) -> None:
