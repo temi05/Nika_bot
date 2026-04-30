@@ -27,6 +27,7 @@ AUTO_DROP_SESSIONS: dict[str, dict] = {}
 AUTO_QUIZ_SESSIONS: dict[str, dict] = {}
 AUTO_CLAIMED_EVENTS: set[str] = set()
 DUEL_SESSIONS: dict[str, dict] = {}
+DICE_DUEL_SESSIONS: dict[str, dict] = {}
 NIKA_REFERENCE_ASSET_KEY = "nika_reference"
 
 
@@ -86,7 +87,8 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
             "🎰 <b>Игры и Развлечения</b>\n\n"
             "• <code>/casino [ставка]</code> — Премиальный слот-автомат\n"
             "• <code>/tower [ставка]</code> — Рискованная Башня (до x40)\n"
-            "• <code>/dice [ставка] [чет/нечет/дубль/2-12]</code> — Кубики с разными выплатами\n"
+            "• <code>/dice [ставка] [чет/нечет/дубль/2-12]</code> — Кубики с риском и удвоением\n"
+            "• <code>/diceduel [ставка]</code> — Дуэль на кубиках (реплаем)\n"
             "• <code>/coin [ставка] [орел/решка]</code> — Монетка x1.9\n"
             "• <code>/rps [ставка] [камень/ножницы/бумага]</code> — Дуэль с ботом\n"
             "• <code>/duel [ставка] [камень/ножницы/бумага]</code> — Дуэль с игроком (реплаем)\n"
@@ -1159,6 +1161,8 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
             return True
         return False
 
+    _casino_double_sessions = {}
+
     @router.message(Command("coin", "flip", "монетка"))
     async def coin_command(message: Message, command: CommandObject) -> None:
         bet, choice = _parse_bet_and_choice(command.args)
@@ -1226,9 +1230,10 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
             await message.answer(
                 "🎲 <b>Кубики</b>\n\n"
                 "Использование: <code>/dice &lt;ставка&gt; &lt;чет/нечет/дубль/2-12&gt;</code>\n"
-                "• чет/нечет — выплата x1.85\n"
-                "• дубль — выплата x5.2\n"
-                "• точная сумма 2-12 — выплата от x5 до x28",
+                "• чет/нечет — выплата x1.9\n"
+                "• дубль — выплата x5.5\n"
+                "• точная сумма 2-12 — выплата от x5.5 до x32\n"
+                "• после победы можно рискнуть и удвоить куш",
                 parse_mode="HTML",
             )
             return
@@ -1300,28 +1305,28 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
             "sum": f"сумма {target_sum}",
         }
         multipliers_by_sum = {
-            2: 28.0,
-            3: 14.0,
-            4: 9.0,
-            5: 7.0,
-            6: 5.8,
-            7: 5.0,
-            8: 5.8,
-            9: 7.0,
-            10: 9.0,
-            11: 14.0,
-            12: 28.0,
+            2: 32.0,
+            3: 16.0,
+            4: 10.5,
+            5: 8.0,
+            6: 6.5,
+            7: 5.5,
+            8: 6.5,
+            9: 8.0,
+            10: 10.5,
+            11: 16.0,
+            12: 32.0,
         }
 
         if mode == "even":
             won = is_even
-            multiplier = 1.85
+            multiplier = 1.9
         elif mode == "odd":
             won = not is_even
-            multiplier = 1.85
+            multiplier = 1.9
         elif mode == "double":
             won = is_double
-            multiplier = 5.2
+            multiplier = 5.5
         else:
             won = total == target_sum
             multiplier = multipliers_by_sum[target_sum or 7]
@@ -1332,14 +1337,21 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
             win = int(bet * multiplier)
             new_balance = sender.reputation - bet + win
             db.update_user(sender.id, {"reputation": new_balance})
-            await message.answer(
+            sent = await message.answer(
                 f"{result_line}\n"
                 f"<i>{extra_line}</i>\n\n"
                 f"✅ Ставка на <b>{labels[mode]}</b> сыграла: x{multiplier:g}\n"
                 f"Выигрыш: <b>{win}</b> 🍪\n"
                 f"Баланс: <b>{new_balance}</b> 🍪",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="🃏 Рискнуть: Удвоить", callback_data=f"dice_double_{sender.user_id}_{win}")]
+                ]),
                 parse_mode="HTML",
             )
+            _casino_double_sessions[f"{message.chat.id}_{sent.message_id}"] = {
+                "user_id": sender.user_id,
+                "win_amount": win,
+            }
             return
 
         new_balance = sender.reputation - bet
@@ -1352,6 +1364,146 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
             f"Баланс: <b>{new_balance}</b> 🍪",
             parse_mode="HTML",
         )
+
+    @router.message(Command("diceduel", "кубодуэль", "дайсдуэль"))
+    async def dice_duel_command(message: Message, command: CommandObject) -> None:
+        if not message.reply_to_message or not message.reply_to_message.from_user:
+            await message.answer(
+                "🎲 <b>Дуэль на кубиках</b>\n\n"
+                "Ответь на сообщение соперника: <code>/diceduel сумма</code>\n"
+                "Оба игрока кидают 2d6. У кого сумма выше — забирает ставку.",
+                parse_mode="HTML",
+            )
+            return
+        if not command.args or not command.args.strip().isdigit():
+            await message.answer("Использование: ответом на игрока <code>/diceduel сумма</code>", parse_mode="HTML")
+            return
+
+        bet = int(command.args.strip())
+        target_sender = get_sender_data(message.reply_to_message)
+        if target_sender.is_bot or target_sender.user_id == message.from_user.id:
+            await message.answer("❌ Дуэль нужна между двумя живыми игроками.")
+            return
+
+        sender = db.get_or_create_user(message.chat.id, get_sender_data(message))
+        target = db.get_or_create_user(message.chat.id, target_sender)
+        if await _deny_if_jailed(message, sender, "/diceduel"):
+            return
+        if _jail_remaining(target):
+            await message.answer("❌ Соперник сейчас в тюрьме и не может принять дуэль.")
+            return
+        if await _deny_bad_bet(message, sender, bet):
+            return
+        target_max_bet = _max_game_bet(target)
+        if bet > target_max_bet:
+            await message.answer(
+                f"❌ Для соперника ставка слишком большая.\n"
+                f"Его лимит сейчас: <b>{target_max_bet}</b> 🍪",
+                parse_mode="HTML",
+            )
+            return
+        if sender.reputation < bet:
+            await message.answer(f"❌ Не хватает печенек. Баланс: <b>{sender.reputation}</b> 🍪", parse_mode="HTML")
+            return
+
+        allowed, remaining = db.can_user_use_command(message.chat.id, sender.user_id, "diceduel", 20)
+        if not allowed:
+            await message.answer(f"⏳ Подожди {remaining} сек. перед новой кубодуэлью.")
+            return
+
+        key = f"{abs(message.chat.id) % 1_000_000}{sender.user_id % 1_000_000}{target.user_id % 1_000_000}{random.randint(100, 999)}"
+        DICE_DUEL_SESSIONS[key] = {
+            "chat_id": message.chat.id,
+            "challenger_id": sender.user_id,
+            "target_id": target.user_id,
+            "bet": bet,
+            "created_at": time.time(),
+        }
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🎲 Принять бросок", callback_data=f"diceduel_{key}_accept")],
+            [InlineKeyboardButton(text="Отказаться", callback_data=f"diceduel_{key}_decline")],
+        ])
+        await message.answer(
+            f"🎲 <b>Кубодуэль на {bet} 🍪</b>\n\n"
+            f"{escape_html(sender.display_name)} вызывает {escape_html(target.display_name)}.\n"
+            f"У соперника 15 минут на ответ.",
+            reply_markup=keyboard,
+            parse_mode="HTML",
+        )
+
+    @router.callback_query(F.data.startswith("diceduel_"))
+    async def dice_duel_callback(query: CallbackQuery) -> None:
+        parts = (query.data or "").split("_", 2)
+        if len(parts) != 3:
+            await query.answer("Кубодуэль устарела.", show_alert=True)
+            return
+        key, action = parts[1], parts[2]
+        session = DICE_DUEL_SESSIONS.get(key)
+        if not session or time.time() - session["created_at"] > 15 * 60:
+            DICE_DUEL_SESSIONS.pop(key, None)
+            await query.answer("Кубодуэль устарела.", show_alert=True)
+            return
+        if query.from_user.id != session["target_id"]:
+            await query.answer("Эта кубодуэль не тебе.", show_alert=True)
+            return
+        if action == "decline":
+            DICE_DUEL_SESSIONS.pop(key, None)
+            await query.message.edit_text("🎲 Кубодуэль отклонена.")
+            await query.answer()
+            return
+        if action != "accept":
+            await query.answer("Кнопка устарела.", show_alert=True)
+            return
+
+        challenger = db.get_user_by_platform_id(session["chat_id"], session["challenger_id"])
+        target = db.get_user_by_platform_id(session["chat_id"], session["target_id"])
+        if not challenger or not target:
+            DICE_DUEL_SESSIONS.pop(key, None)
+            await query.answer("Не вижу одного из игроков в базе.", show_alert=True)
+            return
+        if _jail_remaining(challenger) or _jail_remaining(target):
+            DICE_DUEL_SESSIONS.pop(key, None)
+            await query.message.edit_text("🎲 Кубодуэль отменена: один из игроков сейчас в тюрьме.")
+            await query.answer()
+            return
+        bet = int(session["bet"])
+        if challenger.reputation < bet or target.reputation < bet:
+            DICE_DUEL_SESSIONS.pop(key, None)
+            await query.message.edit_text("🎲 Кубодуэль отменена: у одного из игроков уже не хватает печенек.")
+            await query.answer()
+            return
+
+        DICE_DUEL_SESSIONS.pop(key, None)
+        ch_dice = (random.randint(1, 6), random.randint(1, 6))
+        tg_dice = (random.randint(1, 6), random.randint(1, 6))
+        ch_total = sum(ch_dice)
+        tg_total = sum(tg_dice)
+        if ch_total == tg_total:
+            await query.message.edit_text(
+                f"🎲 <b>Ничья!</b>\n\n"
+                f"{escape_html(challenger.display_name)}: <b>{ch_dice[0]}</b> + <b>{ch_dice[1]}</b> = <b>{ch_total}</b>\n"
+                f"{escape_html(target.display_name)}: <b>{tg_dice[0]}</b> + <b>{tg_dice[1]}</b> = <b>{tg_total}</b>\n\n"
+                "Печеньки остаются на месте.",
+                parse_mode="HTML",
+            )
+            await query.answer()
+            return
+
+        winner, loser = (challenger, target) if ch_total > tg_total else (target, challenger)
+        loser_refund = max(1, int(bet * 0.10)) if bet >= 10 else 0
+        winner_profit = bet - loser_refund
+        db.update_user(winner.id, {"reputation": winner.reputation + winner_profit})
+        db.update_user(loser.id, {"reputation": loser.reputation - bet + loser_refund})
+        await query.message.edit_text(
+            f"🎲 <b>Кубодуэль завершена</b>\n\n"
+            f"{escape_html(challenger.display_name)}: <b>{ch_dice[0]}</b> + <b>{ch_dice[1]}</b> = <b>{ch_total}</b>\n"
+            f"{escape_html(target.display_name)}: <b>{tg_dice[0]}</b> + <b>{tg_dice[1]}</b> = <b>{tg_total}</b>\n\n"
+            f"Победитель: <b>{escape_html(winner.display_name)}</b>\n"
+            f"Выигрыш: <b>{winner_profit}</b> 🍪\n"
+            f"Утешение проигравшему: <b>{loser_refund}</b> 🍪",
+            parse_mode="HTML",
+        )
+        await query.answer()
 
     @router.message(Command("rps", "кнб"))
     async def rps_command(message: Message, command: CommandObject) -> None:
@@ -2448,8 +2600,6 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
             parse_mode="HTML",
         )
         await query.answer(f"+{reward} 🍪")
-
-    _casino_double_sessions = {}
 
     @router.message(Command("casino", "gamble", "spin", "казино", "ставка"))
     async def casino_command(message: Message, command: CommandObject) -> None:

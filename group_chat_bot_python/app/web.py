@@ -84,6 +84,7 @@ def create_app() -> FastAPI:
             BotCommand(command="top", description="🏆 Рейтинг участников"),
             BotCommand(command="casino", description="🎰 Крутить рулетку (ставка)"),
             BotCommand(command="dice", description="🎲 Кубики: чет/нечет/дубль"),
+            BotCommand(command="diceduel", description="🎲 Дуэль на кубиках"),
             BotCommand(command="duel", description="⚔️ Дуэль с игроком"),
             BotCommand(command="signai", description="✍️ ИИ-сигна за печеньки"),
             BotCommand(command="setsignprice", description="✍️ Цена своей сигны"),
