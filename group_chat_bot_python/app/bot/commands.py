@@ -89,6 +89,8 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
             "• <code>/tower [ставка]</code> — Рискованная Башня (до x40)\n"
             "• <code>/dice [ставка] [чет/нечет/дубль/2-12]</code> — Кубики с риском и удвоением\n"
             "• <code>/diceduel [ставка]</code> — Дуэль на кубиках (реплаем)\n"
+            "• <code>/box</code>, <code>/scratch</code>, <code>/mine</code> — Безопасные игры без проигрыша\n"
+            "• <code>/dailyquest</code> — Ежедневный квест без риска\n"
             "• <code>/coin [ставка] [орел/решка]</code> — Монетка x1.9\n"
             "• <code>/rps [ставка] [камень/ножницы/бумага]</code> — Дуэль с ботом\n"
             "• <code>/duel [ставка] [камень/ножницы/бумага]</code> — Дуэль с игроком (реплаем)\n"
@@ -2433,6 +2435,163 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
             f"{text}\n"
             f"Награда: <b>{reward}</b> 🍪 и <b>{xp}</b> XP\n"
             f"Баланс: <b>{sender.reputation + reward}</b> 🍪",
+            parse_mode="HTML",
+        )
+
+    @router.message(Command("box", "коробка", "сундук"))
+    async def box_command(message: Message) -> None:
+        sender = db.get_or_create_user(message.chat.id, get_sender_data(message))
+        if await _deny_if_jailed(message, sender, "/box"):
+            return
+        allowed, remaining = db.can_user_use_command(message.chat.id, sender.user_id, "box", 60 * 60)
+        if not allowed:
+            await message.answer(f"📦 Коробка Ники ещё закрыта. Возвращайся через {remaining // 60 + 1} мин.")
+            return
+
+        roll = random.random()
+        if roll < 0.50:
+            reward, xp, title, text = random.randint(7, 16), random.randint(4, 8), "Обычная коробка", "Внутри крошки, но честные."
+        elif roll < 0.82:
+            reward, xp, title, text = random.randint(18, 34), random.randint(8, 14), "Хорошая коробка", "Ника спрятала туда маленький запас."
+        elif roll < 0.97:
+            reward, xp, title, text = random.randint(55, 95), random.randint(16, 26), "Редкая коробка", "Под крышкой внезапно блеснул приличный куш."
+        else:
+            reward, xp, title, text = random.randint(150, 260), random.randint(30, 48), "Легендарная коробка", "Она была тяжёлая не просто так."
+
+        updated = db.add_reputation(sender, reward) or sender
+        db.add_xp(updated, xp)
+        await message.answer(
+            f"📦 <b>{title}</b>\n\n"
+            f"{text}\n"
+            f"Награда: <b>{reward}</b> 🍪 и <b>{xp}</b> XP\n"
+            f"Баланс: <b>{updated.reputation}</b> 🍪",
+            parse_mode="HTML",
+        )
+
+    @router.message(Command("scratch", "скретч", "лотерейка"))
+    async def scratch_command(message: Message) -> None:
+        sender = db.get_or_create_user(message.chat.id, get_sender_data(message))
+        if await _deny_if_jailed(message, sender, "/scratch"):
+            return
+        allowed, remaining = db.can_user_use_command(message.chat.id, sender.user_id, "scratch", 35 * 60)
+        if not allowed:
+            await message.answer(f"🎟 Новая скретч-карта будет через {remaining // 60 + 1} мин.")
+            return
+
+        symbols = ["🍪", "🍒", "⭐", "💎", "🎲", "🧁"]
+        card = [random.choice(symbols) for _ in range(3)]
+        counts = {symbol: card.count(symbol) for symbol in symbols}
+        best = max(counts.values())
+        jackpot_symbol = card[0] if best == 3 else ""
+        if best == 3 and jackpot_symbol == "💎":
+            reward, xp, result = random.randint(180, 320), random.randint(28, 45), "💎 Три бриллианта. Очень жирная карта."
+        elif best == 3:
+            reward, xp, result = random.randint(90, 170), random.randint(20, 34), "✨ Три одинаковых символа."
+        elif best == 2:
+            reward, xp, result = random.randint(24, 55), random.randint(9, 17), "🥈 Два совпадения."
+        else:
+            reward, xp, result = random.randint(5, 12), random.randint(3, 7), "🧾 Совпадений нет, но карта не пустая."
+
+        updated = db.add_reputation(sender, reward) or sender
+        db.add_xp(updated, xp)
+        await message.answer(
+            f"🎟 <b>Скретч-карта</b>\n\n"
+            f"<code>[ {card[0]} | {card[1]} | {card[2]} ]</code>\n"
+            f"{result}\n"
+            f"Награда: <b>{reward}</b> 🍪 и <b>{xp}</b> XP\n"
+            f"Баланс: <b>{updated.reputation}</b> 🍪",
+            parse_mode="HTML",
+        )
+
+    @router.message(Command("mine", "шахта", "копать"))
+    async def mine_command(message: Message, command: CommandObject) -> None:
+        sender = db.get_or_create_user(message.chat.id, get_sender_data(message))
+        if await _deny_if_jailed(message, sender, "/mine"):
+            return
+        allowed, remaining = db.can_user_use_command(message.chat.id, sender.user_id, "mine", 90 * 60)
+        if not allowed:
+            await message.answer(f"⛏ Шахта проветривается. Возвращайся через {remaining // 60 + 1} мин.")
+            return
+
+        raw_mode = (command.args or "normal").strip().lower().replace("ё", "е")
+        aliases = {
+            "safe": "safe",
+            "легко": "safe",
+            "безопасно": "safe",
+            "normal": "normal",
+            "норм": "normal",
+            "обычно": "normal",
+            "deep": "deep",
+            "глубоко": "deep",
+            "глубже": "deep",
+        }
+        mode = aliases.get(raw_mode, "normal")
+        if mode == "safe":
+            reward = random.randint(12, 24)
+            xp = random.randint(6, 10)
+            title = "Безопасная выработка"
+            text = "Ты копал(а) неглубоко и стабильно вынес(ла) печеньки."
+        elif mode == "deep":
+            reward = random.randint(4, 110)
+            xp = random.randint(12, 24)
+            title = "Глубокая шахта"
+            text = "Глубоко, нервно, но без настоящего проигрыша."
+        else:
+            reward = random.randint(8, 60)
+            xp = random.randint(8, 16)
+            title = "Обычная смена"
+            text = "Нормальная глубина, нормальная добыча."
+
+        if random.random() < 0.08:
+            bonus = random.randint(20, 45)
+            reward += bonus
+            text += f"\nБонусная жила: +<b>{bonus}</b> 🍪."
+
+        updated = db.add_reputation(sender, reward) or sender
+        db.add_xp(updated, xp)
+        await message.answer(
+            f"⛏ <b>{title}</b>\n\n"
+            f"{text}\n"
+            f"Режимы: <code>safe</code>, <code>normal</code>, <code>deep</code>\n"
+            f"Награда: <b>{reward}</b> 🍪 и <b>{xp}</b> XP\n"
+            f"Баланс: <b>{updated.reputation}</b> 🍪",
+            parse_mode="HTML",
+        )
+
+    @router.message(Command("dailyquest", "квест", "дейлик"))
+    async def dailyquest_command(message: Message) -> None:
+        sender = db.get_or_create_user(message.chat.id, get_sender_data(message))
+        if await _deny_if_jailed(message, sender, "/dailyquest"):
+            return
+        allowed, remaining = db.can_user_use_command(message.chat.id, sender.user_id, "dailyquest", 24 * 60 * 60)
+        if not allowed:
+            hours = remaining // 3600
+            minutes = (remaining % 3600) // 60
+            await message.answer(f"📜 Ежедневный квест уже закрыт. Новый через {hours} ч {minutes + 1} мин.")
+            return
+
+        quests = [
+            ("Починить шумный чат", "Ты подкрутил(а) пару невидимых винтиков, и чат стал чуть менее хаотичным."),
+            ("Доставить печеньки", "Маршрут был странный, но коробка доехала почти целой."),
+            ("Помочь Нике с багом", "Баг притворялся фичей, но ты его раскусил(а)."),
+            ("Разобрать архив мемов", "Половина архива оказалась опасной для психики, зато награда настоящая."),
+            ("Проверить склад", "На складе нашлись забытые печеньки и подозрительно довольная тишина."),
+        ]
+        title, text = random.choice(quests)
+        reward = random.randint(65, 145)
+        xp = random.randint(24, 52)
+        if random.random() < 0.10:
+            reward += random.randint(45, 90)
+            text += "\nНика добавила премию за красивое исполнение."
+
+        updated = db.add_reputation(sender, reward) or sender
+        level_result = db.add_xp(updated, xp)
+        level_line = f"\nНовый уровень: <b>{level_result['new_level']}</b>!" if level_result.get("level_up") else ""
+        await message.answer(
+            f"📜 <b>Ежедневный квест: {escape_html(title)}</b>\n\n"
+            f"{escape_html(text)}\n"
+            f"Награда: <b>{reward}</b> 🍪 и <b>{xp}</b> XP{level_line}\n"
+            f"Баланс: <b>{updated.reputation}</b> 🍪",
             parse_mode="HTML",
         )
 

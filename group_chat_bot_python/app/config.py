@@ -53,6 +53,9 @@ class Settings(BaseSettings):
     ai_image_price: int = Field(default=7000, alias="AI_IMAGE_PRICE")
     ai_sign_price: int = Field(default=15000, alias="AI_SIGN_PRICE")
     human_sign_min_price: int = Field(default=3000, alias="HUMAN_SIGN_MIN_PRICE")
+    tenor_api_key: str | None = Field(default=None, alias="TENOR_API_KEY")
+    tenor_client_key: str = Field(default="neuronika_rp", alias="TENOR_CLIENT_KEY")
+    rp_gif_autosearch: bool = Field(default=False, alias="RP_GIF_AUTOSEARCH")
 
     # Провайдер памяти: только "database" (Supabase)
     memory_provider: str = Field(default="database", alias="MEMORY_PROVIDER")
