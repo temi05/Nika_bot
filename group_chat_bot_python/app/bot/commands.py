@@ -91,7 +91,7 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
             "• <code>/diceduel [ставка]</code> — Дуэль на кубиках (реплаем)\n"
             "• <code>/box</code>, <code>/scratch</code>, <code>/mine</code> — Безопасные игры без проигрыша\n"
             "• <code>/dailyquest</code> — Ежедневный квест без риска\n"
-            "• <code>/coin [ставка] [орел/решка]</code> — Монетка x1.9\n"
+            "• <code>/coin [ставка] [орел/решка]</code> — Монетка x2\n"
             "• <code>/rps [ставка] [камень/ножницы/бумага]</code> — Дуэль с ботом\n"
             "• <code>/duel [ставка] [камень/ножницы/бумага]</code> — Дуэль с игроком (реплаем)\n"
             "• <code>/fish</code> — Рыбалка за печеньками\n"
@@ -1184,7 +1184,7 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
             await message.answer(
                 "🪙 <b>Монетка</b>\n\n"
                 "Использование: <code>/coin &lt;ставка&gt; &lt;орел/решка&gt;</code>\n"
-                "Победа дает x1.9. Простая риск-игра, не фармилка.",
+                "Победа дает x2. Простая риск-игра, не фармилка.",
                 parse_mode="HTML",
             )
             return
@@ -1206,7 +1206,7 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
         result_side = player_side if random.random() < 0.48 else ("tails" if player_side == "heads" else "heads")
         result_text = "орел" if result_side == "heads" else "решка"
         if player_side == result_side:
-            win = int(bet * 1.9)
+            win = bet * 2
             new_balance = sender.reputation - bet + win
             db.update_user(sender.id, {"reputation": new_balance})
             await message.answer(
@@ -1232,7 +1232,7 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
             await message.answer(
                 "🎲 <b>Кубики</b>\n\n"
                 "Использование: <code>/dice &lt;ставка&gt; &lt;чет/нечет/дубль/2-12&gt;</code>\n"
-                "• чет/нечет — выплата x1.9\n"
+                "• чет/нечет — выплата x2\n"
                 "• дубль — выплата x5.5\n"
                 "• точная сумма 2-12 — выплата от x5.5 до x32\n"
                 "• после победы можно рискнуть и удвоить куш",
@@ -1322,10 +1322,10 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
 
         if mode == "even":
             won = is_even
-            multiplier = 1.9
+            multiplier = 2.0
         elif mode == "odd":
             won = not is_even
-            multiplier = 1.9
+            multiplier = 2.0
         elif mode == "double":
             won = is_double
             multiplier = 5.5
@@ -1527,7 +1527,7 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
             await message.answer(
                 "✊ <b>Камень-ножницы-бумага</b>\n\n"
                 "Использование: <code>/rps &lt;ставка&gt; &lt;камень/ножницы/бумага&gt;</code>\n"
-                "Победа дает x1.9, ничья возвращает ставку.",
+                "Победа дает x2, ничья возвращает ставку.",
                 parse_mode="HTML",
             )
             return
@@ -1560,7 +1560,7 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
                 parse_mode="HTML",
             )
         elif beats[player] == bot_choice:
-            win = int(bet * 1.9)
+            win = bet * 2
             new_balance = sender.reputation - bet + win
             db.update_user(sender.id, {"reputation": new_balance})
             await message.answer(
@@ -2508,12 +2508,27 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
         sender = db.get_or_create_user(message.chat.id, get_sender_data(message))
         if await _deny_if_jailed(message, sender, "/mine"):
             return
-        allowed, remaining = db.can_user_use_command(message.chat.id, sender.user_id, "mine", 90 * 60)
-        if not allowed:
-            await message.answer(f"⛏ Шахта проветривается. Возвращайся через {remaining // 60 + 1} мин.")
+
+        raw_mode = (command.args or "").strip().lower().replace("ё", "е")
+        if not raw_mode:
+            await message.answer(
+                "⛏ <b>Шахта печенек</b>\n\n"
+                "Выбери глубину. Проигрыша нет, отличается только разброс награды:\n"
+                "• <b>safe</b> — стабильно <b>12-24</b> 🍪 и <b>6-10</b> XP\n"
+                "• <b>normal</b> — средний риск разброса <b>8-60</b> 🍪 и <b>8-16</b> XP\n"
+                "• <b>deep</b> — может быть мало, может жирно: <b>4-110</b> 🍪 и <b>12-24</b> XP\n\n"
+                "Можно писать сразу: <code>/mine deep</code>",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [
+                        InlineKeyboardButton(text="🟢 Safe", callback_data=f"mine_safe_{sender.user_id}"),
+                        InlineKeyboardButton(text="🟡 Normal", callback_data=f"mine_normal_{sender.user_id}"),
+                        InlineKeyboardButton(text="🔴 Deep", callback_data=f"mine_deep_{sender.user_id}"),
+                    ]
+                ]),
+                parse_mode="HTML",
+            )
             return
 
-        raw_mode = (command.args or "normal").strip().lower().replace("ё", "е")
         aliases = {
             "safe": "safe",
             "легко": "safe",
@@ -2525,7 +2540,23 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
             "глубоко": "deep",
             "глубже": "deep",
         }
-        mode = aliases.get(raw_mode, "normal")
+        mode = aliases.get(raw_mode)
+        if not mode:
+            await message.answer("⛏ Выбери режим: <code>/mine safe</code>, <code>/mine normal</code> или <code>/mine deep</code>", parse_mode="HTML")
+            return
+
+        await _run_mine(message, sender, mode)
+
+    async def _run_mine(message: Message, sender, mode: str, *, edit: bool = False) -> None:
+        allowed, remaining = db.can_user_use_command(message.chat.id, sender.user_id, "mine", 90 * 60)
+        if not allowed:
+            text = f"⛏ Шахта проветривается. Возвращайся через {remaining // 60 + 1} мин."
+            if edit:
+                await message.edit_text(text)
+            else:
+                await message.answer(text)
+            return
+
         if mode == "safe":
             reward = random.randint(12, 24)
             xp = random.randint(6, 10)
@@ -2549,14 +2580,43 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
 
         updated = db.add_reputation(sender, reward) or sender
         db.add_xp(updated, xp)
-        await message.answer(
+        result = (
             f"⛏ <b>{title}</b>\n\n"
             f"{text}\n"
             f"Режимы: <code>safe</code>, <code>normal</code>, <code>deep</code>\n"
             f"Награда: <b>{reward}</b> 🍪 и <b>{xp}</b> XP\n"
-            f"Баланс: <b>{updated.reputation}</b> 🍪",
-            parse_mode="HTML",
+            f"Баланс: <b>{updated.reputation}</b> 🍪"
         )
+        if edit:
+            await message.edit_text(result, parse_mode="HTML")
+        else:
+            await message.answer(result, parse_mode="HTML")
+
+    @router.callback_query(F.data.startswith("mine_"))
+    async def mine_callback(query: CallbackQuery) -> None:
+        parts = (query.data or "").split("_", 2)
+        if len(parts) != 3 or parts[1] not in {"safe", "normal", "deep"}:
+            await query.answer("Кнопка устарела.", show_alert=True)
+            return
+        mode = parts[1]
+        try:
+            user_id = int(parts[2])
+        except ValueError:
+            await query.answer("Кнопка устарела.", show_alert=True)
+            return
+        if query.from_user.id != user_id:
+            await query.answer("Это не твоя шахта.", show_alert=True)
+            return
+
+        sender = db.get_user_by_platform_id(query.message.chat.id, user_id)
+        if not sender:
+            await query.answer("Не вижу тебя в базе.", show_alert=True)
+            return
+        if _jail_remaining(sender):
+            await query.answer("Из тюрьмы в шахту не ходят.", show_alert=True)
+            return
+        await _run_mine(query.message, sender, mode, edit=True)
+        await query.answer()
 
     @router.message(Command("dailyquest", "квест", "дейлик"))
     async def dailyquest_command(message: Message) -> None:
@@ -2803,13 +2863,13 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
         r1, r2, r3 = random.choice(symbols), random.choice(symbols), random.choice(symbols)
         symbol_rules = {
             # pair — множитель возврата (>1.0 = прибыль, <1.0 = частичный возврат)
-            "🍒": {"name": "Вишневый ряд",        "triple": 5.0,  "pair": 1.10},
-            "🍋": {"name": "Лимонная линия",       "triple": 4.5,  "pair": 1.05},
-            "🍇": {"name": "Виноградный сбор",     "triple": 6.0,  "pair": 1.15},
-            "🍉": {"name": "Арбузный куш",         "triple": 7.0,  "pair": 1.25},
-            "🔔": {"name": "Колокольный звон",     "triple": 10.0, "pair": 1.50},
-            "💎": {"name": "Бриллиантовая линия",  "triple": 16.0, "pair": 1.80},
-            "🎰": {"name": "Легендарный слот",     "triple": 35.0, "pair": 2.20},
+            "🍒": {"name": "Вишневый ряд",        "triple": 4.5,  "pair": 1.10},
+            "🍋": {"name": "Лимонная линия",       "triple": 4.5,  "pair": 1.10},
+            "🍇": {"name": "Виноградный сбор",     "triple": 6.0,  "pair": 1.20},
+            "🍉": {"name": "Арбузный куш",         "triple": 7.5,  "pair": 1.30},
+            "🔔": {"name": "Колокольный звон",     "triple": 11.0, "pair": 1.70},
+            "💎": {"name": "Бриллиантовая линия",  "triple": 17.0, "pair": 2.10},
+            "🎰": {"name": "Легендарный слот",     "triple": 32.0, "pair": 2.50},
         }
         fruit_symbols = {"🍒", "🍋", "🍇", "🍉"}
         premium_symbols = {"🔔", "💎", "🎰"}
@@ -2942,8 +3002,8 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
         
         # Удвоение: при победе получаешь +win_amount сверху (итого x2 выигрыш),
         # при проигрыше теряешь win_amount (уже зачисленный при спине).
-        # Шанс 45% делает EV = 0.45*2 + 0.55*0 = 0.90 от win — небольшой минус, честно.
-        if random.random() < 0.45:
+        # Шанс 50% делает риск честным: EV = 0.50*2 + 0.50*0 = 1.00 от выигрыша.
+        if random.random() < 0.50:
             bonus = win_amount  # дополнительный выигрыш сверху уже имеющегося
             new_balance = sender.reputation + bonus
             db.update_user(sender.id, {"reputation": new_balance})
