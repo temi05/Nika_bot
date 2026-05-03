@@ -2927,20 +2927,20 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
             result_text = f"🥂 <b>ПАРА: {pair_symbol}{pair_symbol}</b> {symbol_rules[pair_symbol]['name']} x{multiplier:g}"
         elif set(reels).issubset(fruit_symbols):
             # Три разных фрукта — маленький утешительный возврат
-            win_total = max(1, int(bet * 0.70))
-            result_text = "🍹 <b>ФРУКТОВЫЙ МИКС!</b> Три разных фрукта — возврат x0.70"
+            win_total = max(1, int(bet * 0.90))
+            result_text = "🍹 <b>ФРУКТОВЫЙ МИКС!</b> Три разных фрукта — возврат x0.90"
         elif set(reels).issubset(premium_symbols):
             # Три разных дорогих — хорошая комбинация
             win_total = int(bet * 1.50)
             result_text = "⚡ <b>ПРЕМИУМ-ЛИНИЯ!</b> Три разных дорогих символа x1.50"
         elif sum(1 for symbol in reels if symbol in premium_symbols) >= 2:
             # Два дорогих + один дешевый — частичный возврат
-            win_total = max(1, int(bet * 0.60))
-            result_text = "💠 <b>ПОЧТИ ПРЕМИУМ!</b> Два дорогих символа — возврат x0.60"
+            win_total = max(1, int(bet * 0.90))
+            result_text = "💠 <b>ПОЧТИ ПРЕМИУМ!</b> Два дорогих символа — возврат x0.90"
         elif sum(1 for symbol in reels if symbol in fruit_symbols) >= 2:
             # Два фруктовых + один дорогой — крошки
-            win_total = max(1, int(bet * 0.35))
-            result_text = "🍬 <b>СЛАДКИЙ МИКС!</b> Два фруктовых — крошки x0.35"
+            win_total = max(1, int(bet * 0.85))
+            result_text = "🍬 <b>СЛАДКИЙ МИКС!</b> Два фруктовых — крошки x0.85"
         else:
             win_total = 0
             consol_xp = random.randint(2, 5)
