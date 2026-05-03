@@ -1165,6 +1165,15 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
 
     _casino_double_sessions = {}
 
+    def _risk_keyboard(user_id: int, win_amount: int) -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(text="🛡 +25%", callback_data=f"dice_double_safe_{user_id}_{win_amount}"),
+                InlineKeyboardButton(text="🃏 x2", callback_data=f"dice_double_double_{user_id}_{win_amount}"),
+                InlineKeyboardButton(text="🔥 x3", callback_data=f"dice_double_triple_{user_id}_{win_amount}"),
+            ]
+        ])
+
     @router.message(Command("coin", "flip", "монетка"))
     async def coin_command(message: Message, command: CommandObject) -> None:
         bet, choice = _parse_bet_and_choice(command.args)
@@ -1345,9 +1354,7 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
                 f"✅ Ставка на <b>{labels[mode]}</b> сыграла: x{multiplier:g}\n"
                 f"Выигрыш: <b>{win}</b> 🍪\n"
                 f"Баланс: <b>{new_balance}</b> 🍪",
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text="🃏 Рискнуть: Удвоить", callback_data=f"dice_double_{sender.user_id}_{win}")]
-                ]),
+                reply_markup=_risk_keyboard(sender.user_id, win),
                 parse_mode="HTML",
             )
             _casino_double_sessions[f"{message.chat.id}_{sent.message_id}"] = {
@@ -2957,9 +2964,7 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
         
         keyboard = None
         if win_total > 0 and not is_jackpot:
-            keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🃏 Рискнуть: Удвоить", callback_data=f"dice_double_{sender.user_id}_{win_total}")]
-            ])
+            keyboard = _risk_keyboard(sender.user_id, win_total)
 
         await msg.edit_text(final_msg, reply_markup=keyboard, parse_mode="HTML")
         if win_total > 0 and not is_jackpot:
@@ -2972,10 +2977,25 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
     async def casino_double_callback(query: CallbackQuery) -> None:
         try:
             parts = query.data.split("_")
-            user_id = int(parts[2])
-            win_amount = int(parts[3])
+            if len(parts) == 4:
+                risk_mode = "double"
+                user_id = int(parts[2])
+                win_amount = int(parts[3])
+            else:
+                risk_mode = parts[2]
+                user_id = int(parts[3])
+                win_amount = int(parts[4])
         except (IndexError, TypeError, ValueError):
             await query.answer("❌ Некорректная кнопка.", show_alert=True)
+            return
+        risk_rules = {
+            "safe": {"chance": 0.90, "bonus": 0.25, "loss": 0.25, "title": "ОСТОРОЖНЫЙ РИСК", "win_label": "+25%"},
+            "double": {"chance": 0.50, "bonus": 1.00, "loss": 1.00, "title": "УДВОЕНИЕ", "win_label": "x2"},
+            "triple": {"chance": 0.30, "bonus": 2.00, "loss": 1.00, "title": "ВА-БАНК", "win_label": "x3"},
+        }
+        risk = risk_rules.get(risk_mode)
+        if not risk:
+            await query.answer("❌ Такой риск уже не поддерживается.", show_alert=True)
             return
         
         if query.from_user.id != user_id:
@@ -2994,35 +3014,34 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
         sender = db.get_user_by_platform_id(query.message.chat.id, user_id)
         if not sender: return
 
-        if sender.reputation < win_amount:
+        loss_amount = max(1, int(win_amount * risk["loss"]))
+        if sender.reputation < loss_amount:
             await query.answer("❌ На балансе уже не хватает этого выигрыша.", show_alert=True)
             return
 
         _casino_double_sessions.pop(lock_key, None)
         
-        # Удвоение: при победе получаешь +win_amount сверху (итого x2 выигрыш),
-        # при проигрыше теряешь win_amount (уже зачисленный при спине).
-        # Шанс 50% делает риск честным: EV = 0.50*2 + 0.50*0 = 1.00 от выигрыша.
-        if random.random() < 0.50:
-            bonus = win_amount  # дополнительный выигрыш сверху уже имеющегося
+        if random.random() < risk["chance"]:
+            bonus = max(1, int(win_amount * risk["bonus"]))
             new_balance = sender.reputation + bonus
             db.update_user(sender.id, {"reputation": new_balance})
             await query.message.edit_text(
-                f"🃏 <b>РИСК ОПРАВДАН!</b>\n\n"
+                f"🃏 <b>{risk['title']} СРАБОТАЛ!</b>\n\n"
                 f"👤 Игрок: <b>{escape_html(sender.display_name)}</b>\n"
-                f"🔥 Ты удвоил куш: +<b>{bonus}</b> 🍪 бонуса!\n"
+                f"🔥 Режим: <b>{risk['win_label']}</b>\n"
+                f"💰 Бонус: +<b>{bonus}</b> 🍪\n"
                 f"📈 Баланс: <b>{new_balance}</b> 🍪",
                 parse_mode="HTML"
             )
-            await query.answer("💰 Удвоено!")
+            await query.answer(f"💰 {risk['win_label']}!")
         else:
-            # Проигрыш — теряешь весь win_amount (он уже был зачислен на баланс)
-            new_balance = sender.reputation - win_amount
+            new_balance = sender.reputation - loss_amount
             db.update_user(sender.id, {"reputation": max(0, new_balance)})
             await query.message.edit_text(
                 f"🃏 <b>РИСК НЕ ОПРАВДАН...</b>\n\n"
                 f"👤 Игрок: <b>{escape_html(sender.display_name)}</b>\n"
-                f"💀 Потерял выигрыш: <b>{win_amount}</b> 🍪\n"
+                f"🔥 Режим: <b>{risk['win_label']}</b>\n"
+                f"💀 Потеряно: <b>{loss_amount}</b> 🍪\n"
                 f"📉 Баланс: <b>{max(0, new_balance)}</b> 🍪",
                 parse_mode="HTML"
             )
