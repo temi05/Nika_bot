@@ -43,6 +43,69 @@ def normalize_search_text(value: str | None) -> str:
     return re.sub(r"\s+", " ", cleaned).strip()
 
 
+# Таблица транслитерации для нечёткого поиска (lat → cyr и cyr → lat)
+_LAT_TO_CYR: dict[str, str] = {
+    "a": "а", "b": "б", "v": "в", "g": "г", "d": "д", "e": "е",
+    "yo": "ё", "zh": "ж", "z": "з", "i": "и", "j": "й", "k": "к",
+    "l": "л", "m": "м", "n": "н", "o": "о", "p": "п", "r": "р",
+    "s": "с", "t": "т", "u": "у", "f": "ф", "h": "х", "ts": "ц",
+    "ch": "ч", "sh": "ш", "sch": "щ", "y": "ы", "yu": "ю", "ya": "я",
+    "x": "кс", "q": "к", "w": "в",
+}
+
+_CYR_TO_LAT: dict[str, str] = {
+    "а": "a", "б": "b", "в": "v", "г": "g", "д": "d", "е": "e",
+    "ё": "yo", "ж": "zh", "з": "z", "и": "i", "й": "j", "к": "k",
+    "л": "l", "м": "m", "н": "n", "о": "o", "п": "p", "р": "r",
+    "с": "s", "т": "t", "у": "u", "ф": "f", "х": "h", "ц": "ts",
+    "ч": "ch", "ш": "sh", "щ": "sch", "ъ": "", "ы": "y", "ь": "",
+    "э": "e", "ю": "yu", "я": "ya",
+}
+
+
+def transliterate_for_search(value: str | None) -> str:
+    """Транслитерирует строку lat→cyr или оставляет как есть. Возвращает нижний регистр."""
+    if not value:
+        return ""
+    text = value.strip().lower()
+
+    # Если уже кириллица — пробуем cyr→lat транслит для хранения обоих вариантов
+    has_cyr = bool(re.search(r"[а-яёА-ЯЁ]", text))
+    has_lat = bool(re.search(r"[a-z]", text))
+
+    if has_cyr and not has_lat:
+        # Кириллический текст → латинский вариант
+        result = ""
+        i = 0
+        while i < len(text):
+            ch = text[i]
+            result += _CYR_TO_LAT.get(ch, ch)
+            i += 1
+        return result.strip()
+
+    if has_lat and not has_cyr:
+        # Латинский текст → кириллический вариант
+        result = ""
+        i = 0
+        while i < len(text):
+            # Пробуем двухсимвольные комбинации сначала
+            two = text[i:i+2]
+            three = text[i:i+3]
+            if three in _LAT_TO_CYR:
+                result += _LAT_TO_CYR[three]
+                i += 3
+            elif two in _LAT_TO_CYR:
+                result += _LAT_TO_CYR[two]
+                i += 2
+            else:
+                ch = text[i]
+                result += _LAT_TO_CYR.get(ch, ch)
+                i += 1
+        return result.strip()
+
+    return text
+
+
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 

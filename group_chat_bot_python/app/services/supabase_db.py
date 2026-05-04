@@ -10,7 +10,7 @@ from supabase import Client, create_client
 
 from app.config import Settings
 from app.models import ChatSettings, ChatUser, MemoryRecord, Reminder, Sender, VerificationChallenge
-from app.utils import birthday_is_today, normalize_search_text
+from app.utils import birthday_is_today, normalize_search_text, transliterate_for_search
 
 
 def _safe_int(value: Any) -> int | None:
@@ -537,41 +537,102 @@ class SupabaseDB:
         return updated
 
     def search_user(self, chat_id: int, query: str) -> ChatUser | None:
-        normalized = normalize_search_text(query).replace("@", "")
+        if not query:
+            return None
+
+        stripped = query.strip()
+
+        # Поиск по числовому user_id
+        if re.fullmatch(r"-?\d+", stripped):
+            target_id = int(stripped)
+            return self.get_user_by_platform_id(chat_id, target_id)
+
+        normalized = normalize_search_text(stripped).replace("@", "")
+        if not normalized:
+            return None
+
+        # Транслитерированный вариант запроса (cyr→lat или lat→cyr)
+        translit = transliterate_for_search(stripped)
+        translit_norm = normalize_search_text(translit).replace("@", "") if translit != normalized else ""
+
         response = self._safe_execute(
-            self._users().select("*").eq("chat_id", chat_id).limit(100),
+            self._users().select("*").eq("chat_id", chat_id).limit(200),
             fallback=None,
             context=f"search_user chat_id={chat_id}",
         )
         if not response:
             return None
         candidates = response.data or []
-        if not normalized:
-            return None
+
+        def _all_fields(row: dict[str, Any]) -> list[str]:
+            """Возвращает все поля для поиска, включая транслит-варианты."""
+            fields = []
+            first_name = normalize_search_text(row.get("first_name"))
+            username = normalize_search_text(row.get("username"))
+            bio = normalize_search_text(row.get("bio"))
+            notes = normalize_search_text(row.get("ai_notes"))
+
+            for f in (first_name, username, bio, notes):
+                if f:
+                    fields.append(f)
+                    # Добавляем транслит-вариант каждого поля
+                    tr = normalize_search_text(transliterate_for_search(f))
+                    if tr and tr != f:
+                        fields.append(tr)
+            return fields
 
         def score(row: dict[str, Any]) -> int:
-            fields = [
-                normalize_search_text(row.get("first_name")),
-                normalize_search_text(row.get("username")),
-                normalize_search_text(row.get("bio")),
-                normalize_search_text(row.get("ai_notes")),
-            ]
+            fields = _all_fields(row)
+            queries = [q for q in [normalized, translit_norm] if q]
             best = 0
-            for field in fields:
-                if not field:
-                    continue
-                if field == normalized:
-                    best = max(best, 140)
-                elif field.startswith(normalized):
-                    best = max(best, 120)
-                elif normalized in field:
-                    best = max(best, 100)
+            for q in queries:
+                for field in fields:
+                    if not field:
+                        continue
+                    if field == q:
+                        best = max(best, 140)
+                    elif field.startswith(q):
+                        best = max(best, 120)
+                    elif q in field:
+                        best = max(best, 100)
+                    elif any(q == tok for tok in field.split()):
+                        best = max(best, 110)
+            return best
+
+        def fuzzy_score(row: dict[str, Any]) -> float:
+            from difflib import SequenceMatcher
+            fields = _all_fields(row)
+            queries = [q for q in [normalized, translit_norm] if q]
+            best = 0.0
+            for q in queries:
+                for field in fields:
+                    if not field or len(field) < 2:
+                        continue
+                    ratio = SequenceMatcher(None, q, field).ratio()
+                    best = max(best, ratio)
+                    if len(q) >= 3 and len(field) > len(q):
+                        for start in range(0, len(field) - len(q) + 1):
+                            sub = field[start:start + len(q)]
+                            r = SequenceMatcher(None, q, sub).ratio()
+                            best = max(best, r)
             return best
 
         ranked = sorted(((score(row), row) for row in candidates), key=lambda item: item[0], reverse=True)
-        if not ranked or ranked[0][0] < 100:
-            return None
-        return self.reset_expired_warns(self._user_from_row(ranked[0][1]))
+
+        if ranked and ranked[0][0] >= 100:
+            return self.reset_expired_warns(self._user_from_row(ranked[0][1]))
+
+        # Fuzzy fallback: порог 0.72
+        if len(normalized) >= 3:
+            fuzzy_ranked = sorted(
+                ((fuzzy_score(row), row) for row in candidates),
+                key=lambda item: item[0],
+                reverse=True,
+            )
+            if fuzzy_ranked and fuzzy_ranked[0][0] >= 0.72:
+                return self.reset_expired_warns(self._user_from_row(fuzzy_ranked[0][1]))
+
+        return None
 
     def get_birthdays_today(self, chat_id: int) -> list[ChatUser]:
         return [user for user in self.get_all_users(chat_id) if birthday_is_today(user.birthday)]
@@ -1068,6 +1129,15 @@ class SupabaseDB:
             return []
 
         self._rich_message_logs_supported = True
+        # Первый проход: собираем имена по message_id для раскрытия reply_to
+        id_to_name: dict[int, str] = {}
+        for row in response.data:
+            mid = int(row.get("message_id") or 0)
+            sname = str(row.get("sender_name") or "").strip()
+            uid = int(row.get("user_id") or 0)
+            if mid and sname:
+                id_to_name[mid] = f"{sname} (user_id={uid})"
+
         lines: list[str] = []
         for row in reversed(response.data):
             message_id = int(row.get("message_id") or 0)
@@ -1086,12 +1156,23 @@ class SupabaseDB:
             user_id = int(row.get("user_id") or 0)
             message_type = str(row.get("message_type") or "text").strip()
             reply_id = row.get("reply_to_message_id")
-            reply_note = f" reply_to={reply_id}" if reply_id else ""
-            type_note = "" if message_type == "text" else f" type={message_type}"
-            lines.append(f"{sender_name} (user_id={user_id}, message_id={message_id}{type_note}{reply_note}): {raw_text[:900]}")
+
+            # Раскрываем reply_to в читаемое имя автора
+            if reply_id:
+                reply_author = id_to_name.get(int(reply_id))
+                if reply_author:
+                    reply_note = f" ↩ ответ_на=[{reply_author}]"
+                else:
+                    reply_note = f" ↩ ответ_на=[msg_id={reply_id}]"
+            else:
+                reply_note = ""
+
+            type_note = "" if message_type in ("text", "bot_reply") else f" [{message_type}]"
+            lines.append(f"{sender_name} (user_id={user_id}, msg={message_id}{type_note}){reply_note}: {raw_text[:900]}")
             if len(lines) >= safe_limit:
                 break
         return lines
+
 
     def store_memory(self, chat_id: int, memory: MemoryRecord) -> None:
         meta = memory.meta or {}
