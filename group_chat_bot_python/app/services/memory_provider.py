@@ -72,7 +72,7 @@ class BaseMemoryProvider:
     async def save_transcript(self, chat_id: int, transcript: str, participants: list[str]) -> None:
         raise NotImplementedError
 
-    async def get_relevant_facts(self, chat_id: int, user_message: str, user_name: str) -> str:
+    async def get_relevant_facts(self, chat_id: int, user_message: str, user_name: str, user_id: int | None = None) -> str:
         raise NotImplementedError
 
     async def health(self) -> dict:
@@ -133,16 +133,22 @@ class DatabaseMemoryProvider(BaseMemoryProvider):
             if self.db.memory_exists(chat_id, fact):
                 continue
 
+            entity_user_id, entity_name = self._resolve_memory_entity(chat_id, fact, item.get("entities") or [], participants)
+
             self.db.store_memory(
                 chat_id,
                 MemoryRecord(
                     fact=fact,
                     source=str(item.get("source") or "memory_fact")[:40],
                     confidence=confidence,
+                    entity_user_id=entity_user_id,
+                    entity_name=entity_name,
                     meta={
                         "participants": participants,
                         "entities": item.get("entities") or [],
                         "tags": item.get("tags") or [],
+                        "entity_user_id": entity_user_id,
+                        "entity_name": entity_name,
                     },
                 ),
             )
@@ -153,10 +159,14 @@ class DatabaseMemoryProvider(BaseMemoryProvider):
         else:
             self._log("stored", chat_id=chat_id, count=stored, participants=participants)
 
-    async def get_relevant_facts(self, chat_id: int, user_message: str, user_name: str) -> str:
+    async def get_relevant_facts(self, chat_id: int, user_message: str, user_name: str, user_id: int | None = None) -> str:
         tokens = list(dict.fromkeys(re.findall(r"[\w@-]{4,}", user_message.lower())))[:6]
         profile_facts: list[str] = []
         topic_facts: list[str] = []
+
+        if user_id is not None:
+            profile_facts.extend(self.db.get_user_facts_by_id(chat_id, user_id, limit=6))
+            profile_facts.extend(self._profile_facts_by_user_id(chat_id, user_id))
 
         if user_name:
             profile_facts.extend(self.db.get_all_user_facts(chat_id, user_name, limit=4))
@@ -172,6 +182,63 @@ class DatabaseMemoryProvider(BaseMemoryProvider):
         )
         self._log("retrieve", chat_id=chat_id, tokens=tokens, has_context=bool(context))
         return context
+
+    def _profile_facts_by_user_id(self, chat_id: int, user_id: int) -> list[str]:
+        user = self.db.get_user_by_platform_id(chat_id, user_id)
+        if not user:
+            return []
+
+        facts: list[str] = []
+        name = user.display_name
+        if user.bio:
+            facts.append(f"{name} рассказал о себе: {user.bio}")
+        if user.ai_notes:
+            for raw_line in user.ai_notes.splitlines():
+                note = raw_line.strip(" -\t")
+                if note:
+                    facts.append(f"{name}: {note}")
+        if user.birthday:
+            facts.append(f"{name} день рождения: {user.birthday}")
+        if user.flavor:
+            facts.append(f"{name} стиль общения/вайб: {user.flavor}")
+        return facts[:8]
+
+    def _resolve_memory_entity(
+        self,
+        chat_id: int,
+        fact: str,
+        entities: list[Any],
+        participants: list[str],
+    ) -> tuple[int | None, str | None]:
+        participant_map = self._participant_user_map(participants)
+        candidates = [str(entity).strip() for entity in entities if str(entity).strip()]
+        if ":" in fact:
+            candidates.append(fact.split(":", 1)[0].strip())
+
+        for candidate in candidates:
+            normalized = candidate.casefold().lstrip("@")
+            if normalized in participant_map:
+                user_id, name = participant_map[normalized]
+                return user_id, name
+
+            user = self.db.search_user(chat_id, candidate)
+            if user:
+                return user.user_id, user.display_name
+
+        return None, None
+
+    def _participant_user_map(self, participants: list[str]) -> dict[str, tuple[int, str]]:
+        result: dict[str, tuple[int, str]] = {}
+        for participant in participants:
+            match = re.match(r"(.+?)\s+\(user_id=(-?\d+)\)$", participant.strip())
+            if not match:
+                continue
+            name = match.group(1).strip()
+            user_id = int(match.group(2))
+            if user_id <= 0:
+                continue
+            result[name.casefold().lstrip("@")] = (user_id, name)
+        return result
 
     async def _extract_memories(self, transcript: str, participants: list[str]) -> dict[str, Any]:
         if not self.client:
@@ -209,17 +276,18 @@ class DatabaseMemoryProvider(BaseMemoryProvider):
             if not line or ": " not in line:
                 continue
             speaker, message = line.split(": ", 1)
+            speaker_name = re.sub(r"\s+\(user_id=.*?\)$", "", speaker).strip() or speaker
             message = re.sub(r"^\[media:[^\]]+\]\s*", "", message, flags=re.IGNORECASE).strip()
-            if not message or speaker.casefold() in bot_markers:
+            if not message or speaker_name.casefold() in bot_markers:
                 continue
             if not _looks_memory_worthy_message(message):
                 continue
             facts.append(
                 {
-                    "fact": f"{speaker}: {message[:180]}",
+                    "fact": f"{speaker_name}: {message[:180]}",
                     "source": "fallback_user_signal",
                     "confidence": 0.72,
-                    "entities": [speaker],
+                    "entities": [speaker_name],
                     "tags": ["fallback"],
                 }
             )

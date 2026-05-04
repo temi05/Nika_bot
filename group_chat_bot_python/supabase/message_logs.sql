@@ -3,11 +3,28 @@ create table if not exists public.message_logs (
     chat_id bigint not null,
     message_id bigint not null,
     user_id bigint not null,
+    sender_name text,
+    username text,
+    is_bot boolean not null default false,
+    text text,
+    message_type text not null default 'text',
+    reply_to_message_id bigint,
     created_at timestamptz not null default timezone('utc', now())
 );
+
+alter table public.message_logs
+    add column if not exists sender_name text,
+    add column if not exists username text,
+    add column if not exists is_bot boolean not null default false,
+    add column if not exists text text,
+    add column if not exists message_type text not null default 'text',
+    add column if not exists reply_to_message_id bigint;
 
 create unique index if not exists message_logs_chat_message_uidx
     on public.message_logs (chat_id, message_id);
 
 create index if not exists message_logs_lookup_idx
     on public.message_logs (chat_id, message_id);
+
+create index if not exists message_logs_recent_idx
+    on public.message_logs (chat_id, message_id desc);

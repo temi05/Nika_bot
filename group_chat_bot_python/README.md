@@ -49,12 +49,17 @@ MEMORY_CAPTURE_ALL_MESSAGES=false
 - `MEMORY_FACT_MIN_CONFIDENCE` — фильтрует мусорные факты
 - `MEMORY_RETRIEVAL_LIMIT` — сколько фактов тащить в prompt
 - `MEMORY_CAPTURE_ALL_MESSAGES=false` — память по ответам бота и по сообщениям, похожим на важные факты; `true` сохраняет намного больше
+- `AI_HISTORY_LINES=8` — бот видит больше недавнего чата, но текущая реплика выделяется отдельно, чтобы не путать автора и цитату
+- `AI_PERSISTENT_HISTORY_ENABLED=true` — подмешивает последние сообщения из Supabase после рестарта Render
+- `AI_PERSISTENT_HISTORY_LINES=12` — сколько сообщений брать из Supabase перед локальным буфером
 
 ## Cost Tuning
 
 ```env
 AI_MAX_TOKENS=220
-AI_HISTORY_LINES=4
+AI_HISTORY_LINES=8
+AI_PERSISTENT_HISTORY_ENABLED=true
+AI_PERSISTENT_HISTORY_LINES=12
 AI_COMPACT_PROMPT=true
 AI_GROUP_COOLDOWN_SECONDS=12
 AI_MIN_MESSAGE_LEN=4
@@ -97,5 +102,9 @@ OPENAI_API_KEY=...
 
 Необходимые таблицы создаются SQL-скриптами в папке `supabase/`:
 - `supabase/message_logs.sql`
+- `supabase/bot_knowledge.sql`
 - `supabase/bot_persona_state.sql`
 - `supabase/signs_and_ai_images.sql`
+
+После обновления для Render желательно повторно выполнить `supabase/message_logs.sql`: он добавляет поля `sender_name`, `text`, `message_type` и `reply_to_message_id` для восстановления истории после рестартов. Код останется рабочим и без этого SQL, но персистентная история включится только после обновления таблицы.
+Также выполните `supabase/bot_knowledge.sql`: он добавляет `entity_user_id`, `entity_name` и `source_message_id`, чтобы новые факты памяти привязывались к конкретному человеку, а не только к тексту имени.

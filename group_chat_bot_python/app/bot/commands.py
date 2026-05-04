@@ -309,7 +309,7 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
                 target = found
 
         notes = target.ai_notes or "Пока заметок нет."
-        facts = await ai.memory.get_relevant_facts(message.chat.id, target.display_name, target.display_name)
+        facts = await ai.memory.get_relevant_facts(message.chat.id, target.display_name, target.display_name, target.user_id)
         if facts:
             notes = f"{notes}\n\nПамять:\n{facts}"
         await message.answer(
@@ -332,6 +332,9 @@ def build_commands_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Route
                 source="manual_memory",
                 confidence=0.98,
                 meta={"user_id": sender.user_id, "user_name": sender.display_name},
+                entity_user_id=sender.user_id,
+                entity_name=sender.display_name,
+                source_message_id=message.message_id,
             ),
         )
         await message.answer("🧠 Запомнила. Лишнего вокруг этого сообщения в память не беру.")

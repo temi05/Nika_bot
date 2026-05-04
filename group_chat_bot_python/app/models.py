@@ -73,6 +73,9 @@ class MemoryRecord:
     source: str
     confidence: float = 0.7
     meta: dict[str, Any] | None = None
+    entity_user_id: int | None = None
+    entity_name: str | None = None
+    source_message_id: int | None = None
 
 
 @dataclass(slots=True)

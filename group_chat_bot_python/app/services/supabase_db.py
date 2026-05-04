@@ -13,6 +13,15 @@ from app.models import ChatSettings, ChatUser, MemoryRecord, Reminder, Sender, V
 from app.utils import birthday_is_today, normalize_search_text
 
 
+def _safe_int(value: Any) -> int | None:
+    try:
+        if value is None or value == "":
+            return None
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 class SupabaseDB:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
@@ -23,6 +32,8 @@ class SupabaseDB:
         self.active_chats: dict[int, float] = {}
         self.pending_verifications: dict[int, VerificationChallenge] = {}
         self.last_birthday_check: dict[int, str] = {}
+        self._rich_message_logs_supported: bool | None = None
+        self._knowledge_entities_supported: bool | None = None
 
     def _users(self):
         return self.client.table("users")
@@ -484,6 +495,8 @@ class SupabaseDB:
                 source="profile_bio",
                 confidence=0.95,
                 meta={"user_id": user.user_id},
+                entity_user_id=user.user_id,
+                entity_name=user.display_name,
             ),
         )
         return updated
@@ -502,6 +515,8 @@ class SupabaseDB:
                 source="ai_note",
                 confidence=0.85,
                 meta={"user_id": user.user_id},
+                entity_user_id=user.user_id,
+                entity_name=user.display_name,
             ),
         )
         return updated
@@ -515,6 +530,8 @@ class SupabaseDB:
                 source="profile_birthday",
                 confidence=0.98,
                 meta={"user_id": user.user_id},
+                entity_user_id=user.user_id,
+                entity_name=user.display_name,
             ),
         )
         return updated
@@ -959,6 +976,54 @@ class SupabaseDB:
             context=f"store_message_author chat_id={chat_id} message_id={message_id}",
         )
 
+    def store_message_context(
+        self,
+        chat_id: int,
+        message_id: int,
+        sender: Sender,
+        text: str,
+        *,
+        message_type: str = "text",
+        reply_to_message_id: int | None = None,
+    ) -> None:
+        authors = self.message_authors.setdefault(chat_id, {})
+        authors[message_id] = sender.user_id
+        if len(authors) > 1000:
+            for key in list(authors.keys())[:-1000]:
+                authors.pop(key, None)
+
+        base_payload = {
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "user_id": sender.user_id,
+        }
+
+        if self._rich_message_logs_supported is not False:
+            rich_payload = {
+                **base_payload,
+                "sender_name": sender.display_name,
+                "username": sender.username or "",
+                "is_bot": sender.is_bot,
+                "text": (text or "").strip()[:2000],
+                "message_type": (message_type or "text")[:40],
+                "reply_to_message_id": reply_to_message_id,
+            }
+            rich_result = self._safe_execute(
+                self._message_logs().upsert(rich_payload, on_conflict="chat_id,message_id"),
+                fallback=None,
+                context=f"store_message_context.rich chat_id={chat_id} message_id={message_id}",
+            )
+            if rich_result is not None:
+                self._rich_message_logs_supported = True
+                return
+            self._rich_message_logs_supported = False
+
+        self._safe_execute(
+            self._message_logs().upsert(base_payload, on_conflict="chat_id,message_id"),
+            fallback=None,
+            context=f"store_message_context.basic chat_id={chat_id} message_id={message_id}",
+        )
+
     def get_message_author(self, chat_id: int, message_id: int) -> int | None:
         cached = self.message_authors.get(chat_id, {}).get(message_id)
         if cached:
@@ -974,26 +1039,101 @@ class SupabaseDB:
             return user_id
         return None
 
+    def get_recent_message_context(
+        self,
+        chat_id: int,
+        *,
+        limit: int = 12,
+        exclude_message_id: int | None = None,
+    ) -> list[str]:
+        if self._rich_message_logs_supported is False:
+            return []
+
+        safe_limit = max(0, min(50, int(limit or 0)))
+        if safe_limit <= 0:
+            return []
+
+        response = self._safe_execute(
+            self._message_logs()
+            .select("message_id,user_id,sender_name,username,is_bot,text,message_type,reply_to_message_id,created_at")
+            .eq("chat_id", chat_id)
+            .order("message_id", desc=True)
+            .limit(safe_limit + 3),
+            fallback=None,
+            context=f"get_recent_message_context chat_id={chat_id}",
+        )
+        if not response or not response.data:
+            if self._rich_message_logs_supported is None:
+                self._rich_message_logs_supported = False
+            return []
+
+        self._rich_message_logs_supported = True
+        lines: list[str] = []
+        for row in reversed(response.data):
+            message_id = int(row.get("message_id") or 0)
+            if exclude_message_id is not None and message_id == exclude_message_id:
+                continue
+
+            raw_text = str(row.get("text") or "").strip()
+            if not raw_text:
+                continue
+
+            sender_name = str(row.get("sender_name") or "").strip()
+            if not sender_name:
+                username = str(row.get("username") or "").strip()
+                sender_name = f"@{username}" if username else f"user_id={row.get('user_id')}"
+
+            user_id = int(row.get("user_id") or 0)
+            message_type = str(row.get("message_type") or "text").strip()
+            reply_id = row.get("reply_to_message_id")
+            reply_note = f" reply_to={reply_id}" if reply_id else ""
+            type_note = "" if message_type == "text" else f" type={message_type}"
+            lines.append(f"{sender_name} (user_id={user_id}, message_id={message_id}{type_note}{reply_note}): {raw_text[:900]}")
+            if len(lines) >= safe_limit:
+                break
+        return lines
+
     def store_memory(self, chat_id: int, memory: MemoryRecord) -> None:
+        meta = memory.meta or {}
+        entity_user_id = memory.entity_user_id or _safe_int(meta.get("user_id") or meta.get("entity_user_id"))
+        entity_name = memory.entity_name or str(meta.get("user_name") or meta.get("entity_name") or "").strip() or None
+        source_message_id = memory.source_message_id or _safe_int(meta.get("source_message_id"))
+        base_payload = {
+            "chat_id": chat_id,
+            "fact": memory.fact,
+            "fact_type": memory.source,
+            "confidence": memory.confidence,
+            "status": "confirmed",
+            "meta": meta,
+            "last_seen_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+        if self._knowledge_entities_supported is not False:
+            rich_payload = {
+                **base_payload,
+                "entity_user_id": entity_user_id,
+                "entity_name": entity_name,
+                "source_message_id": source_message_id,
+            }
+            result = self._safe_execute(
+                self._knowledge().insert(rich_payload),
+                fallback=None,
+                context=f"store_memory.rich chat_id={chat_id}",
+            )
+            if result is not None:
+                self._knowledge_entities_supported = True
+                return
+            self._knowledge_entities_supported = False
+
         self._safe_execute(
-            self._knowledge().insert(
-                {
-                    "chat_id": chat_id,
-                    "fact": memory.fact,
-                    "fact_type": memory.source,
-                    "confidence": memory.confidence,
-                    "status": "confirmed",
-                    "meta": memory.meta or {},
-                    "last_seen_at": datetime.now(timezone.utc).isoformat(),
-                }
-            ),
+            self._knowledge().insert(base_payload),
             fallback=None,
             context=f"store_memory chat_id={chat_id}",
         )
 
     def memory_exists(self, chat_id: int, fact: str) -> bool:
         rows = self._safe_execute(
-            self._knowledge().select("id").eq("chat_id", chat_id).eq("fact", fact).limit(1),
+            self._knowledge().select("id").eq("chat_id", chat_id).eq("fact", fact).eq("status", "confirmed").limit(1),
             fallback=None,
             context=f"memory_exists chat_id={chat_id}",
         )
@@ -1006,6 +1146,7 @@ class SupabaseDB:
             self._knowledge()
             .select("fact,last_seen_at")
             .eq("chat_id", chat_id)
+            .eq("status", "confirmed")
             .ilike("fact", f"%{query}%")
             .order("last_seen_at", desc=True)
             .limit(limit),
@@ -1018,7 +1159,12 @@ class SupabaseDB:
 
     def get_recent_memories(self, chat_id: int, limit: int = 5) -> list[str]:
         rows = self._safe_execute(
-            self._knowledge().select("fact,last_seen_at").eq("chat_id", chat_id).order("last_seen_at", desc=True).limit(limit),
+            self._knowledge()
+            .select("fact,last_seen_at")
+            .eq("chat_id", chat_id)
+            .eq("status", "confirmed")
+            .order("last_seen_at", desc=True)
+            .limit(limit),
             fallback=None,
             context=f"get_recent_memories chat_id={chat_id}",
         )
@@ -1028,12 +1174,40 @@ class SupabaseDB:
 
     def get_all_user_facts(self, chat_id: int, user_name: str, limit: int = 10) -> list[str]:
         rows = self._safe_execute(
-            self._knowledge().select("fact").eq("chat_id", chat_id).ilike("fact", f"%{user_name}%").limit(limit),
+            self._knowledge()
+            .select("fact")
+            .eq("chat_id", chat_id)
+            .eq("status", "confirmed")
+            .ilike("fact", f"%{user_name}%")
+            .limit(limit),
             fallback=None,
             context=f"get_all_user_facts chat_id={chat_id}",
         )
         if not rows:
             return []
+        return [row["fact"] for row in rows.data or []]
+
+    def get_user_facts_by_id(self, chat_id: int, user_id: int, limit: int = 10) -> list[str]:
+        if self._knowledge_entities_supported is False or not user_id:
+            return []
+
+        rows = self._safe_execute(
+            self._knowledge()
+            .select("fact,last_seen_at")
+            .eq("chat_id", chat_id)
+            .eq("entity_user_id", user_id)
+            .eq("status", "confirmed")
+            .order("last_seen_at", desc=True)
+            .limit(limit),
+            fallback=None,
+            context=f"get_user_facts_by_id chat_id={chat_id} user_id={user_id}",
+        )
+        if not rows:
+            if self._knowledge_entities_supported is None:
+                self._knowledge_entities_supported = False
+            return []
+
+        self._knowledge_entities_supported = True
         return [row["fact"] for row in rows.data or []]
 
     def get_persona_state(self, chat_id: int, user_id: int) -> dict[str, Any] | None:

@@ -11,7 +11,7 @@ from aiogram.types import BufferedInputFile, ChatPermissions, Message
 from aiogram.utils.chat_action import ChatActionSender
 
 from app.config import Settings
-from app.models import VerificationChallenge
+from app.models import Sender, VerificationChallenge
 from app.services.ai_service import AIService
 from app.services.supabase_db import SupabaseDB
 from app.utils import birthday_age_text, build_captcha_image, escape_html, generate_captcha_code, get_sender_data
@@ -200,7 +200,14 @@ def build_messages_router(bot: Bot, settings: Settings, db: SupabaseDB, ai: AISe
             if reply_context:
                 ai_input_text = f"{reply_context}\n\n{ai_input_text}"
         text = raw_text.strip()
-        db.store_message_author(message.chat.id, message.message_id, sender.user_id)
+        db.store_message_context(
+            message.chat.id,
+            message.message_id,
+            sender,
+            _build_message_log_text(message, raw_text),
+            message_type=_message_log_type(message),
+            reply_to_message_id=message.reply_to_message.message_id if message.reply_to_message else None,
+        )
 
         if text.startswith("/"):
             return
@@ -302,7 +309,7 @@ def build_messages_router(bot: Bot, settings: Settings, db: SupabaseDB, ai: AISe
             should_reply = is_private_chat or is_reply_to_bot or is_mentioned
             
             print(f"🔍 [DEBUG] should_reply={should_reply}, is_private={is_private_chat}")
-            memory_signal = _looks_like_memory_signal(memory_input_text)
+            memory_signal = _looks_like_memory_signal(text)
             should_capture_memory = (
                 settings.memory_capture_all_messages
                 or should_reply
@@ -354,12 +361,18 @@ def build_messages_router(bot: Bot, settings: Settings, db: SupabaseDB, ai: AISe
 
             if reply:
                 print(f"✉️ [AI] Sending reply to chat {message.chat.id}...")
-                await _send_ai_reply(bot, message, reply)
+                bot_sender = Sender(
+                    user_id=bot_id or 0,
+                    first_name=settings.bot_name,
+                    username=bot_username,
+                    is_bot=True,
+                )
+                await _send_ai_reply(bot, message, reply, db=db, bot_sender=bot_sender)
 
     return router
 
 
-async def _send_ai_reply(bot: Bot, message: Message, reply: str) -> None:
+async def _send_ai_reply(bot: Bot, message: Message, reply: str, *, db: SupabaseDB, bot_sender: Sender) -> None:
     text = (reply or "").strip()
     if not text:
         return
@@ -368,9 +381,17 @@ async def _send_ai_reply(bot: Bot, message: Message, reply: str) -> None:
     for index, chunk in enumerate(chunks):
         try:
             if index == 0:
-                await message.reply(chunk)
+                sent = await message.reply(chunk)
             else:
-                await bot.send_message(message.chat.id, chunk)
+                sent = await bot.send_message(message.chat.id, chunk)
+            db.store_message_context(
+                message.chat.id,
+                sent.message_id,
+                bot_sender,
+                chunk,
+                message_type="bot_reply",
+                reply_to_message_id=message.message_id if index == 0 else None,
+            )
         except Exception as exc:
             print(
                 "[AI:telegram_send_error] "
@@ -378,7 +399,15 @@ async def _send_ai_reply(bot: Bot, message: Message, reply: str) -> None:
                 f"chunk={index + 1}/{len(chunks)} error={exc}"
             )
             try:
-                await bot.send_message(message.chat.id, chunk)
+                sent = await bot.send_message(message.chat.id, chunk)
+                db.store_message_context(
+                    message.chat.id,
+                    sent.message_id,
+                    bot_sender,
+                    chunk,
+                    message_type="bot_reply",
+                    reply_to_message_id=None,
+                )
             except Exception as fallback_exc:
                 print(
                     "[AI:telegram_send_fallback_error] "
@@ -493,25 +522,50 @@ def _should_grant_xp(message: Message, sender) -> bool:
     return has_meaningful_content
 
 
+def _message_log_type(message: Message) -> str:
+    return _describe_message_media(message).split(" ", 1)[0] or "text"
+
+
+def _build_message_log_text(message: Message, raw_text: str) -> str:
+    text = (raw_text or "").strip()
+    media = _describe_message_media(message)
+    if not media:
+        return text
+    if text:
+        return f"[{media}] {text}"
+    return f"[{media}]"
+
+
 def _build_ai_input_text(message: Message, raw_text: str) -> str:
     text = (raw_text or "").strip()
     media = _describe_message_media(message)
+    sender = get_sender_data(message)
+
+    base_lines = [
+        "<current_message>",
+        f"message_id: {message.message_id}",
+        f"author_name: {sender.display_name}",
+        f"author_user_id: {sender.user_id}",
+        f"author_username: @{sender.username}" if sender.username else "author_username:",
+        f"author_is_bot: {sender.is_bot}",
+    ]
 
     if media:
         lines = [
-            "<current_message>",
+            *base_lines,
             f"type: {media}",
-            "note: это медиа-сообщение, не обычный текст; учитывай тип медиа и подпись, если она есть.",
+            "note: это медиа-сообщение от author_name, не обычный текст; учитывай тип медиа и подпись, если она есть.",
         ]
         if text:
-            lines.append(f"caption: {text}")
+            lines.append("caption:")
+            lines.append(text)
         lines.append("</current_message>")
         return "\n".join(lines)
 
     if not text:
         return ""
 
-    return "\n".join(["<current_message>", "type: text", f"text: {text}", "</current_message>"])
+    return "\n".join([*base_lines, "type: text", "text:", text, "</current_message>"])
 
 
 def _build_reply_context(reply: Message | None) -> str:
@@ -524,16 +578,23 @@ def _build_reply_context(reply: Message | None) -> str:
 
     lines = [
         "<reply_context>",
-        f"author: {reply_sender.display_name}",
+        f"reply_message_id: {reply.message_id}",
+        f"author_name: {reply_sender.display_name}",
+        f"author_user_id: {reply_sender.user_id}",
+        f"author_username: @{reply_sender.username}" if reply_sender.username else "author_username:",
+        f"author_is_bot: {reply_sender.is_bot}",
+        "relation: текущий пользователь отвечает именно на это сообщение; это цитата, а не новая реплика автора цитаты.",
     ]
     if reply_media:
         lines.append(f"type: {reply_media}")
         lines.append("note: пользователь отвечает именно на это медиа-сообщение.")
         if reply_text:
-            lines.append(f"caption: {reply_text}")
+            lines.append("caption:")
+            lines.append(reply_text[:700])
     elif reply_text:
         lines.append("type: text")
-        lines.append(f"text: {reply_text[:700]}")
+        lines.append("text:")
+        lines.append(reply_text[:700])
     else:
         lines.append("type: unknown")
         lines.append("note: пользователь ответил на сообщение без доступного текста.")
