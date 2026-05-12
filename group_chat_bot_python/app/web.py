@@ -10,7 +10,8 @@ from aiogram.types import Update, BotCommand, BotCommandScopeDefault, InlineKeyb
 from fastapi import FastAPI, HTTPException, Request
 
 from app.bot.admin import build_admin_router
-from app.bot.routers.general_admin import AUTO_DROP_SESSIONS, AUTO_QUIZ_SESSIONS, build_general_admin_router, make_quiz_question
+from app.bot.routers.general_admin import build_general_admin_router, make_quiz_question
+from app.bot.routers import game_sessions
 from app.bot.messages import build_messages_router
 from app.bot.rp_commands import build_rp_router
 from app.bot.feedback import build_feedback_router
@@ -186,7 +187,7 @@ def create_app() -> FastAPI:
                 [InlineKeyboardButton(text=f"🍪 Забрать {reward}", callback_data=f"drop_claim_{reward}_{created_at}")]
             ]),
         )
-        AUTO_DROP_SESSIONS[f"{chat_id}_{msg.message_id}"] = {
+        game_sessions.AUTO_DROP_SESSIONS[f"{chat_id}_{msg.message_id}"] = {
             "reward": reward,
             "created_at": created_at,
         }
@@ -212,7 +213,7 @@ def create_app() -> FastAPI:
             parse_mode="HTML",
             reply_markup=keyboard,
         )
-        AUTO_QUIZ_SESSIONS[f"{chat_id}_{msg.message_id}"] = {
+        game_sessions.AUTO_QUIZ_SESSIONS[f"{chat_id}_{msg.message_id}"] = {
             **quiz,
             "created_at": created_at,
             "wrong_users": set(),

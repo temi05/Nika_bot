@@ -10,6 +10,7 @@ from io import BytesIO
 from aiogram import Router, F
 from aiogram.filters import Command, CommandObject
 from aiogram.types import BufferedInputFile, Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.exceptions import TelegramBadRequest
 
 from app.services.ai_service import AIService
 from app.services.supabase_db import SupabaseDB
@@ -24,8 +25,6 @@ from app.bot.routers.jail_helpers import (
     loan_limit,
     parse_iso_dt,
     pay_bail,
-    BAIL_SESSIONS,
-    LOAN_SESSIONS,
 )
 from app.models import MemoryRecord, Sender
 from app.utils import (
@@ -36,11 +35,8 @@ from app.utils import (
     parse_birthday_parts,
 )
 
-AUTO_DROP_SESSIONS: dict[str, dict] = {}
-AUTO_QUIZ_SESSIONS: dict[str, dict] = {}
-AUTO_CLAIMED_EVENTS: set[str] = set()
-DUEL_SESSIONS: dict[str, dict] = {}
-DICE_DUEL_SESSIONS: dict[str, dict] = {}
+from app.bot.routers import game_sessions
+
 NIKA_REFERENCE_ASSET_KEY = "nika_reference"
 
 
@@ -164,11 +160,18 @@ def build_general_admin_router(db: SupabaseDB, bot_name: str, ai: AIService) -> 
     async def help_callback(query: CallbackQuery) -> None:
         page = query.data.split("_")[1]
         if page in HELP_PAGES:
-            await query.message.edit_text(
-                HELP_PAGES[page],
-                reply_markup=get_help_keyboard(),
-                parse_mode="HTML"
-            )
+            try:
+                await query.message.edit_text(
+                    HELP_PAGES[page],
+                    reply_markup=get_help_keyboard(),
+                    parse_mode="HTML"
+                )
+            except TelegramBadRequest:
+                # Игнорируем ошибку, если сообщение не изменилось
+                pass
+            except Exception as e:
+                # Другие ошибки логируем или игнорируем
+                print(f"[help_callback:error] {e}")
         await query.answer()
 
     @router.callback_query(F.data.startswith("loan_"))
@@ -176,7 +179,7 @@ def build_general_admin_router(db: SupabaseDB, bot_name: str, ai: AIService) -> 
         parts = query.data.split("_")
         action = parts[1]
         session_key = f"{query.message.chat.id}_{query.message.message_id}"
-        session = LOAN_SESSIONS.get(session_key)
+        session = game_sessions.LOAN_SESSIONS.get(session_key)
         if not session:
             await query.answer("⏳ Это предложение уже неактивно.", show_alert=True)
             return
@@ -186,7 +189,7 @@ def build_general_admin_router(db: SupabaseDB, bot_name: str, ai: AIService) -> 
             if query.from_user.id != target_id:
                 await query.answer("Это не вам предложили!", show_alert=True)
                 return
-            LOAN_SESSIONS.pop(session_key, None)
+            game_sessions.LOAN_SESSIONS.pop(session_key, None)
             await query.message.edit_text("❌ Предложение отклонено.")
             return
 
@@ -221,7 +224,7 @@ def build_general_admin_router(db: SupabaseDB, bot_name: str, ai: AIService) -> 
             return
              
         # Выполняем сделку
-        LOAN_SESSIONS.pop(session_key, None)
+        game_sessions.LOAN_SESSIONS.pop(session_key, None)
         db.update_user(sender.id, {"reputation": sender.reputation - amount})
         db.update_user(target.id, {
             "reputation": target.reputation + amount,
@@ -243,7 +246,7 @@ def build_general_admin_router(db: SupabaseDB, bot_name: str, ai: AIService) -> 
         parts = query.data.split("_")
         action = parts[1]
         session_key = f"{query.message.chat.id}_{query.message.message_id}"
-        session = LOAN_SESSIONS.get(session_key)
+        session = game_sessions.LOAN_SESSIONS.get(session_key)
         if not session:
             await query.answer("⏳ Этот запрос уже неактивен.", show_alert=True)
             return
@@ -253,7 +256,7 @@ def build_general_admin_router(db: SupabaseDB, bot_name: str, ai: AIService) -> 
             if query.from_user.id != session.get("lender_id"):
                 await query.answer("Отказать должен тот, у кого просили.", show_alert=True)
                 return
-            LOAN_SESSIONS.pop(session_key, None)
+            game_sessions.LOAN_SESSIONS.pop(session_key, None)
             await query.message.edit_text("❌ В кредите отказано.")
             return
 
@@ -288,7 +291,7 @@ def build_general_admin_router(db: SupabaseDB, bot_name: str, ai: AIService) -> 
             return
              
         # Выполняем сделку
-        LOAN_SESSIONS.pop(session_key, None)
+        game_sessions.LOAN_SESSIONS.pop(session_key, None)
         db.update_user(lender.id, {"reputation": lender.reputation - amount})
         db.update_user(asker.id, {
             "reputation": asker.reputation + amount,
@@ -324,26 +327,26 @@ def build_general_admin_router(db: SupabaseDB, bot_name: str, ai: AIService) -> 
             return
 
         session_key = f"{query.message.chat.id}_{user_id}"
-        session = BAIL_SESSIONS.get(session_key)
+        session = game_sessions.BAIL_SESSIONS.get(session_key)
         if not session or time.time() - session["created_at"] > 300:
-            BAIL_SESSIONS.pop(session_key, None)
+            game_sessions.BAIL_SESSIONS.pop(session_key, None)
             await query.answer("Залог устарел. Напиши /bail еще раз.", show_alert=True)
             return
 
         if action == "cancel":
-            BAIL_SESSIONS.pop(session_key, None)
+            game_sessions.BAIL_SESSIONS.pop(session_key, None)
             await query.message.edit_text("❌ Залог отменен.")
             await query.answer()
             return
 
         user = db.get_user_by_platform_id(query.message.chat.id, user_id)
         if not user:
-            BAIL_SESSIONS.pop(session_key, None)
+            game_sessions.BAIL_SESSIONS.pop(session_key, None)
             await query.answer("Профиль не найден.", show_alert=True)
             return
         remaining = jail_remaining(db, user)
         if not remaining:
-            BAIL_SESSIONS.pop(session_key, None)
+            game_sessions.BAIL_SESSIONS.pop(session_key, None)
             await query.message.edit_text("✅ Ты уже на свободе.")
             await query.answer()
             return
@@ -353,7 +356,7 @@ def build_general_admin_router(db: SupabaseDB, bot_name: str, ai: AIService) -> 
             return
 
         result = pay_bail(db, user, cost)
-        BAIL_SESSIONS.pop(session_key, None)
+        game_sessions.BAIL_SESSIONS.pop(session_key, None)
         await query.message.edit_text(
             f"🔓 <b>Залог оплачен.</b>\n"
             f"Стоимость: <b>{cost} 🍪</b>\n"
@@ -396,8 +399,8 @@ def build_general_admin_router(db: SupabaseDB, bot_name: str, ai: AIService) -> 
         await message.delete()
         await message.answer(command.args)
 
-    _drop_sessions = AUTO_DROP_SESSIONS
-    _quiz_sessions = AUTO_QUIZ_SESSIONS
+    _drop_sessions = game_sessions.AUTO_DROP_SESSIONS
+    _quiz_sessions = game_sessions.AUTO_QUIZ_SESSIONS
 
     def _callback_sender(query: CallbackQuery) -> Sender:
         user = query.from_user
@@ -427,16 +430,16 @@ def build_general_admin_router(db: SupabaseDB, bot_name: str, ai: AIService) -> 
             await query.answer("Кубодуэль устарела.", show_alert=True)
             return
         key, action = parts[1], parts[2]
-        session = DICE_DUEL_SESSIONS.get(key)
+        session = game_sessions.DICE_DUEL_SESSIONS.get(key)
         if not session or time.time() - session["created_at"] > 15 * 60:
-            DICE_DUEL_SESSIONS.pop(key, None)
+            game_sessions.DICE_DUEL_SESSIONS.pop(key, None)
             await query.answer("Кубодуэль устарела.", show_alert=True)
             return
         if query.from_user.id != session["target_id"]:
             await query.answer("Эта кубодуэль не тебе.", show_alert=True)
             return
         if action == "decline":
-            DICE_DUEL_SESSIONS.pop(key, None)
+            game_sessions.DICE_DUEL_SESSIONS.pop(key, None)
             await query.message.edit_text("🎲 Кубодуэль отклонена.")
             await query.answer()
             return
@@ -447,22 +450,22 @@ def build_general_admin_router(db: SupabaseDB, bot_name: str, ai: AIService) -> 
         challenger = db.get_user_by_platform_id(session["chat_id"], session["challenger_id"])
         target = db.get_user_by_platform_id(session["chat_id"], session["target_id"])
         if not challenger or not target:
-            DICE_DUEL_SESSIONS.pop(key, None)
+            game_sessions.DICE_DUEL_SESSIONS.pop(key, None)
             await query.answer("Не вижу одного из игроков в базе.", show_alert=True)
             return
         if jail_remaining(db, challenger) or jail_remaining(db, target):
-            DICE_DUEL_SESSIONS.pop(key, None)
+            game_sessions.DICE_DUEL_SESSIONS.pop(key, None)
             await query.message.edit_text("🎲 Кубодуэль отменена: один из игроков сейчас в тюрьме.")
             await query.answer()
             return
         bet = int(session["bet"])
         if challenger.reputation < bet or target.reputation < bet:
-            DICE_DUEL_SESSIONS.pop(key, None)
+            game_sessions.DICE_DUEL_SESSIONS.pop(key, None)
             await query.message.edit_text("🎲 Кубодуэль отменена: у одного из игроков уже не хватает печенек.")
             await query.answer()
             return
 
-        DICE_DUEL_SESSIONS.pop(key, None)
+        game_sessions.DICE_DUEL_SESSIONS.pop(key, None)
         ch_dice = (random.randint(1, 6), random.randint(1, 6))
         tg_dice = (random.randint(1, 6), random.randint(1, 6))
         ch_total = sum(ch_dice)
@@ -501,16 +504,16 @@ def build_general_admin_router(db: SupabaseDB, bot_name: str, ai: AIService) -> 
             await query.answer("Дуэль устарела.", show_alert=True)
             return
         key, target_choice = parts[1], parts[2]
-        session = DUEL_SESSIONS.get(key)
+        session = game_sessions.DUEL_SESSIONS.get(key)
         if not session or time.time() - session["created_at"] > 15 * 60:
-            DUEL_SESSIONS.pop(key, None)
+            game_sessions.DUEL_SESSIONS.pop(key, None)
             await query.answer("Дуэль устарела.", show_alert=True)
             return
         if query.from_user.id != session["target_id"]:
             await query.answer("Эта дуэль не тебе.", show_alert=True)
             return
         if target_choice == "decline":
-            DUEL_SESSIONS.pop(key, None)
+            game_sessions.DUEL_SESSIONS.pop(key, None)
             await query.message.edit_text("⚔️ Дуэль отклонена.")
             await query.answer()
             return
@@ -518,17 +521,17 @@ def build_general_admin_router(db: SupabaseDB, bot_name: str, ai: AIService) -> 
         challenger = db.get_user_by_platform_id(session["chat_id"], session["challenger_id"])
         target = db.get_user_by_platform_id(session["chat_id"], session["target_id"])
         if not challenger or not target:
-            DUEL_SESSIONS.pop(key, None)
+            game_sessions.DUEL_SESSIONS.pop(key, None)
             await query.answer("Не вижу одного из игроков в базе.", show_alert=True)
             return
         if jail_remaining(db, challenger) or jail_remaining(db, target):
-            DUEL_SESSIONS.pop(key, None)
+            game_sessions.DUEL_SESSIONS.pop(key, None)
             await query.message.edit_text("⚔️ Дуэль отменена: один из игроков сейчас в тюрьме.")
             await query.answer()
             return
         bet = int(session["bet"])
         if challenger.reputation < bet or target.reputation < bet:
-            DUEL_SESSIONS.pop(key, None)
+            game_sessions.DUEL_SESSIONS.pop(key, None)
             await query.message.edit_text("⚔️ Дуэль отменена: у одного из игроков уже не хватает печенек.")
             await query.answer()
             return
@@ -536,7 +539,7 @@ def build_general_admin_router(db: SupabaseDB, bot_name: str, ai: AIService) -> 
         labels = {"rock": "камень", "scissors": "ножницы", "paper": "бумага"}
         beats = {"rock": "scissors", "scissors": "paper", "paper": "rock"}
         challenger_choice = session["choice"]
-        DUEL_SESSIONS.pop(key, None)
+        game_sessions.DUEL_SESSIONS.pop(key, None)
         if challenger_choice == target_choice:
             await query.message.edit_text(
                 f"🤝 <b>Ничья!</b>\n"
@@ -734,7 +737,7 @@ def build_general_admin_router(db: SupabaseDB, bot_name: str, ai: AIService) -> 
             return
         key = f"{query.message.chat.id}_{query.message.message_id}"
         event_key = f"drop_{key}"
-        if event_key in AUTO_CLAIMED_EVENTS:
+        if event_key in game_sessions.AUTO_CLAIMED_EVENTS:
             await query.answer("Печеньку уже забрали.", show_alert=True)
             return
         session = _drop_sessions.get(key)
@@ -758,7 +761,7 @@ def build_general_admin_router(db: SupabaseDB, bot_name: str, ai: AIService) -> 
         if jail_remaining(db, user):
             await query.answer("Из тюрьмы печеньки не ловятся.", show_alert=True)
             return
-        AUTO_CLAIMED_EVENTS.add(event_key)
+        game_sessions.AUTO_CLAIMED_EVENTS.add(event_key)
         _drop_sessions.pop(key, None)
         db.update_user(user.id, {"reputation": user.reputation + reward})
         await query.message.edit_text(
@@ -816,7 +819,7 @@ def build_general_admin_router(db: SupabaseDB, bot_name: str, ai: AIService) -> 
 
         key = f"{query.message.chat.id}_{query.message.message_id}"
         event_key = f"quiz_{key}"
-        if event_key in AUTO_CLAIMED_EVENTS:
+        if event_key in game_sessions.AUTO_CLAIMED_EVENTS:
             await query.answer("Приз уже забрали.", show_alert=True)
             return
         session = _quiz_sessions.get(key)
@@ -856,7 +859,7 @@ def build_general_admin_router(db: SupabaseDB, bot_name: str, ai: AIService) -> 
         if jail_remaining(db, user):
             await query.answer("Из тюрьмы в викторине не участвуют.", show_alert=True)
             return
-        AUTO_CLAIMED_EVENTS.add(event_key)
+        game_sessions.AUTO_CLAIMED_EVENTS.add(event_key)
         _quiz_sessions.pop(key, None)
         reward = int(session["reward"])
         updated_user = db.add_reputation(user, reward) or user
@@ -899,7 +902,7 @@ def build_general_admin_router(db: SupabaseDB, bot_name: str, ai: AIService) -> 
             return
 
         lock_key = f"{query.message.chat.id}_{query.message.message_id}"
-        session = CASINO_DOUBLE_SESSIONS.get(lock_key)
+        session = game_sessions.CASINO_DOUBLE_SESSIONS.get(lock_key)
         if not session:
             await query.answer("⏳ Этот риск уже недоступен.", show_alert=True)
             return
@@ -915,7 +918,7 @@ def build_general_admin_router(db: SupabaseDB, bot_name: str, ai: AIService) -> 
             await query.answer("❌ На балансе уже не хватает этого выигрыша.", show_alert=True)
             return
 
-        CASINO_DOUBLE_SESSIONS.pop(lock_key, None)
+        game_sessions.CASINO_DOUBLE_SESSIONS.pop(lock_key, None)
         
         if random.random() < risk["chance"]:
             bonus = max(1, int(win_amount * risk["bonus"]))
@@ -973,7 +976,7 @@ def build_general_admin_router(db: SupabaseDB, bot_name: str, ai: AIService) -> 
             
         now = time.time()
         lock_key = f"{query.message.chat.id}_{query.message.message_id}"
-        session = TOWER_SESSIONS.get(lock_key)
+        session = game_sessions.TOWER_SESSIONS.get(lock_key)
         if not session:
             await query.answer("⏳ Эта башня уже завершена или устарела.", show_alert=True)
             return
@@ -986,16 +989,16 @@ def build_general_admin_router(db: SupabaseDB, bot_name: str, ai: AIService) -> 
             await query.answer("❌ Этот ход уже неактивен.", show_alert=True)
             return
 
-        if lock_key in TOWER_LOCKS and now - TOWER_LOCKS[lock_key] < 0.8:
+        if lock_key in game_sessions.TOWER_LOCKS and now - game_sessions.TOWER_LOCKS[lock_key] < 0.8:
             await query.answer("⏳ Подожди секунду...", show_alert=False)
             return
-        TOWER_LOCKS[lock_key] = now
+        game_sessions.TOWER_LOCKS[lock_key] = now
 
         sender = db.get_user_by_platform_id(query.message.chat.id, original_user_id)
         if not sender: return
 
         if action == "take":
-            TOWER_SESSIONS.pop(lock_key, None)
+            game_sessions.TOWER_SESSIONS.pop(lock_key, None)
             multiplier = _get_tower_reward_multiplier(floor, weather)
             win = int(bet * multiplier)
             db.update_user(sender.id, {"reputation": sender.reputation + win})
@@ -1033,7 +1036,7 @@ def build_general_admin_router(db: SupabaseDB, bot_name: str, ai: AIService) -> 
                 if new_floor > 10:
                     multiplier = _get_tower_reward_multiplier(10, weather)
                     win = int(bet * multiplier)
-                    TOWER_SESSIONS.pop(lock_key, None)
+                    game_sessions.TOWER_SESSIONS.pop(lock_key, None)
                     db.update_user(sender.id, {"reputation": sender.reputation + win})
                     await query.message.edit_text(f"🏆 <b>ТЫ ПОКОРИЛ ВЕРШИНУ БАШНИ!</b> (x{multiplier:.1f})\n💰 Твой куш: {win} 🍪", parse_mode="HTML")
                     await query.answer("🏆 Вершина взята!")
@@ -1041,7 +1044,7 @@ def build_general_admin_router(db: SupabaseDB, bot_name: str, ai: AIService) -> 
 
                 try:
                     await _show_tower(query.message, floor=new_floor, bet=bet, user_id=original_user_id, is_new=False, weather=weather, event_msg=event_msg)
-                    TOWER_SESSIONS[lock_key]["floor"] = new_floor
+                    game_sessions.TOWER_SESSIONS[lock_key]["floor"] = new_floor
                     await query.answer("✅ Успешный подъем!")
                 except Exception as exc:
                     print(f"[tower:error] edit failed: {exc}")
@@ -1061,7 +1064,7 @@ def build_general_admin_router(db: SupabaseDB, bot_name: str, ai: AIService) -> 
                 if safe_win > 0:
                     db.update_user(sender.id, {"reputation": sender.reputation + safe_win})
 
-                TOWER_SESSIONS.pop(lock_key, None)
+                game_sessions.TOWER_SESSIONS.pop(lock_key, None)
                 await query.message.edit_text(
                     f"💀 <b>ТЫ СОРВАЛСЯ ВНИЗ!</b>\n\n"
                     f"👤 Игрок: <b>{escape_html(sender.display_name)}</b>\n"

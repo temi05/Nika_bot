@@ -16,16 +16,7 @@ from app.bot.routers.jail_helpers import (
     jail_user,
     parse_iso_dt,
 )
-from app.bot.routers.game_sessions import (
-    CASINO_DOUBLE_SESSIONS,
-    TOWER_SESSIONS,
-    TOWER_LOCKS,
-    DUEL_SESSIONS,
-    DICE_DUEL_SESSIONS,
-    AUTO_DROP_SESSIONS,
-    AUTO_QUIZ_SESSIONS,
-    AUTO_CLAIMED_EVENTS,
-)
+from app.bot.routers import game_sessions
 from app.utils import escape_html, get_sender_data, build_progress_bar
 
 
@@ -311,7 +302,7 @@ def build_games_router(db: SupabaseDB, ai: AIService, bot_name: str) -> Router:
                 reply_markup=_risk_keyboard(sender.user_id, win),
                 parse_mode="HTML",
             )
-            CASINO_DOUBLE_SESSIONS[f"{message.chat.id}_{sent.message_id}"] = {
+            game_sessions.CASINO_DOUBLE_SESSIONS[f"{message.chat.id}_{sent.message_id}"] = {
                 "user_id": sender.user_id,
                 "win_amount": win,
             }
@@ -375,7 +366,7 @@ def build_games_router(db: SupabaseDB, ai: AIService, bot_name: str) -> Router:
             return
 
         key = f"{abs(message.chat.id) % 1_000_000}{sender.user_id % 1_000_000}{target.user_id % 1_000_000}{random.randint(100, 999)}"
-        DICE_DUEL_SESSIONS[key] = {
+        game_sessions.DICE_DUEL_SESSIONS[key] = {
             "chat_id": message.chat.id,
             "challenger_id": sender.user_id,
             "target_id": target.user_id,
@@ -518,7 +509,7 @@ def build_games_router(db: SupabaseDB, ai: AIService, bot_name: str) -> Router:
             return
 
         key = f"{abs(message.chat.id) % 1_000_000}{sender.user_id % 1_000_000}{target.user_id % 1_000_000}{random.randint(100, 999)}"
-        DUEL_SESSIONS[key] = {
+        game_sessions.DUEL_SESSIONS[key] = {
             "chat_id": message.chat.id,
             "challenger_id": sender.user_id,
             "target_id": target.user_id,
@@ -839,6 +830,13 @@ def build_games_router(db: SupabaseDB, ai: AIService, bot_name: str) -> Router:
                     f"Выигрыш x35 и джекпот-бонус <b>{jackpot_bonus}</b> 🍪!\n"
                     f"Итого: <b>{win_total}</b> 🍪 🎉🍾"
                 )
+                # Глобальное оповещение
+                await message.answer(
+                    f"🎊 <b>ВНИМАНИЕ ВСЕМ!</b> 🎊\n\n"
+                    f"Игрок <b>{escape_html(sender.display_name)}</b> только что сорвал "
+                    f"<b>ГЛОБАЛЬНЫЙ ДЖЕКПОТ</b> и забрал <b>{win_total} 🍪</b>!\n"
+                    f"Поздравляем счастливчика! 🥳🥂"
+                )
             else:
                 multiplier = symbol_rules[r1]["triple"]
                 win_total = int(bet * multiplier)
@@ -890,7 +888,7 @@ def build_games_router(db: SupabaseDB, ai: AIService, bot_name: str) -> Router:
 
         await msg.edit_text(final_msg, reply_markup=keyboard, parse_mode="HTML")
         if win_total > 0 and not is_jackpot:
-            CASINO_DOUBLE_SESSIONS[f"{message.chat.id}_{msg.message_id}"] = {
+            game_sessions.CASINO_DOUBLE_SESSIONS[f"{message.chat.id}_{msg.message_id}"] = {
                 "user_id": sender.user_id,
                 "win_amount": win_total,
             }
@@ -935,7 +933,7 @@ def build_games_router(db: SupabaseDB, ai: AIService, bot_name: str) -> Router:
         db.update_user(sender.id, {"reputation": sender.reputation - bet})
         sent_msg = await _show_tower(message, floor=1, bet=bet, user_id=sender.user_id, is_new=True, weather=weather, event_msg="Ты у подножия башни.")
         if sent_msg:
-            TOWER_SESSIONS[f"{message.chat.id}_{sent_msg.message_id}"] = {
+            game_sessions.TOWER_SESSIONS[f"{message.chat.id}_{sent_msg.message_id}"] = {
                 "user_id": sender.user_id,
                 "floor": 1,
                 "bet": bet,

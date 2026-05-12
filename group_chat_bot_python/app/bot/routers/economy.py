@@ -19,9 +19,8 @@ from app.bot.routers.jail_helpers import (
     maybe_jail_for_overdue_debt,
     parse_iso_dt,
     pay_bail,
-    BAIL_SESSIONS,
-    LOAN_SESSIONS,
 )
+from app.bot.routers import game_sessions
 from app.utils import (
     build_progress_bar,
     escape_html,
@@ -198,8 +197,6 @@ def build_economy_router(db: SupabaseDB, ai: AIService) -> Router:
         ok, result = db.purchase_item(user, int(command.args.strip()))
         await message.answer(("✅ " if ok else "❌ ") + result)
 
-    LOAN_SESSIONS = {}
-    BAIL_SESSIONS = {}
 
     @router.message(Command("loan"))
     async def loan_command(message: Message, command: CommandObject) -> None:
@@ -246,7 +243,7 @@ def build_economy_router(db: SupabaseDB, ai: AIService) -> Router:
             reply_markup=keyboard,
             parse_mode="HTML"
         )
-        LOAN_SESSIONS[f"{message.chat.id}_{sent_msg.message_id}"] = {
+        game_sessions.LOAN_SESSIONS[f"{message.chat.id}_{sent_msg.message_id}"] = {
             "kind": "offer",
             "amount": amount,
             "lender_id": sender.user_id,
@@ -293,7 +290,7 @@ def build_economy_router(db: SupabaseDB, ai: AIService) -> Router:
             reply_markup=keyboard,
             parse_mode="HTML"
         )
-        LOAN_SESSIONS[f"{message.chat.id}_{sent_msg.message_id}"] = {
+        game_sessions.LOAN_SESSIONS[f"{message.chat.id}_{sent_msg.message_id}"] = {
             "kind": "request",
             "amount": amount,
             "borrower_id": sender_data.user_id,
@@ -452,7 +449,7 @@ def build_economy_router(db: SupabaseDB, ai: AIService) -> Router:
             await message.answer(f"❌ Не хватает на залог. Нужно <b>{cost} 🍪</b>, у тебя <b>{user.reputation} 🍪</b>.", parse_mode="HTML")
             return
 
-        BAIL_SESSIONS[f"{message.chat.id}_{user.user_id}"] = {
+        game_sessions.BAIL_SESSIONS[f"{message.chat.id}_{user.user_id}"] = {
             "cost": cost,
             "created_at": time.time(),
         }
@@ -609,8 +606,6 @@ def build_economy_router(db: SupabaseDB, ai: AIService) -> Router:
         return f"{percent:.0f}%" if percent.is_integer() else f"{percent:.1f}%"
 
     # --- ИГРА: БАШНЯ ФОРТУНЫ (COMPACT & DYNAMIC VERSION) ---
-    _tower_locks = {}
-    _tower_sessions = {}
 
     
     return router

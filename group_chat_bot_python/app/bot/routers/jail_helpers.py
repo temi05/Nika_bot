@@ -9,6 +9,7 @@ from datetime import datetime, timezone, timedelta
 from aiogram.types import Message
 
 from app.utils import escape_html
+from app.bot.routers import game_sessions
 
 
 def parse_iso_dt(value: str | None) -> datetime | None:
@@ -118,6 +119,3 @@ def pay_bail(db, user, cost: int) -> dict[str, int]:
     return {"creditor_part": creditor_part, "fee": fee}
 
 
-# Глобальные словари сессий (shared между роутерами)
-LOAN_SESSIONS: dict[str, dict] = {}
-BAIL_SESSIONS: dict[str, dict] = {}

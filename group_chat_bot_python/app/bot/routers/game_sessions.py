@@ -21,6 +21,12 @@ DUEL_SESSIONS: dict[str, dict] = {}
 # Кубодуэли (/diceduel)
 DICE_DUEL_SESSIONS: dict[str, dict] = {}
 
+# Займы и кредиты (/loan, /ask_loan)
+LOAN_SESSIONS: dict[str, dict] = {}
+
+# Залоги для выхода из тюрьмы (/bail)
+BAIL_SESSIONS: dict[str, dict] = {}
+
 # Авто-события чата
 AUTO_DROP_SESSIONS: dict[str, dict] = {}
 AUTO_QUIZ_SESSIONS: dict[str, dict] = {}
