@@ -9,6 +9,19 @@ from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKe
 from app.services.ai_service import AIService
 from app.services.supabase_db import SupabaseDB
 from app.bot.admin import is_admin
+from app.bot.routers.jail_helpers import (
+    bail_cost,
+    deny_if_jailed,
+    format_jail_remaining,
+    jail_remaining,
+    jail_user,
+    loan_limit,
+    maybe_jail_for_overdue_debt,
+    parse_iso_dt,
+    pay_bail,
+    BAIL_SESSIONS,
+    LOAN_SESSIONS,
+)
 from app.utils import (
     build_progress_bar,
     escape_html,
@@ -170,101 +183,8 @@ def build_economy_router(db: SupabaseDB, ai: AIService) -> Router:
         ok, result = db.purchase_item(user, int(command.args.strip()))
         await message.answer(("✅ " if ok else "❌ ") + result)
 
-    def _parse_iso_dt(value: str | None) -> datetime | None:
-        if not value:
-            return None
-        try:
-            return datetime.fromisoformat(value.replace("Z", "+00:00"))
-        except ValueError:
-            return None
-
-    def _jail_remaining(user) -> timedelta | None:
-        jailed_until = _parse_iso_dt(user.jailed_until)
-        if not jailed_until:
-            return None
-        remaining = jailed_until - datetime.now(timezone.utc)
-        if remaining.total_seconds() <= 0:
-            db.update_user(
-                user.id,
-                {
-                    "jailed_until": None,
-                    "jail_reason": None,
-                    "steal_fail_streak": 0,
-                    "steal_success_streak": 0,
-                },
-            )
-            return None
-        return remaining
-
-    def _format_remaining(delta: timedelta) -> str:
-        seconds = max(0, int(delta.total_seconds()))
-        minutes = seconds // 60
-        if minutes < 60:
-            return f"{max(1, minutes)} мин."
-        return f"{minutes // 60} ч. {minutes % 60} мин."
-
-    async def _deny_if_jailed(message: Message, user, action_name: str) -> bool:
-        _maybe_jail_for_overdue_debt(user)
-        user = db.get_user_by_platform_id(user.chat_id, user.user_id) or user
-        remaining = _jail_remaining(user)
-        if not remaining:
-            return False
-        await message.answer(
-            f"🚔 <b>Ты сейчас в тюрьме.</b>\n"
-            f"Действие <code>{escape_html(action_name)}</code> недоступно ещё <b>{_format_remaining(remaining)}</b>.\n"
-            f"Причина: <i>{escape_html(user.jail_reason or 'нарушение')}</i>\n\n"
-            f"Можно выйти через <code>/bail</code>.",
-            parse_mode="HTML",
-        )
-        return True
-
-    def _loan_limit(user) -> int:
-        return max(50, user.level * 25 + user.reputation)
-
-    def _bail_cost(user) -> int:
-        base_cost = max(50, user.level * 20, int(user.debt * 0.35))
-        wealth_part = int(user.reputation * 0.20)
-        return base_cost + wealth_part
-
-    def _pay_bail(user, cost: int) -> dict[str, int]:
-        requested_creditor_part = min(user.debt, max(0, cost // 2))
-        creditor_part = 0
-        if requested_creditor_part > 0:
-            result = db.repay_debts(user, requested_creditor_part)
-            creditor_part = int(result.get("paid") or 0)
-            user = db.get_user_by_platform_id(user.chat_id, user.user_id) or user
-        fee = cost - creditor_part
-        db.update_user(
-            user.id,
-            {
-                "reputation": max(0, user.reputation - fee),
-                "jailed_until": None,
-                "jail_reason": None,
-                "steal_fail_streak": 0,
-            },
-        )
-        return {"creditor_part": creditor_part, "fee": fee}
-
-    def _jail_user(user, minutes: int, reason: str) -> None:
-        db.update_user(
-            user.id,
-            {
-                "jailed_until": (datetime.now(timezone.utc) + timedelta(minutes=minutes)).isoformat(),
-                "jail_reason": reason,
-            },
-        )
-
-    def _maybe_jail_for_overdue_debt(user) -> None:
-        if user.debt <= 0 or _jail_remaining(user):
-            return
-        active_debts = db.get_active_debts_for_borrower(user.chat_id, user.user_id)
-        now = datetime.now(timezone.utc)
-        has_overdue = any((_parse_iso_dt(debt.get("due_at")) or now) < now for debt in active_debts)
-        if has_overdue:
-            _jail_user(user, 180, "просроченный долг")
-
-    _loan_sessions = {}
-    _bail_sessions = {}
+    LOAN_SESSIONS = {}
+    BAIL_SESSIONS = {}
 
     @router.message(Command("loan"))
     async def loan_command(message: Message, command: CommandObject) -> None:
@@ -286,10 +206,10 @@ def build_economy_router(db: SupabaseDB, ai: AIService) -> Router:
 
         sender = db.get_or_create_user(message.chat.id, sender_data)
         target = db.get_or_create_user(message.chat.id, target_data)
-        if target.debt + amount > _loan_limit(target):
+        if target.debt + amount > loan_limit(target):
             await message.answer(
                 f"❌ У {escape_html(target.display_name)} слишком большой долг.\n"
-                f"Лимит: <b>{_loan_limit(target)} 🍪</b>, сейчас: <b>{target.debt} 🍪</b>.",
+                f"Лимит: <b>{loan_limit(target)} 🍪</b>, сейчас: <b>{target.debt} 🍪</b>.",
                 parse_mode="HTML",
             )
             return
@@ -311,7 +231,7 @@ def build_economy_router(db: SupabaseDB, ai: AIService) -> Router:
             reply_markup=keyboard,
             parse_mode="HTML"
         )
-        _loan_sessions[f"{message.chat.id}_{sent_msg.message_id}"] = {
+        LOAN_SESSIONS[f"{message.chat.id}_{sent_msg.message_id}"] = {
             "kind": "offer",
             "amount": amount,
             "lender_id": sender.user_id,
@@ -337,10 +257,10 @@ def build_economy_router(db: SupabaseDB, ai: AIService) -> Router:
             return
 
         asker = db.get_or_create_user(message.chat.id, sender_data)
-        if asker.debt + amount > _loan_limit(asker):
+        if asker.debt + amount > loan_limit(asker):
             await message.answer(
                 f"❌ Сначала погаси часть старых долгов.\n"
-                f"Твой лимит: <b>{_loan_limit(asker)} 🍪</b>, сейчас: <b>{asker.debt} 🍪</b>.",
+                f"Твой лимит: <b>{loan_limit(asker)} 🍪</b>, сейчас: <b>{asker.debt} 🍪</b>.",
                 parse_mode="HTML",
             )
             return
@@ -358,7 +278,7 @@ def build_economy_router(db: SupabaseDB, ai: AIService) -> Router:
             reply_markup=keyboard,
             parse_mode="HTML"
         )
-        _loan_sessions[f"{message.chat.id}_{sent_msg.message_id}"] = {
+        LOAN_SESSIONS[f"{message.chat.id}_{sent_msg.message_id}"] = {
             "kind": "request",
             "amount": amount,
             "borrower_id": sender_data.user_id,
@@ -414,7 +334,7 @@ def build_economy_router(db: SupabaseDB, ai: AIService) -> Router:
             lines.append("<b>Ты должен:</b>")
             for debt in borrowed[:10]:
                 left = int(debt["amount"]) - int(debt.get("paid_amount") or 0) - int(debt.get("forgiven_amount") or 0)
-                due_at = _parse_iso_dt(debt.get("due_at"))
+                due_at = parse_iso_dt(debt.get("due_at"))
                 overdue = due_at and due_at < datetime.now(timezone.utc)
                 marker = " 🚨 просрочен" if overdue else ""
                 lines.append(f"• {escape_html(debt.get('lender_name') or str(debt['lender_id']))}: <b>{left} 🍪</b>{marker}")
@@ -458,15 +378,15 @@ def build_economy_router(db: SupabaseDB, ai: AIService) -> Router:
     async def jail_command(message: Message) -> None:
         target_data = get_sender_data(message.reply_to_message) if message.reply_to_message else get_sender_data(message)
         user = db.get_or_create_user(message.chat.id, target_data)
-        remaining = _jail_remaining(user)
+        remaining = jail_remaining(db, user)
         if not remaining:
             await message.answer(f"✅ {escape_html(user.display_name)} на свободе.", parse_mode="HTML")
             return
         await message.answer(
             f"🚔 <b>{escape_html(user.display_name)} в тюрьме</b>\n"
-            f"Осталось: <b>{_format_remaining(remaining)}</b>\n"
+            f"Осталось: <b>{format_jail_remaining(remaining)}</b>\n"
             f"Причина: <i>{escape_html(user.jail_reason or 'нарушение')}</i>\n"
-            f"Залог: <b>{_bail_cost(user)} 🍪</b>",
+            f"Залог: <b>{bail_cost(db, user)} 🍪</b>",
             parse_mode="HTML",
         )
 
@@ -497,7 +417,7 @@ def build_economy_router(db: SupabaseDB, ai: AIService) -> Router:
             return
         minutes = min(24 * 60, max(1, int(args[0])))
         reason = args[1] if len(args) > 1 else "решение суда"
-        _jail_user(target, minutes, reason)
+        jail_user(db, target, minutes, reason)
         await message.answer(
             f"⚖️ <b>Приговор исполнен.</b>\n"
             f"{escape_html(target.display_name)} отправлен в тюрьму на <b>{minutes} мин.</b>\n"
@@ -508,16 +428,16 @@ def build_economy_router(db: SupabaseDB, ai: AIService) -> Router:
     @router.message(Command("bail"))
     async def bail_command(message: Message) -> None:
         user = db.get_or_create_user(message.chat.id, get_sender_data(message))
-        remaining = _jail_remaining(user)
+        remaining = jail_remaining(db, user)
         if not remaining:
             await message.answer("✅ Ты уже на свободе.")
             return
-        cost = _bail_cost(user)
+        cost = bail_cost(db, user)
         if user.reputation < cost:
             await message.answer(f"❌ Не хватает на залог. Нужно <b>{cost} 🍪</b>, у тебя <b>{user.reputation} 🍪</b>.", parse_mode="HTML")
             return
 
-        _bail_sessions[f"{message.chat.id}_{user.user_id}"] = {
+        BAIL_SESSIONS[f"{message.chat.id}_{user.user_id}"] = {
             "cost": cost,
             "created_at": time.time(),
         }
@@ -530,7 +450,7 @@ def build_economy_router(db: SupabaseDB, ai: AIService) -> Router:
         await message.answer(
             f"🔐 <b>Подтвердить залог?</b>\n"
             f"Стоимость: <b>{cost} 🍪</b>\n"
-            f"Осталось сидеть: <b>{_format_remaining(remaining)}</b>\n\n"
+            f"Осталось сидеть: <b>{format_jail_remaining(remaining)}</b>\n\n"
             f"Если есть долг, до половины залога уйдет кредиторам.",
             parse_mode="HTML",
             reply_markup=keyboard,
@@ -583,7 +503,7 @@ def build_economy_router(db: SupabaseDB, ai: AIService) -> Router:
 
         sender = db.get_or_create_user(message.chat.id, sender_data)
         target = db.get_or_create_user(message.chat.id, target_data)
-        if await _deny_if_jailed(message, sender, "/steal"):
+        if await deny_if_jailed(db, message, sender, "/steal"):
             return
         
         if target.reputation < 10:
@@ -679,3 +599,7 @@ def build_economy_router(db: SupabaseDB, ai: AIService) -> Router:
 
     
     return router
+
+
+
+

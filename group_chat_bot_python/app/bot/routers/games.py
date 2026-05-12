@@ -9,6 +9,13 @@ from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKe
 
 from app.services.ai_service import AIService
 from app.services.supabase_db import SupabaseDB
+from app.bot.routers.jail_helpers import (
+    deny_if_jailed,
+    format_jail_remaining,
+    jail_remaining,
+    jail_user,
+    parse_iso_dt,
+)
 from app.utils import escape_html, get_sender_data, build_progress_bar
 
 DUEL_SESSIONS: dict[str, dict] = {}
@@ -83,7 +90,7 @@ def build_games_router(db: SupabaseDB, ai: AIService, bot_name: str) -> Router:
             return
 
         sender = db.get_or_create_user(message.chat.id, get_sender_data(message))
-        if await _deny_if_jailed(message, sender, "/coin"):
+        if await deny_if_jailed(db, message, sender, "/coin"):
             return
         if await _deny_bad_bet(message, sender, bet):
             return
@@ -175,7 +182,7 @@ def build_games_router(db: SupabaseDB, ai: AIService, bot_name: str) -> Router:
             return
 
         sender = db.get_or_create_user(message.chat.id, get_sender_data(message))
-        if await _deny_if_jailed(message, sender, "/dice"):
+        if await deny_if_jailed(db, message, sender, "/dice"):
             return
         if await _deny_bad_bet(message, sender, bet):
             return
@@ -280,9 +287,9 @@ def build_games_router(db: SupabaseDB, ai: AIService, bot_name: str) -> Router:
 
         sender = db.get_or_create_user(message.chat.id, get_sender_data(message))
         target = db.get_or_create_user(message.chat.id, target_sender)
-        if await _deny_if_jailed(message, sender, "/diceduel"):
+        if await deny_if_jailed(db, message, sender, "/diceduel"):
             return
-        if _jail_remaining(target):
+        if jail_remaining(db, target):
             await message.answer("❌ Соперник сейчас в тюрьме и не может принять дуэль.")
             return
         if await _deny_bad_bet(message, sender, bet):
@@ -350,7 +357,7 @@ def build_games_router(db: SupabaseDB, ai: AIService, bot_name: str) -> Router:
             return
 
         sender = db.get_or_create_user(message.chat.id, get_sender_data(message))
-        if await _deny_if_jailed(message, sender, "/rps"):
+        if await deny_if_jailed(db, message, sender, "/rps"):
             return
         if await _deny_bad_bet(message, sender, bet):
             return
@@ -428,9 +435,9 @@ def build_games_router(db: SupabaseDB, ai: AIService, bot_name: str) -> Router:
 
         sender = db.get_or_create_user(message.chat.id, get_sender_data(message))
         target = db.get_or_create_user(message.chat.id, target_sender)
-        if await _deny_if_jailed(message, sender, "/duel"):
+        if await deny_if_jailed(db, message, sender, "/duel"):
             return
-        if _jail_remaining(target):
+        if jail_remaining(db, target):
             await message.answer("❌ Соперник сейчас в тюрьме и не может принять дуэль.")
             return
         if await _deny_bad_bet(message, sender, bet):
@@ -475,7 +482,7 @@ def build_games_router(db: SupabaseDB, ai: AIService, bot_name: str) -> Router:
     @router.message(Command("fish", "рыбалка"))
     async def fish_command(message: Message) -> None:
         sender = db.get_or_create_user(message.chat.id, get_sender_data(message))
-        if await _deny_if_jailed(message, sender, "/fish"):
+        if await deny_if_jailed(db, message, sender, "/fish"):
             return
         allowed, remaining = db.can_user_use_command(message.chat.id, sender.user_id, "fish", 45 * 60)
         if not allowed:
@@ -507,7 +514,7 @@ def build_games_router(db: SupabaseDB, ai: AIService, bot_name: str) -> Router:
     @router.message(Command("box", "коробка", "сундук"))
     async def box_command(message: Message) -> None:
         sender = db.get_or_create_user(message.chat.id, get_sender_data(message))
-        if await _deny_if_jailed(message, sender, "/box"):
+        if await deny_if_jailed(db, message, sender, "/box"):
             return
         allowed, remaining = db.can_user_use_command(message.chat.id, sender.user_id, "box", 60 * 60)
         if not allowed:
@@ -537,7 +544,7 @@ def build_games_router(db: SupabaseDB, ai: AIService, bot_name: str) -> Router:
     @router.message(Command("scratch", "скретч", "лотерейка"))
     async def scratch_command(message: Message) -> None:
         sender = db.get_or_create_user(message.chat.id, get_sender_data(message))
-        if await _deny_if_jailed(message, sender, "/scratch"):
+        if await deny_if_jailed(db, message, sender, "/scratch"):
             return
         allowed, remaining = db.can_user_use_command(message.chat.id, sender.user_id, "scratch", 35 * 60)
         if not allowed:
@@ -572,7 +579,7 @@ def build_games_router(db: SupabaseDB, ai: AIService, bot_name: str) -> Router:
     @router.message(Command("mine", "шахта", "копать"))
     async def mine_command(message: Message, command: CommandObject) -> None:
         sender = db.get_or_create_user(message.chat.id, get_sender_data(message))
-        if await _deny_if_jailed(message, sender, "/mine"):
+        if await deny_if_jailed(db, message, sender, "/mine"):
             return
 
         raw_mode = (command.args or "").strip().lower().replace("ё", "е")
@@ -661,7 +668,7 @@ def build_games_router(db: SupabaseDB, ai: AIService, bot_name: str) -> Router:
     @router.message(Command("dailyquest", "квест", "дейлик"))
     async def dailyquest_command(message: Message) -> None:
         sender = db.get_or_create_user(message.chat.id, get_sender_data(message))
-        if await _deny_if_jailed(message, sender, "/dailyquest"):
+        if await deny_if_jailed(db, message, sender, "/dailyquest"):
             return
         allowed, remaining = db.can_user_use_command(message.chat.id, sender.user_id, "dailyquest", 24 * 60 * 60)
         if not allowed:
@@ -708,7 +715,7 @@ def build_games_router(db: SupabaseDB, ai: AIService, bot_name: str) -> Router:
 
         sender_data = get_sender_data(message)
         sender = db.get_or_create_user(message.chat.id, sender_data)
-        if await _deny_if_jailed(message, sender, "/casino"):
+        if await deny_if_jailed(db, message, sender, "/casino"):
             return
         if await _deny_bad_bet(message, sender, bet):
             return
@@ -855,7 +862,7 @@ def build_games_router(db: SupabaseDB, ai: AIService, bot_name: str) -> Router:
         bet = int(command.args.strip())
         sender_data = get_sender_data(message)
         sender = db.get_or_create_user(message.chat.id, sender_data)
-        if await _deny_if_jailed(message, sender, "/tower"):
+        if await deny_if_jailed(db, message, sender, "/tower"):
             return
         
         if await _deny_bad_bet(message, sender, bet, min_bet=5):
@@ -890,3 +897,4 @@ def build_games_router(db: SupabaseDB, ai: AIService, bot_name: str) -> Router:
 
     
     return router
+
