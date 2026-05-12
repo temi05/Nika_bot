@@ -10,10 +10,14 @@ from aiogram.types import Update, BotCommand, BotCommandScopeDefault, InlineKeyb
 from fastapi import FastAPI, HTTPException, Request
 
 from app.bot.admin import build_admin_router
-from app.bot.commands import AUTO_DROP_SESSIONS, AUTO_QUIZ_SESSIONS, build_commands_router, make_quiz_question
+from app.bot.routers.general_admin import AUTO_DROP_SESSIONS, AUTO_QUIZ_SESSIONS, build_general_admin_router, make_quiz_question
 from app.bot.messages import build_messages_router
 from app.bot.rp_commands import build_rp_router
 from app.bot.feedback import build_feedback_router
+from app.bot.routers.economy import build_economy_router
+from app.bot.routers.games import build_games_router
+from app.bot.routers.profile_ai import build_profile_ai_router
+from app.bot.routers.chat_settings import build_chat_settings_router
 from app.config import get_settings
 from app.services.ai_service import AIService
 from app.services.memory_provider import build_memory_provider
@@ -31,7 +35,11 @@ def create_app() -> FastAPI:
     ai_service = AIService(settings, db, memory, persona, bot)
 
     dispatcher.include_router(build_admin_router(bot, db))
-    dispatcher.include_router(build_commands_router(db, settings.bot_name, ai_service))
+    dispatcher.include_router(build_chat_settings_router(db))
+    dispatcher.include_router(build_economy_router(db, ai_service))
+    dispatcher.include_router(build_games_router(db, ai_service, settings.bot_name))
+    dispatcher.include_router(build_profile_ai_router(db, ai_service, settings.bot_name))
+    dispatcher.include_router(build_general_admin_router(db, settings.bot_name, ai_service))
     dispatcher.include_router(build_rp_router(db))
     dispatcher.include_router(build_feedback_router(bot, db))
     dispatcher.include_router(build_messages_router(bot, settings, db, ai_service))

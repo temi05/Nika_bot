@@ -1220,6 +1220,18 @@ class SupabaseDB:
         )
         return bool(rows and rows.data)
 
+    def delete_memory(self, chat_id: int, query: str) -> int:
+        if not query.strip():
+            return 0
+        rows = self._safe_execute(
+            self._knowledge().delete().eq("chat_id", chat_id).ilike("fact", f"%{query}%"),
+            fallback=None,
+            context=f"delete_memory chat_id={chat_id}",
+        )
+        if not rows or not rows.data:
+            return 0
+        return len(rows.data)
+
     def search_memory(self, chat_id: int, query: str, limit: int = 5) -> list[str]:
         if not query.strip():
             return []
