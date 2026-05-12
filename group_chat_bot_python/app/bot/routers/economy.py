@@ -49,10 +49,25 @@ def build_economy_router(db: SupabaseDB, ai: AIService) -> Router:
         prev_xp = 0 if target.level <= 1 else db.get_next_level_xp(target.level - 1)
         progress = ((target.xp - prev_xp) / max(next_xp - prev_xp, 1)) * 100
         rank = _get_rank_name(target.level)
+        # Проверяем ачивки прямо перед показом профиля
+        new_achievements = db.check_and_award_achievements(target)
+        if new_achievements:
+            for ach in new_achievements:
+                await message.answer(
+                    f"🎊 <b>Новое достижение!</b>\n"
+                    f"{ach['icon']} <b>{ach['title']}</b>\n"
+                    f"└ <i>{ach['description']}</i>",
+                    parse_mode="HTML"
+                )
+        
+        badges = db.get_user_badges(target.id)
+        badges_str = " ".join(badges) if badges else "Нет"
+
         body = (
             f"<b>{'Мой профиль' if target.user_id == sender.user_id else 'Профиль пользователя'}</b>\n\n"
             f"Имя: <code>{escape_html(target.display_name)}</code>\n"
             f"Ранг: <b>{escape_html(rank)}</b>\n"
+            f"Бейджи: {badges_str}\n"
             f"Роль: <i>Пользователь</i>\n"
             f"Уровень: <b>{target.level}</b>\n"
             f"Прогресс: <code>{build_progress_bar(progress)} {int(progress)}%</code>\n"

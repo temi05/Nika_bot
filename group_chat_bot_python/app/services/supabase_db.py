@@ -34,6 +34,11 @@ class SupabaseDB:
         self.last_birthday_check: dict[int, str] = {}
         self._rich_message_logs_supported: bool | None = None
         self._knowledge_entities_supported: bool | None = None
+        
+        # In-memory Cache
+        self._user_cache: dict[str, tuple[ChatUser, float]] = {} # key -> (user, expires_at)
+        self._chat_settings_cache: dict[int, tuple[ChatSettings, float]] = {}
+        self._cache_ttl = 300 # 5 минут
 
     def _users(self):
         return self.client.table("users")
@@ -142,13 +147,21 @@ class SupabaseDB:
         )
 
     def get_or_create_user(self, chat_id: int, sender: Sender) -> ChatUser:
+        cache_key = f"{chat_id}_{sender.user_id}"
+        if cache_key in self._user_cache:
+            user, expires_at = self._user_cache[cache_key]
+            if time.time() < expires_at:
+                return user
+        
         response = self._safe_execute(
             self._users().select("*").eq("chat_id", chat_id).eq("user_id", sender.user_id).limit(1),
             fallback=None,
             context=f"get_or_create_user.select chat_id={chat_id} user_id={sender.user_id}",
         )
         if response and response.data:
-            return self.reset_expired_warns(self._user_from_row(response.data[0]))
+            user = self.reset_expired_warns(self._user_from_row(response.data[0]))
+            self._user_cache[cache_key] = (user, time.time() + self._cache_ttl)
+            return user
 
         payload = {
             "chat_id": chat_id,
@@ -174,6 +187,12 @@ class SupabaseDB:
         return self._fallback_user(chat_id, sender)
 
     def get_user_by_platform_id(self, chat_id: int, user_id: int) -> ChatUser | None:
+        cache_key = f"{chat_id}_{user_id}"
+        if cache_key in self._user_cache:
+            user, expires_at = self._user_cache[cache_key]
+            if time.time() < expires_at:
+                return user
+                
         response = self._safe_execute(
             self._users().select("*").eq("chat_id", chat_id).eq("user_id", user_id).limit(1),
             fallback=None,
@@ -181,7 +200,9 @@ class SupabaseDB:
         )
         if not response or not response.data:
             return None
-        return self.reset_expired_warns(self._user_from_row(response.data[0]))
+        user = self.reset_expired_warns(self._user_from_row(response.data[0]))
+        self._user_cache[cache_key] = (user, time.time() + self._cache_ttl)
+        return user
 
     def update_last_message_time(self, chat_id: int, user_id: int) -> None:
         now = int(time.time())
@@ -201,6 +222,12 @@ class SupabaseDB:
                 payload[field] = max(0, int(payload[field]))
         if "level" in payload and payload["level"] is not None:
             payload["level"] = max(1, int(payload["level"]))
+            
+        # Сброс кэша для этого пользователя
+        # Так как db_id не содержит chat_id/user_id, мы просто очищаем весь кэш пользователей 
+        # или ищем совпадение. Для надежности при обновлении по db_id очистим кэш.
+        self._user_cache.clear() 
+
         try:
             result = self._safe_execute(
                 self._users().update(payload).eq("id", db_id),
@@ -418,6 +445,11 @@ class SupabaseDB:
         return chat_ids
 
     def get_chat_settings(self, chat_id: int) -> ChatSettings:
+        if chat_id in self._chat_settings_cache:
+            settings, expires_at = self._chat_settings_cache[chat_id]
+            if time.time() < expires_at:
+                return settings
+
         response = self._safe_execute(
             self._chats().select("*").eq("chat_id", chat_id).limit(1),
             fallback=None,
@@ -425,12 +457,13 @@ class SupabaseDB:
         )
         if response and response.data:
             row = response.data[0]
-            return ChatSettings(
-                chat_id=chat_id, 
+            settings = ChatSettings(
+                chat_id=chat_id,
                 link_filter_enabled=bool(row.get("link_filter_enabled", True)),
                 casino_jackpot=int(row.get("casino_jackpot", 0))
             )
-
+            self._chat_settings_cache[chat_id] = (settings, time.time() + self._cache_ttl)
+            return settings
         created = self._safe_execute(
             self._chats().insert(
                 {
@@ -454,6 +487,7 @@ class SupabaseDB:
         return ChatSettings(chat_id=chat_id, link_filter_enabled=self.settings.link_filter_default)
 
     def update_chat_settings(self, chat_id: int, **updates: Any) -> bool:
+        self._chat_settings_cache.pop(chat_id, None)
         result = self._safe_execute(
             self._chats().update(updates).eq("chat_id", chat_id),
             fallback=None,
@@ -1490,5 +1524,87 @@ class SupabaseDB:
             "level_up": level_up
         }
 
-    def update_user_flavor(self, user: ChatUser, flavor: str) -> bool:
-        return bool(self.update_user(user.id, {"flavor": flavor[:50]}))
+    def get_user_badges(self, db_id: int) -> list[str]:
+        """Возвращает список иконок всех достижений пользователя."""
+        response = self._safe_execute(
+            self.client.rpc("get_user_badges", {"p_user_id": db_id}),
+            fallback=[],
+            context=f"get_user_badges db_id={db_id}",
+        )
+        if hasattr(response, "data") and isinstance(response.data, list):
+            return [str(row.get("icon", "")) for row in response.data if row.get("icon")]
+        return []
+
+    def award_achievement(self, db_id: int, code: str) -> dict[str, Any] | None:
+        """Присваивает достижение пользователю, если его еще нет."""
+        # Пытаемся вызвать RPC функцию, которая проверит наличие и добавит
+        response = self._safe_execute(
+            self.client.rpc("award_achievement_by_code", {"p_user_id": db_id, "p_code": code}),
+            fallback=None,
+            context=f"award_achievement db_id={db_id} code={code}",
+        )
+        if response and response.data:
+            # Сбрасываем кэш пользователя, так как у него появились новые бейджи
+            self._user_cache.clear()
+            return response.data # Вернет инфо об ачивке, если она была выдана
+        return None
+
+    def check_and_award_achievements(self, user: ChatUser) -> list[dict[str, Any]]:
+        """Проверяет условия и выдает новые ачивки."""
+        new_awards = []
+        
+        # 💰 Богатство
+        if user.reputation >= 5000:
+            res = self.award_achievement(user.id, "rich_2")
+            if res: new_awards.append(res)
+        elif user.reputation >= 1000:
+            res = self.award_achievement(user.id, "rich_1")
+            if res: new_awards.append(res)
+            
+        # 🎰 Казино
+        plays = self._get_stat(user.id, "casino_plays")
+        if plays >= 200:
+            res = self.award_achievement(user.id, "gambler_2")
+            if res: new_awards.append(res)
+        elif plays >= 50:
+            res = self.award_achievement(user.id, "gambler_1")
+            if res: new_awards.append(res)
+
+        # ⛏️ Шахта
+        mines = self._get_stat(user.id, "mine_plays")
+        if mines >= 20:
+            res = self.award_achievement(user.id, "miner_1")
+            if res: new_awards.append(res)
+
+        # 🗣️ Общение
+        msgs = self._get_stat(user.id, "total_messages")
+        if msgs >= 2000:
+            res = self.award_achievement(user.id, "speaker_2")
+            if res: new_awards.append(res)
+        elif msgs >= 500:
+            res = self.award_achievement(user.id, "speaker_1")
+            if res: new_awards.append(res)
+            
+        # 👣 Первый шаг
+        res = self.award_achievement(user.id, "first_step")
+        if res: new_awards.append(res)
+        
+        return new_awards
+
+    def _get_stat(self, db_id: int, column: str) -> int:
+        """Вспомогательный метод для получения одного значения статистики."""
+        res = self._safe_execute(
+            self._users().select(column).eq("id", db_id).limit(1),
+            fallback=None
+        )
+        if res and res.data:
+            return int(res.data[0].get(column) or 0)
+        return 0
+
+    def increment_stat(self, db_id: int, column: str) -> None:
+        """Увеличивает счетчик статистики на 1."""
+        self._safe_execute(
+            self.client.rpc("increment_user_stat", {"p_user_id": db_id, "p_column": column}),
+            fallback=None,
+            context=f"increment_stat {column}"
+        )

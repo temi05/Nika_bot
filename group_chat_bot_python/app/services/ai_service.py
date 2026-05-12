@@ -23,6 +23,25 @@ from app.services.persona_service import PersonaService
 from app.services.prompt_builders import build_character_system_prompt
 from app.services.supabase_db import SupabaseDB
 
+def retry_async(max_attempts=3, delay=1, backoff=2):
+    def decorator(func):
+        async def wrapper(*args, **kwargs):
+            last_exc = None
+            current_delay = delay
+            for attempt in range(max_attempts):
+                try:
+                    return await func(*args, **kwargs)
+                except Exception as e:
+                    last_exc = e
+                    if attempt < max_attempts - 1:
+                        await asyncio.sleep(current_delay)
+                        current_delay *= backoff
+                    else:
+                        raise last_exc
+            return None
+        return wrapper
+    return decorator
+
 
 class AIService:
     def __init__(
@@ -76,7 +95,7 @@ class AIService:
         
         # Пытаемся вытянуть автора, на чье сообщение отвечают (если текст структурирован)
         reply_author = self._extract_reply_author(text)
-        reply_note = f" ↩ ответ_на=[{reply_author}]" if reply_author else ""
+        reply_note = f" [REPLY_TO: {reply_author}]" if reply_author else ""
         
         return f"{identity}{reply_note}: {message}"
 
@@ -99,6 +118,7 @@ class AIService:
         plain = re.sub(r"\s+", " ", plain).strip()
         return plain[:900] if plain else "[пустое сообщение]"
 
+    @retry_async(max_attempts=3, delay=2)
     async def generate_cookie_gift_message(
         self,
         chat_id: int,
@@ -586,23 +606,20 @@ class AIService:
         mentioned: bool,
         is_private_chat: bool,
     ) -> str:
-        history_block = self._render_history_with_reply_chains(history) if history else "Недавней истории нет или она не нужна для ответа."
+        history_block = self._render_history_with_reply_chains(history) if history else "Недавней истории нет."
         addressed_to_bot = is_private_chat or reply_to_bot or mentioned
-        plain = plain_user_text.strip() if plain_user_text.strip() else "[медиа или сообщение без обычного текста]"
+        plain = plain_user_text.strip() if plain_user_text.strip() else "[медиа без текста]"
 
         return "\n".join(
             [
                 "<dialogue_input>",
                 "<attribution_rules>",
-                "- Каждая строка в <recent_messages> принадлежит ТОЛЬКО автору, указанному слева от двоеточия (user_id=...).",
-                "- user_id — уникальный идентификатор: два человека с похожими именами — это РАЗНЫЕ люди.",
-                "- Пометка '↩ ответ_на=[Имя (user_id=...)]' означает, что эта строка — прямой ответ на сообщение указанного человека.",
-                "- Если ты видишь цепочку ответов, внимательно следи, кто кому отвечает, чтобы не перепутать контекст.",
-                "- <current_message> написан текущим отправителем. Твой основной ответ должен быть адресован именно ему.",
-                "- Если есть <reply_context>, это цитата, на которую пришел текущий ответ. Автор внутри <reply_context> — это тот, КОМУ отвечают.",
-                "- НЕ СМЕШИВАЙ текущего отправителя и автора цитаты. Если Вася отвечает Пете, значит Петя сказал что-то раньше, а Вася говорит сейчас.",
-                "- При вызове инструментов: target_name/target_user_id должен быть АВТОРОМ текущего действия, если не указано иное.",
-                "- Не воруй чужие факты из памяти и не приписывай их себе или другим.",
+                "- ВАЖНО: Если есть блок <reply_context>, текущее сообщение — это ПРЯМОЙ ОТВЕТ на него.",
+                "- Твой ответ должен быть логически связан с текстом в <reply_context>, если он есть.",
+                "- Строки в <recent_messages> имеют пометку [REPLY_TO: ...], если это были ответы. Используй это для отслеживания нити диалога.",
+                "- Каждая строка в <recent_messages> принадлежит только автору слева от двоеточия.",
+                "- user_id — уникальный ключ пользователя.",
+                "- Не путай отправителя и автора цитаты в <reply_context>.",
                 "</attribution_rules>",
                 "<recent_messages>",
                 history_block,
@@ -613,8 +630,7 @@ class AIService:
                 f"addressed_to_bot: {addressed_to_bot}",
                 f"reply_to_bot: {reply_to_bot}",
                 f"mentioned_bot: {mentioned}",
-                f"private_chat: {is_private_chat}",
-                f"plain_text: {plain}",
+                f"is_reply: {'yes' if '<reply_context>' in user_text else 'no'}",
                 "message_payload:",
                 user_text,
                 "</current_request>",
@@ -787,6 +803,21 @@ class AIService:
                     },
                 },
             },
+            {
+                "type": "function",
+                "function": {
+                    "name": "transfer_reputation",
+                    "description": "Передать печеньки (репутацию) от одного пользователя другому. Вызывай, когда пользователь просит Нику дать, перевести или подарить печеньки кому-то.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "target_name": {"type": "string", "description": "Имя получателя или @username"},
+                            "amount": {"type": "integer", "description": "Количество печенек"},
+                        },
+                        "required": ["target_name", "amount"],
+                    },
+                },
+            },
         ]
 
     async def _run_tool_call(self, chat_id: int, sender: Sender, caller_is_admin: bool, tool_name: str, raw_arguments: str) -> str:
@@ -803,6 +834,8 @@ class AIService:
             return await self._tool_moderate_user(chat_id, caller_is_admin, args)
         if tool_name == "create_poll":
             return await self._tool_create_poll(chat_id, args)
+        if tool_name == "transfer_reputation":
+            return await self._tool_transfer_reputation(chat_id, sender, args)
         return "Неизвестный инструмент."
 
     def _tool_calls_have_valid_json(self, tool_calls: list[Any]) -> bool:
@@ -1050,6 +1083,32 @@ class AIService:
         except Exception as exc:
             return f"Ошибка API Telegram при создании опроса: {exc}"
 
+    async def _tool_transfer_reputation(self, chat_id: int, sender: Sender, args: dict[str, Any]) -> str:
+        target_name = str(args.get("target_name") or "").strip()
+        amount = int(args.get("amount") or 0)
+        
+        if amount <= 0:
+            return "Ошибка: количество печенек должно быть больше нуля."
+            
+        target = self._resolve_target_user(chat_id, sender, target_name)
+        if not target:
+            return f"Не нашла пользователя '{target_name}'."
+            
+        if target.user_id == sender.user_id:
+            return "Нельзя переводить печеньки самому себе."
+            
+        sender_db = self.db.get_or_create_user(chat_id, sender)
+        if sender_db.reputation < amount:
+            return f"У тебя недостаточно печенек. Баланс: {sender_db.reputation}."
+            
+        # Выполняем транзакцию
+        self.db.update_user(sender_db.id, {"reputation": sender_db.reputation - amount})
+        self.db.update_user(target.id, {"reputation": target.reputation + amount})
+        
+        # Генерируем живой ответ через ИИ
+        ai_msg = await self.generate_cookie_gift_message(chat_id, sender.display_name, target.display_name, amount)
+        return f"ТРАНЗАКЦИЯ ВЫПОЛНЕНА: {ai_msg}"
+
     def _sanitize_poll_options(self, options: list[Any]) -> list[str]:
         safe_options: list[str] = []
         seen: set[str] = set()
@@ -1096,8 +1155,20 @@ class AIService:
         # Проверяем, не выпрашивает ли человек печеньку намеренно
         lowered_req = user_text.lower()
         if "дай печеньку" in lowered_req or "хочу печеньку" in lowered_req:
-            return reply # Не даем, если тупо выпрашивают
+            return reply
 
+        # СНАЧАЛА ПРОВЕРЯЕМ НА ГРУБОСТЬ (Умный штраф)
+        if self._is_hostile_user_text(user_text):
+            # Проверяем кулдаун на штрафы (300 секунд), чтобы не списать всё сразу
+            if self.db.can_adjust_reputation(0, sender.user_id, cooldown_seconds=300):
+                user = self.db.get_or_create_user(chat_id, sender)
+                if user.reputation > 0:
+                    self.db.update_user(user.id, {"reputation": max(0, user.reputation - 1)})
+                    # Снижаем настроение Ники
+                    self.moods[chat_id] = max(0, self.moods[chat_id] - 15)
+                    return f"{reply}\n\n💢 <b>-1 🍪 за грубость.</b> Не смей мне хамить!"
+
+        # Если не грубил, проверяем на заслуженную награду
         if not self._message_deserves_cookie(user_text):
             return reply
         if not self.db.can_adjust_reputation(0, sender.user_id, cooldown_seconds=180):
@@ -1116,13 +1187,30 @@ class AIService:
         text = re.sub(r"\s+", " ", (user_text or "").strip()).casefold()
         if len(text) < 3:
             return False
+            
+        # Список стоп-слов, которые отменяют награду (отрицание или токсичность)
+        negation_markers = {"не ", "ни разу", "вряд ли", "хуже", "плохо", "отстой", "удали", "бесишь", "тупая", "дура"}
+        if any(marker in text for marker in negation_markers):
+            return False
+
+        # Основные позитивные маркеры
         positive_markers = {
             "спасибо", "спс", "красава", "харош", "хорош", "база",
-            "гениально", "смешно", "угар", "топ", "сильно", "вайб"
+            "гениально", "смешно", "угар", "топ", "сильно", "вайб",
+            "умница", "лучшая", "обожаю", "люблю", "мило", "круто"
         }
-        if any(marker in text for marker in positive_markers):
+        
+        # Проверяем наличие слов (целиком, чтобы не ловить "стоп" в "растоптать")
+        words = set(re.findall(r"\b\w+\b", text))
+        if any(marker in words for marker in positive_markers):
+            # Если сообщение очень короткое (типа просто "спс"), даем шанс 30%
+            if len(text) < 10:
+                return random.random() < 0.3
             return True
-        return bool(re.search(r"(^|\s)(\+1|\+\+|👍|🔥|❤️|😂|🤣)($|\s)", text))
+            
+        # Эмодзи тоже считаются
+        emoji_pattern = r"(^|\s)(\+1|\+\+|👍|🔥|❤️|😂|🤣|🥰|💎|👑)($|\s)"
+        return bool(re.search(emoji_pattern, text))
 
     def _resolve_target_user(self, chat_id: int, sender: Sender, target_name: str) -> ChatUser | None:
         normalized = (target_name or "").strip().lower()

@@ -43,6 +43,7 @@ class ChatUser:
     steal_fail_streak: int = 0
     steal_success_streak: int = 0
     sign_price: int = 0
+    badges: list[str] = field(default_factory=list) # Список иконок-достижений
 
     @property
     def display_name(self) -> str:

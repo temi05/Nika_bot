@@ -213,6 +213,8 @@ def build_messages_router(bot: Bot, settings: Settings, db: SupabaseDB, ai: AISe
             return
 
         user = db.get_or_create_user(message.chat.id, sender)
+        db.increment_stat(user.id, "total_messages") # Увеличиваем счетчик сообщений
+        
         should_grant_xp = _should_grant_xp(message, sender)
         if should_grant_xp:
             updated_user, level_up = db.apply_message_xp(user)
@@ -442,24 +444,38 @@ def _word_in_text(text: str, word: str) -> bool:
 
 def _reputation_delta(text: str) -> int:
     normalized = re.sub(r"\s+", " ", (text or "").strip()).casefold()
-    positive_exact = {"+", "+1", "++", "\U0001f44d", "\u0441\u043f\u0441", "\u0441\u043f\u0430\u0441\u0438\u0431\u043e"}
-    negative_exact = {"-", "-1", "\U0001f44e", "\u0444\u0443"}
+    if not normalized:
+        return 0
+
+    # Если есть отрицание перед ключевым словом, отменяем действие
+    negations = {"не", "ни разу", "вовсе не", "совсем не", "никак не"}
+    
+    positive_exact = {"+", "+1", "++", "👍", "🤝"}
+    negative_exact = {"-", "-1", "👎"}
+    
     positive_markers = {
-        "\u0441\u043f\u0430\u0441\u0438\u0431\u043e",
-        "\u0441\u043f\u0441",
-        "\u043a\u0440\u0430\u0441\u0430\u0432\u0430",
-        "\u0445\u043e\u0440\u043e\u0448",
-        "\u0431\u0430\u0437\u0430",
-        "\u0442\u043e\u043f",
-        "\u0441\u0438\u043b\u044c\u043d\u043e",
-        "\u0433\u043e\u0434\u043d\u043e",
-        "\u0440\u0435\u0441\u043f\u0435\u043a\u0442",
+        "спасибо", "спс", "красава", "хорош", "база", "топ", 
+        "сильно", "годно", "респект", "красавчик", "лучший", "умница"
     }
-    negative_markers = {"\u0444\u0443", "\u043a\u0440\u0438\u043d\u0436", "\u043c\u0438\u043d\u0443\u0441"}
-    if normalized in positive_exact or any(marker in normalized for marker in positive_markers):
-        return 1
-    if normalized in negative_exact or any(marker in normalized for marker in negative_markers):
-        return -1
+    negative_markers = {"фу", "кринж", "минус", "плохо", "отстой", "бесит"}
+
+    # Проверка точных совпадений (символы)
+    if normalized in positive_exact: return 1
+    if normalized in negative_exact: return -1
+
+    # Проверка слов с учетом отрицаний
+    words = normalized.split()
+    for i, word in enumerate(words):
+        clean_word = word.strip(".,!?")
+        
+        # Проверяем, нет ли перед словом отрицания
+        has_negation = i > 0 and words[i-1] in negations
+        
+        if clean_word in positive_markers:
+            return 0 if has_negation else 1
+        if clean_word in negative_markers:
+            return 0 if has_negation else -1
+            
     return 0
 
 
@@ -583,7 +599,7 @@ def _build_reply_context(reply: Message | None) -> str:
         f"author_user_id: {reply_sender.user_id}",
         f"author_username: @{reply_sender.username}" if reply_sender.username else "author_username:",
         f"author_is_bot: {reply_sender.is_bot}",
-        "relation: текущий пользователь отвечает именно на это сообщение; это цитата, а не новая реплика автора цитаты.",
+        "relation: ВНИМАНИЕ: Текущий пользователь обращается ИМЕННО К ТЕБЕ (если автор цитаты — ты) или комментирует это сообщение. Это твой главный контекст.",
     ]
     if reply_media:
         lines.append(f"type: {reply_media}")

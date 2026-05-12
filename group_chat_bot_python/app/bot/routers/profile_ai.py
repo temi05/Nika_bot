@@ -69,19 +69,45 @@ def build_profile_ai_router(db: SupabaseDB, ai: AIService, bot_name: str) -> Rou
             return
         sender = get_sender_data(message)
         db.get_or_create_user(message.chat.id, sender)
-        db.store_memory(
-            message.chat.id,
-            MemoryRecord(
-                fact=f"{sender.display_name}: {fact[:500]}",
-                source="manual_memory",
-                confidence=0.98,
-                meta={"user_id": sender.user_id, "user_name": sender.display_name},
-                entity_user_id=sender.user_id,
-                entity_name=sender.display_name,
-                source_message_id=message.message_id,
-            ),
+        
+        record = MemoryRecord(
+            fact=f"{sender.display_name}: {fact[:500]}",
+            source="manual_memory",
+            confidence=0.98,
+            meta={"user_id": sender.user_id, "user_name": sender.display_name},
+            entity_user_id=sender.user_id,
+            entity_name=sender.display_name,
+            source_message_id=message.message_id,
         )
-        await message.answer("🧠 Запомнила. Лишнего вокруг этого сообщения в память не беру.")
+        
+        ok = db.store_memory(message.chat.id, record)
+        
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="❌ Забыть этот факт", callback_data=f"forget_fact_{message.message_id}")]
+        ])
+        
+        await message.answer(
+            "🧠 <b>Запомнила.</b> Лишнего вокруг этого сообщения в память не беру.",
+            reply_markup=keyboard,
+            parse_mode="HTML"
+        )
+
+    @router.callback_query(F.data.startswith("forget_fact_"))
+    async def forget_fact_callback(query: Message, bot: Bot) -> None:
+        # В aiogram 3 callback_query.message может быть разным, берем ID
+        msg_id_str = query.data.replace("forget_fact_", "")
+        try:
+            msg_id = int(msg_id_str)
+            # Удаляем по ID сообщения-источника
+            deleted = db.delete_memory_by_source_id(query.message.chat.id, msg_id)
+            if deleted:
+                await query.answer("🧹 Факт удален из памяти!", show_alert=True)
+                await query.message.edit_text("🧹 <b>Этот факт был удален из моей памяти.</b>", parse_mode="HTML")
+            else:
+                await query.answer("❌ Не нашла такой записи или она уже удалена.", show_alert=True)
+        except Exception as e:
+            print(f"Error in forget_fact_callback: {e}")
+            await query.answer("❌ Произошла ошибка при удалении.")
 
     @router.message(Command("mood"))
     async def mood_command(message: Message) -> None:
@@ -356,29 +382,43 @@ def build_profile_ai_router(db: SupabaseDB, ai: AIService, bot_name: str) -> Rou
         if sender.reputation < price:
             await message.answer(f"❌ Для ИИ-картинки нужно <b>{price}</b> 🍪. Баланс: <b>{sender.reputation}</b> 🍪", parse_mode="HTML")
             return
-        try:
-            await message.bot.send_chat_action(message.chat.id, "upload_photo")
-        except Exception:
-            pass
-        saved_nika_reference = _load_saved_nika_reference()
-        pose_references = await _download_reference_images(message)
-        reference_images = []
-        if saved_nika_reference and _wants_nika_in_image(prompt):
-            reference_images.append(saved_nika_reference)
-        reference_images.extend(pose_references)
-        image_bytes = await ai.generate_image(_build_ai_image_prompt(prompt), reference_images=reference_images)
-        if not image_bytes:
-            await message.answer("❌ Не получилось сгенерировать картинку. Печеньки не списаны.")
-            return
-        ok, balance = await _charge_after_success(sender.user_id, message.chat.id, price)
-        if not ok:
-            await message.answer("❌ Пока картинка генерировалась, печенек уже не хватило. Картинку не списываю.")
-            return
-        await message.answer_photo(
-            BufferedInputFile(image_bytes, filename="nika_ai_image.png"),
-            caption=f"🖼️ Готово. Списано <b>{price}</b> 🍪\nБаланс: <b>{balance}</b> 🍪",
-            parse_mode="HTML",
-        )
+            
+        status_msg = await message.answer("🖼️ <b>Рисую...</b> Это займет 10-20 секунд.", parse_mode="HTML")
+        
+        async def _background_task():
+            try:
+                saved_nika_reference = _load_saved_nika_reference()
+                pose_references = await _download_reference_images(message)
+                reference_images = []
+                if saved_nika_reference and _wants_nika_in_image(prompt):
+                    reference_images.append(saved_nika_reference)
+                reference_images.extend(pose_references)
+                
+                image_bytes = await ai.generate_image(_build_ai_image_prompt(prompt), reference_images=reference_images)
+                if not image_bytes:
+                    await status_msg.edit_text("❌ Не получилось сгенерировать картинку. Печеньки не списаны.")
+                    return
+                    
+                ok, balance = await _charge_after_success(sender.user_id, message.chat.id, price)
+                if not ok:
+                    await status_msg.edit_text("❌ Пока картинка генерировалась, печенек уже не хватило.")
+                    return
+                
+                await message.answer_photo(
+                    BufferedInputFile(image_bytes, filename="nika_ai_image.png"),
+                    caption=f"🖼️ Готово. Списано <b>{price}</b> 🍪\nБаланс: <b>{balance}</b> 🍪",
+                    parse_mode="HTML",
+                    reply_to_message_id=message.message_id
+                )
+                await status_msg.delete()
+            except Exception as e:
+                print(f"Error in background aiimage: {e}")
+                try:
+                    await status_msg.edit_text("❌ Произошла ошибка при генерации.")
+                except Exception:
+                    pass
+
+        asyncio.create_task(_background_task())
 
     @router.message(Command("signai", "aisign", "сигнаии"))
     async def ai_sign_command(message: Message, command: CommandObject) -> None:
@@ -400,34 +440,48 @@ def build_profile_ai_router(db: SupabaseDB, ai: AIService, bot_name: str) -> Rou
         if sender.reputation < price:
             await message.answer(f"❌ Для ИИ-сигны нужно <b>{price}</b> 🍪. Баланс: <b>{sender.reputation}</b> 🍪", parse_mode="HTML")
             return
-        try:
-            await message.bot.send_chat_action(message.chat.id, "upload_photo")
-        except Exception:
-            pass
-        safe_text = text[:120]
-        saved_nika_reference = _load_saved_nika_reference()
-        pose_references = await _download_reference_images(message)
-        reference_images = []
-        if saved_nika_reference:
-            reference_images.append(saved_nika_reference)
-        reference_images.extend(pose_references)
-        image_bytes = await ai.generate_image(_build_ai_sign_prompt(safe_text), reference_images=reference_images)
-        if not image_bytes:
-            await message.answer("❌ Не получилось сгенерировать ИИ-сигну. Печеньки не списаны.")
-            return
-        ok, balance = await _charge_after_success(sender.user_id, message.chat.id, price)
-        if not ok:
-            await message.answer("❌ Пока сигна генерировалась, печенек уже не хватило. Ничего не списано.")
-            return
-        await message.answer_photo(
-            BufferedInputFile(image_bytes, filename="nika_ai_sign.png"),
-            caption=(
-                f"✍️ ИИ-сигна готова. Списано <b>{price}</b> 🍪\n"
-                f"Баланс: <b>{balance}</b> 🍪"
-                + _reference_caption(bool(saved_nika_reference), bool(pose_references))
-            ),
-            parse_mode="HTML",
-        )
+            
+        status_msg = await message.answer("✍️ <b>Рисую сигну...</b> Это займет 10-20 секунд.", parse_mode="HTML")
+        
+        async def _background_task():
+            try:
+                safe_text = text[:120]
+                saved_nika_reference = _load_saved_nika_reference()
+                pose_references = await _download_reference_images(message)
+                reference_images = []
+                if saved_nika_reference:
+                    reference_images.append(saved_nika_reference)
+                reference_images.extend(pose_references)
+                
+                image_bytes = await ai.generate_image(_build_ai_sign_prompt(safe_text), reference_images=reference_images)
+                if not image_bytes:
+                    await status_msg.edit_text("❌ Не получилось сгенерировать ИИ-сигну. Печеньки не списаны.")
+                    return
+                    
+                ok, balance = await _charge_after_success(sender.user_id, message.chat.id, price)
+                if not ok:
+                    await status_msg.edit_text("❌ Пока сигна генерировалась, печенек уже не хватило.")
+                    return
+                    
+                await message.answer_photo(
+                    BufferedInputFile(image_bytes, filename="nika_ai_sign.png"),
+                    caption=(
+                        f"✍️ ИИ-сигна готова. Списано <b>{price}</b> 🍪\n"
+                        f"Баланс: <b>{balance}</b> 🍪"
+                        + _reference_caption(bool(saved_nika_reference), bool(pose_references))
+                    ),
+                    parse_mode="HTML",
+                    reply_to_message_id=message.message_id
+                )
+                await status_msg.delete()
+            except Exception as e:
+                print(f"Error in background signai: {e}")
+                try:
+                    await status_msg.edit_text("❌ Произошла ошибка при генерации сигны.")
+                except Exception:
+                    pass
+
+        asyncio.create_task(_background_task())
 
     @router.message(Command("setsignprice", "signprice_set"))
     async def set_sign_price_command(message: Message, command: CommandObject) -> None:

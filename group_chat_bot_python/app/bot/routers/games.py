@@ -16,22 +16,96 @@ from app.bot.routers.jail_helpers import (
     jail_user,
     parse_iso_dt,
 )
+from app.bot.routers.game_sessions import (
+    CASINO_DOUBLE_SESSIONS,
+    TOWER_SESSIONS,
+    TOWER_LOCKS,
+    DUEL_SESSIONS,
+    DICE_DUEL_SESSIONS,
+    AUTO_DROP_SESSIONS,
+    AUTO_QUIZ_SESSIONS,
+    AUTO_CLAIMED_EVENTS,
+)
 from app.utils import escape_html, get_sender_data, build_progress_bar
 
-DUEL_SESSIONS: dict[str, dict] = {}
-DICE_DUEL_SESSIONS: dict[str, dict] = {}
+
+def _parse_bet_and_choice(args: str | None) -> tuple[int | None, str | None]:
+    if not args:
+        return None, None
+    parts = args.strip().lower().split(maxsplit=1)
+    if len(parts) != 2 or not parts[0].isdigit():
+        return None, None
+    return int(parts[0]), parts[1].strip()
+
+
+def _max_game_bet(user) -> int:
+    if user.reputation <= 0:
+        return 0
+    balance_cap = max(1, int(user.reputation * 0.35))
+    return min(user.reputation, 5000, balance_cap)
+
+
+def _risk_keyboard(user_id: int, win_amount: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="🛡 +25%", callback_data=f"dice_double_safe_{user_id}_{win_amount}"),
+            InlineKeyboardButton(text="🃏 x2", callback_data=f"dice_double_double_{user_id}_{win_amount}"),
+            InlineKeyboardButton(text="🔥 x3", callback_data=f"dice_double_triple_{user_id}_{win_amount}"),
+        ]
+    ])
+
+
+async def run_mine(db: SupabaseDB, message: Message, sender, mode: str, *, edit: bool = False) -> None:
+    """Логика шахты. Вынесена на уровень модуля для доступа из general_admin."""
+    allowed, remaining = db.can_user_use_command(message.chat.id, sender.user_id, "mine", 90 * 60)
+    if not allowed:
+        text = f"⛏️ Шахта проветривается. Возвращайся через {remaining // 60 + 1} мин."
+        if edit:
+            await message.edit_text(text)
+        else:
+            await message.answer(text)
+        return
+
+    if mode == "safe":
+        reward = random.randint(12, 24)
+        xp = random.randint(6, 10)
+        title = "Безопасная выработка"
+        text = "Ты копал(а) неглубоко и стабильно вынес(ла) печеньки."
+    elif mode == "deep":
+        reward = random.randint(4, 110)
+        xp = random.randint(12, 24)
+        title = "Глубокая шахта"
+        text = "Глубоко, нервно, но без настоящего проигрыша."
+    else:
+        reward = random.randint(8, 60)
+        xp = random.randint(8, 16)
+        title = "Обычная смена"
+        text = "Нормальная глубина, нормальная добыча."
+
+    if random.random() < 0.08:
+        bonus = random.randint(20, 45)
+        reward += bonus
+        text += f"\nБонусная жила: +<b>{bonus}</b> 🍪."
+
+    updated = db.add_reputation(sender, reward) or sender
+    db.add_xp(updated, xp)
+    db.increment_stat(sender.id, "mine_plays") # Инкремент статистики шахты
+    
+    result = (
+        f"⛏️ <b>{title}</b>\n\n"
+        f"{text}\n"
+        f"Режимы: <code>safe</code>, <code>normal</code>, <code>deep</code>\n"
+        f"Награда: <b>{reward}</b> 🍪 и <b>{xp}</b> XP\n"
+        f"Баланс: <b>{updated.reputation}</b> 🍪"
+    )
+    if edit:
+        await message.edit_text(result, parse_mode="HTML")
+    else:
+        await message.answer(result, parse_mode="HTML")
+
 
 def build_games_router(db: SupabaseDB, ai: AIService, bot_name: str) -> Router:
     router = Router(name="games")
-    
-    _tower_locks = {}
-    _tower_sessions = {}
-    
-    def _max_game_bet(user) -> int:
-        if user.reputation <= 0:
-            return 0
-        balance_cap = max(1, int(user.reputation * 0.35))
-        return min(user.reputation, 5000, balance_cap)
 
     async def _deny_bad_bet(message: Message, user, bet: int, *, min_bet: int = 1) -> bool:
         if bet < min_bet:
@@ -53,17 +127,6 @@ def build_games_router(db: SupabaseDB, ai: AIService, bot_name: str) -> Router:
             )
             return True
         return False
-
-    _casino_double_sessions = {}
-
-    def _risk_keyboard(user_id: int, win_amount: int) -> InlineKeyboardMarkup:
-        return InlineKeyboardMarkup(inline_keyboard=[
-            [
-                InlineKeyboardButton(text="🛡 +25%", callback_data=f"dice_double_safe_{user_id}_{win_amount}"),
-                InlineKeyboardButton(text="🃏 x2", callback_data=f"dice_double_double_{user_id}_{win_amount}"),
-                InlineKeyboardButton(text="🔥 x3", callback_data=f"dice_double_triple_{user_id}_{win_amount}"),
-            ]
-        ])
 
     @router.message(Command("coin", "flip", "монетка"))
     async def coin_command(message: Message, command: CommandObject) -> None:
@@ -248,7 +311,7 @@ def build_games_router(db: SupabaseDB, ai: AIService, bot_name: str) -> Router:
                 reply_markup=_risk_keyboard(sender.user_id, win),
                 parse_mode="HTML",
             )
-            _casino_double_sessions[f"{message.chat.id}_{sent.message_id}"] = {
+            CASINO_DOUBLE_SESSIONS[f"{message.chat.id}_{sent.message_id}"] = {
                 "user_id": sender.user_id,
                 "win_amount": win,
             }
@@ -603,32 +666,16 @@ def build_games_router(db: SupabaseDB, ai: AIService, bot_name: str) -> Router:
             return
 
         aliases = {
-            "safe": "safe",
-            "легко": "safe",
-            "безопасно": "safe",
-            "normal": "normal",
-            "норм": "normal",
-            "обычно": "normal",
-            "deep": "deep",
-            "глубоко": "deep",
-            "глубже": "deep",
+            "safe": "safe", "легко": "safe", "безопасно": "safe",
+            "normal": "normal", "норм": "normal", "обычно": "normal",
+            "deep": "deep", "глубоко": "deep", "глубже": "deep",
         }
         mode = aliases.get(raw_mode)
         if not mode:
             await message.answer("⛏ Выбери режим: <code>/mine safe</code>, <code>/mine normal</code> или <code>/mine deep</code>", parse_mode="HTML")
             return
 
-        await _run_mine(message, sender, mode)
-
-    async def _run_mine(message: Message, sender, mode: str, *, edit: bool = False) -> None:
-        allowed, remaining = db.can_user_use_command(message.chat.id, sender.user_id, "mine", 90 * 60)
-        if not allowed:
-            text = f"⛏ Шахта проветривается. Возвращайся через {remaining // 60 + 1} мин."
-            if edit:
-                await message.edit_text(text)
-            else:
-                await message.answer(text)
-            return
+        await run_mine(db, message, sender, mode)
 
         if mode == "safe":
             reward = random.randint(12, 24)
@@ -843,7 +890,7 @@ def build_games_router(db: SupabaseDB, ai: AIService, bot_name: str) -> Router:
 
         await msg.edit_text(final_msg, reply_markup=keyboard, parse_mode="HTML")
         if win_total > 0 and not is_jackpot:
-            _casino_double_sessions[f"{message.chat.id}_{msg.message_id}"] = {
+            CASINO_DOUBLE_SESSIONS[f"{message.chat.id}_{msg.message_id}"] = {
                 "user_id": sender.user_id,
                 "win_amount": win_total,
             }
@@ -888,7 +935,7 @@ def build_games_router(db: SupabaseDB, ai: AIService, bot_name: str) -> Router:
         db.update_user(sender.id, {"reputation": sender.reputation - bet})
         sent_msg = await _show_tower(message, floor=1, bet=bet, user_id=sender.user_id, is_new=True, weather=weather, event_msg="Ты у подножия башни.")
         if sent_msg:
-            _tower_sessions[f"{message.chat.id}_{sent_msg.message_id}"] = {
+            TOWER_SESSIONS[f"{message.chat.id}_{sent_msg.message_id}"] = {
                 "user_id": sender.user_id,
                 "floor": 1,
                 "bet": bet,
@@ -897,4 +944,5 @@ def build_games_router(db: SupabaseDB, ai: AIService, bot_name: str) -> Router:
 
     
     return router
+
 

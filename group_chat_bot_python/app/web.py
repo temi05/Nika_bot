@@ -15,6 +15,7 @@ from app.bot.messages import build_messages_router
 from app.bot.rp_commands import build_rp_router
 from app.bot.feedback import build_feedback_router
 from app.bot.routers.economy import build_economy_router
+from app.bot.routers.error import build_error_router
 from app.bot.routers.games import build_games_router
 from app.bot.routers.profile_ai import build_profile_ai_router
 from app.bot.routers.chat_settings import build_chat_settings_router
@@ -43,6 +44,7 @@ def create_app() -> FastAPI:
     dispatcher.include_router(build_rp_router(db))
     dispatcher.include_router(build_feedback_router(bot, db))
     dispatcher.include_router(build_messages_router(bot, settings, db, ai_service))
+    dispatcher.include_router(build_error_router())
 
     @dispatcher.message.outer_middleware()
     async def activity_middleware(handler, event, data):

@@ -13,6 +13,7 @@ from aiogram.types import BufferedInputFile, Message, CallbackQuery, InlineKeybo
 
 from app.services.ai_service import AIService
 from app.services.supabase_db import SupabaseDB
+from app.bot.routers.games import run_mine
 from app.bot.admin import is_admin
 from app.bot.routers.jail_helpers import (
     bail_cost,
@@ -700,7 +701,7 @@ def build_general_admin_router(db: SupabaseDB, bot_name: str, ai: AIService) -> 
         if jail_remaining(db, sender):
             await query.answer("Из тюрьмы в шахту не ходят.", show_alert=True)
             return
-        await _run_mine(query.message, sender, mode, edit=True)
+        await run_mine(db, query.message, sender, mode, edit=True)
         await query.answer()
 
     @router.message(Command("drop", "cookie_drop"))
@@ -898,7 +899,7 @@ def build_general_admin_router(db: SupabaseDB, bot_name: str, ai: AIService) -> 
             return
 
         lock_key = f"{query.message.chat.id}_{query.message.message_id}"
-        session = _casino_double_sessions.get(lock_key)
+        session = CASINO_DOUBLE_SESSIONS.get(lock_key)
         if not session:
             await query.answer("⏳ Этот риск уже недоступен.", show_alert=True)
             return
@@ -914,7 +915,7 @@ def build_general_admin_router(db: SupabaseDB, bot_name: str, ai: AIService) -> 
             await query.answer("❌ На балансе уже не хватает этого выигрыша.", show_alert=True)
             return
 
-        _casino_double_sessions.pop(lock_key, None)
+        CASINO_DOUBLE_SESSIONS.pop(lock_key, None)
         
         if random.random() < risk["chance"]:
             bonus = max(1, int(win_amount * risk["bonus"]))
@@ -972,7 +973,7 @@ def build_general_admin_router(db: SupabaseDB, bot_name: str, ai: AIService) -> 
             
         now = time.time()
         lock_key = f"{query.message.chat.id}_{query.message.message_id}"
-        session = _tower_sessions.get(lock_key)
+        session = TOWER_SESSIONS.get(lock_key)
         if not session:
             await query.answer("⏳ Эта башня уже завершена или устарела.", show_alert=True)
             return
@@ -985,16 +986,16 @@ def build_general_admin_router(db: SupabaseDB, bot_name: str, ai: AIService) -> 
             await query.answer("❌ Этот ход уже неактивен.", show_alert=True)
             return
 
-        if lock_key in _tower_locks and now - _tower_locks[lock_key] < 0.8:
+        if lock_key in TOWER_LOCKS and now - TOWER_LOCKS[lock_key] < 0.8:
             await query.answer("⏳ Подожди секунду...", show_alert=False)
             return
-        _tower_locks[lock_key] = now
+        TOWER_LOCKS[lock_key] = now
 
         sender = db.get_user_by_platform_id(query.message.chat.id, original_user_id)
         if not sender: return
 
         if action == "take":
-            _tower_sessions.pop(lock_key, None)
+            TOWER_SESSIONS.pop(lock_key, None)
             multiplier = _get_tower_reward_multiplier(floor, weather)
             win = int(bet * multiplier)
             db.update_user(sender.id, {"reputation": sender.reputation + win})
@@ -1032,7 +1033,7 @@ def build_general_admin_router(db: SupabaseDB, bot_name: str, ai: AIService) -> 
                 if new_floor > 10:
                     multiplier = _get_tower_reward_multiplier(10, weather)
                     win = int(bet * multiplier)
-                    _tower_sessions.pop(lock_key, None)
+                    TOWER_SESSIONS.pop(lock_key, None)
                     db.update_user(sender.id, {"reputation": sender.reputation + win})
                     await query.message.edit_text(f"🏆 <b>ТЫ ПОКОРИЛ ВЕРШИНУ БАШНИ!</b> (x{multiplier:.1f})\n💰 Твой куш: {win} 🍪", parse_mode="HTML")
                     await query.answer("🏆 Вершина взята!")
@@ -1040,7 +1041,7 @@ def build_general_admin_router(db: SupabaseDB, bot_name: str, ai: AIService) -> 
 
                 try:
                     await _show_tower(query.message, floor=new_floor, bet=bet, user_id=original_user_id, is_new=False, weather=weather, event_msg=event_msg)
-                    _tower_sessions[lock_key]["floor"] = new_floor
+                    TOWER_SESSIONS[lock_key]["floor"] = new_floor
                     await query.answer("✅ Успешный подъем!")
                 except Exception as exc:
                     print(f"[tower:error] edit failed: {exc}")
@@ -1060,7 +1061,7 @@ def build_general_admin_router(db: SupabaseDB, bot_name: str, ai: AIService) -> 
                 if safe_win > 0:
                     db.update_user(sender.id, {"reputation": sender.reputation + safe_win})
 
-                _tower_sessions.pop(lock_key, None)
+                TOWER_SESSIONS.pop(lock_key, None)
                 await query.message.edit_text(
                     f"💀 <b>ТЫ СОРВАЛСЯ ВНИЗ!</b>\n\n"
                     f"👤 Игрок: <b>{escape_html(sender.display_name)}</b>\n"
@@ -1128,5 +1129,6 @@ def build_general_admin_router(db: SupabaseDB, bot_name: str, ai: AIService) -> 
         return msg
 
     return router
+
 
 
