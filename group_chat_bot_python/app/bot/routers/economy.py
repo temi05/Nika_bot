@@ -165,9 +165,14 @@ def build_economy_router(db: SupabaseDB, ai: AIService) -> Router:
 
     @router.message(Command("shop"))
     async def shop_command(message: Message) -> None:
+        sender = get_sender_data(message)
+        user = db.get_or_create_user(message.chat.id, sender)
+        level_cost = 1000 + (user.level * 500)
+        
         await message.answer(
             "<b>Магазин печенек</b>\n\n"
-            "1. Купить 1 уровень — <code>1200 🍪</code>\n"
+            f"1. Купить 1 уровень — <code>{level_cost} 🍪</code>\n"
+            "   <i>Цена растет с вашим уровнем!</i>\n"
             "   Команда: <code>/buy 1</code>\n\n"
             "2. Снять все предупреждения — <code>600 🍪</code>\n"
             "   Команда: <code>/buy 2</code>\n\n"
@@ -488,17 +493,23 @@ def build_economy_router(db: SupabaseDB, ai: AIService) -> Router:
             await message.answer(f"❌ У тебя нет столько печенек! Баланс: {sender.reputation}")
             return
             
-        db.update_user(sender.id, {"reputation": sender.reputation - amount})
-        db.update_user(receiver.id, {"reputation": receiver.reputation + amount})
+        success, net_amount = db.transfer_cookies(sender, receiver, amount)
+        if not success:
+            await message.answer("❌ Не удалось передать печеньки.")
+            return
+
+        tax = amount - net_amount
 
         # Генерируем умное сообщение с помощью AI
         gift_message = await ai.generate_cookie_gift_message(
             message.chat.id,
             sender.display_name,
             receiver.display_name,
-            amount,
+            net_amount,
         )
-        await message.answer(gift_message, parse_mode="HTML")
+        
+        tax_info = f"\n\n<i>Комиссия за перевод (5%): {tax} 🍪 ушли в джекпот чата.</i>"
+        await message.answer(gift_message + tax_info, parse_mode="HTML")
 
     @router.message(Command("steal"))
     async def steal_command(message: Message) -> None:

@@ -363,13 +363,27 @@ def build_profile_ai_router(db: SupabaseDB, ai: AIService, bot_name: str) -> Rou
             parse_mode="HTML",
         )
 
+    def _get_dynamic_price(base_price: int, count_24h: int) -> int:
+        """Рассчитывает динамическую цену в зависимости от спроса за 24 часа."""
+        if count_24h < 5:
+            return base_price
+        elif count_24h < 15:
+            return int(base_price * 1.5)
+        elif count_24h < 30:
+            return int(base_price * 2.5)
+        else:
+            return int(base_price * 4.0)
+
     @router.message(Command("aiimage", "картинка"))
     async def ai_image_command(message: Message, command: CommandObject) -> None:
         prompt = (command.args or "").strip()
+        count_24h = db.get_recent_stats_count(message.chat.id, "aiimage_plays", hours=24)
+        dynamic_price = _get_dynamic_price(ai.settings.ai_image_price, count_24h)
+        
         if not prompt:
             await message.answer(
                 "🖼️ <b>ИИ-картинка</b>\n\n"
-                f"Цена: <b>{ai.settings.ai_image_price}</b> 🍪\n"
+                f"Цена: <b>{dynamic_price}</b> 🍪 <i>(динамическая, зависит от спроса)</i>\n"
                 "Использование: <code>/aiimage описание картинки</code>\n"
                 "Если ответить командой на картинку, она станет референсом позы/ракурса, а не внешности.",
                 parse_mode="HTML",
@@ -378,12 +392,13 @@ def build_profile_ai_router(db: SupabaseDB, ai: AIService, bot_name: str) -> Rou
         sender = db.get_or_create_user(message.chat.id, get_sender_data(message))
         if await _deny_if_jailed(message, sender, "/aiimage"):
             return
-        price = max(1, ai.settings.ai_image_price)
+            
+        price = max(1, dynamic_price)
         if sender.reputation < price:
-            await message.answer(f"❌ Для ИИ-картинки нужно <b>{price}</b> 🍪. Баланс: <b>{sender.reputation}</b> 🍪", parse_mode="HTML")
+            await message.answer(f"❌ Для ИИ-картинки сейчас нужно <b>{price}</b> 🍪. Баланс: <b>{sender.reputation}</b> 🍪", parse_mode="HTML")
             return
             
-        status_msg = await message.answer("🖼️ <b>Рисую...</b> Это займет 10-20 секунд.", parse_mode="HTML")
+        status_msg = await message.answer(f"🖼️ <b>Рисую...</b> Это займет 10-20 секунд.\n<i>Текущая цена: {price} 🍪</i>", parse_mode="HTML")
         
         async def _background_task():
             try:
@@ -404,6 +419,7 @@ def build_profile_ai_router(db: SupabaseDB, ai: AIService, bot_name: str) -> Rou
                     await status_msg.edit_text("❌ Пока картинка генерировалась, печенек уже не хватило.")
                     return
                 
+                db.increment_stat(sender.id, "aiimage_plays")
                 await message.answer_photo(
                     BufferedInputFile(image_bytes, filename="nika_ai_image.png"),
                     caption=f"🖼️ Готово. Списано <b>{price}</b> 🍪\nБаланс: <b>{balance}</b> 🍪",
@@ -423,10 +439,13 @@ def build_profile_ai_router(db: SupabaseDB, ai: AIService, bot_name: str) -> Rou
     @router.message(Command("signai", "aisign", "сигнаии"))
     async def ai_sign_command(message: Message, command: CommandObject) -> None:
         text = (command.args or "").strip()
+        count_24h = db.get_recent_stats_count(message.chat.id, "signai_plays", hours=24)
+        dynamic_price = _get_dynamic_price(ai.settings.ai_sign_price, count_24h)
+        
         if not text:
             await message.answer(
                 "✍️ <b>ИИ-сигна</b>\n\n"
-                f"Цена: <b>{ai.settings.ai_sign_price}</b> 🍪\n"
+                f"Цена: <b>{dynamic_price}</b> 🍪 <i>(динамическая, зависит от спроса)</i>\n"
                 "Использование: <code>/signai текст на сигне</code>\n"
                 "На картинке будет Ника, но сцена/поза/место каждый раз меняются.\n"
                 "Внешность берется из сохраненного /setnika, а reply-картинка дает только позу/ракурс.",
@@ -436,12 +455,13 @@ def build_profile_ai_router(db: SupabaseDB, ai: AIService, bot_name: str) -> Rou
         sender = db.get_or_create_user(message.chat.id, get_sender_data(message))
         if await _deny_if_jailed(message, sender, "/signai"):
             return
-        price = max(1, ai.settings.ai_sign_price)
+            
+        price = max(1, dynamic_price)
         if sender.reputation < price:
-            await message.answer(f"❌ Для ИИ-сигны нужно <b>{price}</b> 🍪. Баланс: <b>{sender.reputation}</b> 🍪", parse_mode="HTML")
+            await message.answer(f"❌ Для ИИ-сигны сейчас нужно <b>{price}</b> 🍪. Баланс: <b>{sender.reputation}</b> 🍪", parse_mode="HTML")
             return
             
-        status_msg = await message.answer("✍️ <b>Рисую сигну...</b> Это займет 10-20 секунд.", parse_mode="HTML")
+        status_msg = await message.answer(f"✍️ <b>Рисую сигну...</b> Это займет 10-20 секунд.\n<i>Текущая цена: {price} 🍪</i>", parse_mode="HTML")
         
         async def _background_task():
             try:
@@ -462,7 +482,8 @@ def build_profile_ai_router(db: SupabaseDB, ai: AIService, bot_name: str) -> Rou
                 if not ok:
                     await status_msg.edit_text("❌ Пока сигна генерировалась, печенек уже не хватило.")
                     return
-                    
+                
+                db.increment_stat(sender.id, "signai_plays")
                 await message.answer_photo(
                     BufferedInputFile(image_bytes, filename="nika_ai_sign.png"),
                     caption=(

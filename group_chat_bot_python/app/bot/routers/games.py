@@ -32,8 +32,24 @@ def _parse_bet_and_choice(args: str | None) -> tuple[int | None, str | None]:
 def _max_game_bet(user) -> int:
     if user.reputation <= 0:
         return 0
+    # Базовый лимит 35% от баланса
     balance_cap = max(1, int(user.reputation * 0.35))
-    return min(user.reputation, 5000, balance_cap)
+    # Абсолютный максимум 50 000 печенек
+    return min(user.reputation, 50000, balance_cap)
+
+
+def _apply_luxury_tax(db: SupabaseDB, chat_id: int, bet: int) -> tuple[int, int]:
+    """
+    Если ставка > 5000, берем 10% налога с суммы превышения.
+    Возвращает (чистая_ставка, налог).
+    """
+    if bet <= 5000:
+        return bet, 0
+    
+    excess = bet - 5000
+    tax = int(excess * 0.10)
+    db.add_to_jackpot(chat_id, tax)
+    return bet - tax, tax
 
 
 def _risk_keyboard(user_id: int, win_amount: int) -> InlineKeyboardMarkup:
@@ -151,22 +167,28 @@ def build_games_router(db: SupabaseDB, ai: AIService, bot_name: str) -> Router:
         if sender.reputation < bet:
             await message.answer(f"❌ Не хватает печенек. Баланс: <b>{sender.reputation}</b> 🍪", parse_mode="HTML")
             return
+            
         allowed, remaining = db.can_user_use_command(message.chat.id, sender.user_id, "coin", 20)
         if not allowed:
             await message.answer(f"⏳ Монетка еще крутится. Подожди {remaining} сек.")
             return
 
+        # Налог на роскошь
+        actual_bet, luxury_tax = _apply_luxury_tax(db, message.chat.id, bet)
+        tax_note = f"\n<i>Уплачен налог на роскошь: {luxury_tax} 🍪</i>" if luxury_tax > 0 else ""
+
         player_side = aliases[choice]
         result_side = player_side if random.random() < 0.48 else ("tails" if player_side == "heads" else "heads")
         result_text = "орел" if result_side == "heads" else "решка"
+        
         if player_side == result_side:
-            win = bet * 2
+            win = actual_bet * 2
             new_balance = sender.reputation - bet + win
             db.update_user(sender.id, {"reputation": new_balance})
             await message.answer(
                 f"🪙 Выпало: <b>{result_text}</b>\n"
                 f"✅ {escape_html(sender.display_name)} выиграл <b>{win}</b> 🍪\n"
-                f"Баланс: <b>{new_balance}</b> 🍪",
+                f"Баланс: <b>{new_balance}</b> 🍪{tax_note}",
                 parse_mode="HTML",
             )
         else:
@@ -175,7 +197,7 @@ def build_games_router(db: SupabaseDB, ai: AIService, bot_name: str) -> Router:
             await message.answer(
                 f"🪙 Выпало: <b>{result_text}</b>\n"
                 f"❌ Ставка <b>{bet}</b> 🍪 сгорела.\n"
-                f"Баланс: <b>{new_balance}</b> 🍪",
+                f"Баланс: <b>{new_balance}</b> 🍪{tax_note}",
                 parse_mode="HTML",
             )
 
@@ -248,6 +270,10 @@ def build_games_router(db: SupabaseDB, ai: AIService, bot_name: str) -> Router:
             await message.answer(f"⏳ Кубики еще катятся. Подожди {remaining} сек.")
             return
 
+        # Налог на роскошь
+        actual_bet, luxury_tax = _apply_luxury_tax(db, message.chat.id, bet)
+        tax_note = f"\n<i>Уплачен налог на роскошь: {luxury_tax} 🍪</i>" if luxury_tax > 0 else ""
+
         die_1 = random.randint(1, 6)
         die_2 = random.randint(1, 6)
         total = die_1 + die_2
@@ -290,7 +316,7 @@ def build_games_router(db: SupabaseDB, ai: AIService, bot_name: str) -> Router:
         result_line = f"🎲 Выпало: <b>{die_1}</b> + <b>{die_2}</b> = <b>{total}</b>"
         extra_line = "Пара на кубиках." if is_double else ("Сумма четная." if is_even else "Сумма нечетная.")
         if won:
-            win = int(bet * multiplier)
+            win = int(actual_bet * multiplier)
             new_balance = sender.reputation - bet + win
             db.update_user(sender.id, {"reputation": new_balance})
             sent = await message.answer(
@@ -298,7 +324,7 @@ def build_games_router(db: SupabaseDB, ai: AIService, bot_name: str) -> Router:
                 f"<i>{extra_line}</i>\n\n"
                 f"✅ Ставка на <b>{labels[mode]}</b> сыграла: x{multiplier:g}\n"
                 f"Выигрыш: <b>{win}</b> 🍪\n"
-                f"Баланс: <b>{new_balance}</b> 🍪",
+                f"Баланс: <b>{new_balance}</b> 🍪{tax_note}",
                 reply_markup=_risk_keyboard(sender.user_id, win),
                 parse_mode="HTML",
             )
@@ -315,7 +341,7 @@ def build_games_router(db: SupabaseDB, ai: AIService, bot_name: str) -> Router:
             f"<i>{extra_line}</i>\n\n"
             f"❌ Ставка на <b>{labels[mode]}</b> не зашла.\n"
             f"Потеряно: <b>{bet}</b> 🍪\n"
-            f"Баланс: <b>{new_balance}</b> 🍪",
+            f"Баланс: <b>{new_balance}</b> 🍪{tax_note}",
             parse_mode="HTML",
         )
 
@@ -770,13 +796,17 @@ def build_games_router(db: SupabaseDB, ai: AIService, bot_name: str) -> Router:
             )
             return
 
-        # Налог в джекпот
+        # Налог на роскошь
+        actual_bet, luxury_tax = _apply_luxury_tax(db, message.chat.id, bet)
+        tax_note = f"\n<i>Уплачен налог на роскошь: {luxury_tax} 🍪</i>" if luxury_tax > 0 else ""
+
+        # Базовый налог в джекпот (1% от чистой ставки)
         chat_settings = db.get_chat_settings(message.chat.id)
         current_jackpot = chat_settings.casino_jackpot
-        tax = max(1, bet // 100)
+        base_tax = max(1, actual_bet // 100)
         db.update_user(sender.id, {"reputation": sender.reputation - bet})
-        db.update_chat_settings(message.chat.id, casino_jackpot=current_jackpot + tax)
-        current_jackpot += tax
+        db.add_to_jackpot(message.chat.id, base_tax)
+        current_jackpot += base_tax
 
         # Символы слотов
         symbols = ["🍒", "🍋", "🍇", "🍉", "🔔", "💎", "🎰"]
@@ -822,8 +852,8 @@ def build_games_router(db: SupabaseDB, ai: AIService, bot_name: str) -> Router:
         if r1 == r2 == r3:
             if r1 == "🎰":
                 is_jackpot = True
-                jackpot_bonus = min(current_jackpot, bet * 8)
-                win_total = int(bet * symbol_rules[r1]["triple"]) + jackpot_bonus
+                jackpot_bonus = min(current_jackpot, actual_bet * 8)
+                win_total = int(actual_bet * symbol_rules[r1]["triple"]) + jackpot_bonus
                 db.update_chat_settings(message.chat.id, casino_jackpot=500)
                 result_text = (
                     f"🌌 <b>ЛЕГЕНДАРНЫЙ ДЖЕКПОТ!!!</b>\n\n"
@@ -839,27 +869,27 @@ def build_games_router(db: SupabaseDB, ai: AIService, bot_name: str) -> Router:
                 )
             else:
                 multiplier = symbol_rules[r1]["triple"]
-                win_total = int(bet * multiplier)
+                win_total = int(actual_bet * multiplier)
                 result_text = f"✨ <b>{symbol_rules[r1]['name'].upper()}!</b> Три в ряд x{multiplier:g}!"
         elif pair_symbol:
             multiplier = symbol_rules[pair_symbol]["pair"]
-            win_total = max(1, int(bet * multiplier))
+            win_total = max(1, int(actual_bet * multiplier))
             result_text = f"🥂 <b>ПАРА: {pair_symbol}{pair_symbol}</b> {symbol_rules[pair_symbol]['name']} x{multiplier:g}"
         elif set(reels).issubset(fruit_symbols):
             # Три разных фрукта — маленький утешительный возврат
-            win_total = max(1, int(bet * 0.90))
+            win_total = max(1, int(actual_bet * 0.90))
             result_text = "🍹 <b>ФРУКТОВЫЙ МИКС!</b> Три разных фрукта — возврат x0.90"
         elif set(reels).issubset(premium_symbols):
             # Три разных дорогих — хорошая комбинация
-            win_total = int(bet * 1.50)
+            win_total = int(actual_bet * 1.50)
             result_text = "⚡ <b>ПРЕМИУМ-ЛИНИЯ!</b> Три разных дорогих символа x1.50"
         elif sum(1 for symbol in reels if symbol in premium_symbols) >= 2:
             # Два дорогих + один дешевый — частичный возврат
-            win_total = max(1, int(bet * 0.90))
+            win_total = max(1, int(actual_bet * 0.90))
             result_text = "💠 <b>ПОЧТИ ПРЕМИУМ!</b> Два дорогих символа — возврат x0.90"
         elif sum(1 for symbol in reels if symbol in fruit_symbols) >= 2:
             # Два фруктовых + один дорогой — крошки
-            win_total = max(1, int(bet * 0.85))
+            win_total = max(1, int(actual_bet * 0.85))
             result_text = "🍬 <b>СЛАДКИЙ МИКС!</b> Два фруктовых — крошки x0.85"
         else:
             win_total = 0
@@ -879,7 +909,7 @@ def build_games_router(db: SupabaseDB, ai: AIService, bot_name: str) -> Router:
             f"👤 Игрок: <b>{escape_html(sender.display_name)}</b>\n\n"
             f"<code>{final_symbols}</code>\n\n"
             f"{result_text}\n"
-            f"💰 Твой баланс: <b>{new_bal}</b> 🍪"
+            f"💰 Твой баланс: <b>{new_bal}</b> 🍪{tax_note}"
         )
         
         keyboard = None
