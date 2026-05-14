@@ -79,6 +79,8 @@ class AIService:
         self.recent_bot_replies: dict[int, deque[str]] = defaultdict(lambda: deque(maxlen=8))
         self.moods: dict[int, int] = defaultdict(lambda: 60)
         self.last_group_reply_at: dict[int, datetime] = {}
+        self.sticker_pack_name = "neuronics_pack_by_MoiStikiBot"
+        self._sticker_cache: list[Any] = []
 
     def _log(self, event: str, **kwargs: Any) -> None:
         details = " ".join(f"{key}={value!r}" for key, value in kwargs.items())
@@ -806,6 +808,62 @@ class AIService:
             {
                 "type": "function",
                 "function": {
+                    "name": "send_reaction",
+                    "description": "Поставить эмодзи-реакцию на сообщение пользователя. Используй для выражения эмоций (смех, лайк, огонь и т.д.).",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "emoji": {"type": "string", "description": "Один эмодзи для реакции (👍, ❤️, 🔥, 😂, 😮, 😢, 👏, 🌭, 🤡 и др.)"},
+                            "message_id": {"type": "integer", "description": "ID сообщения, на которое ставим реакцию. Обычно текущее."},
+                        },
+                        "required": ["emoji"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "generate_visual",
+                    "description": "Сгенерировать и отправить изображение в чат. Используй, когда хочешь что-то показать или визуализировать свою мысль.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "prompt": {"type": "string", "description": "Детальное описание того, что нужно нарисовать на английском языке."},
+                        },
+                        "required": ["prompt"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_chat_top",
+                    "description": "Посмотреть топ игроков чата по уровню (xp) или печенькам (reputation).",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "category": {"type": "string", "enum": ["xp", "reputation"], "description": "Категория топа"},
+                        },
+                        "required": ["category"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "send_dice",
+                    "description": "Отправить анимированный кубик, слот-машину, футбольный мяч и т.д. в чат. Используй для фана или решения споров.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "emoji": {"type": "string", "enum": ["🎲", "🎯", "🏀", "⚽", "🎳", "🎰"], "description": "Тип анимированного эмодзи (по умолчанию 🎲)"},
+                        },
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
                     "name": "transfer_reputation",
                     "description": "Передать печеньки (репутацию) от одного пользователя другому. Вызывай, когда пользователь просит Нику дать, перевести или подарить печеньки кому-то.",
                     "parameters": {
@@ -836,7 +894,75 @@ class AIService:
             return await self._tool_create_poll(chat_id, args)
         if tool_name == "transfer_reputation":
             return await self._tool_transfer_reputation(chat_id, sender, args)
+        if tool_name == "send_reaction":
+            return await self._tool_send_reaction(chat_id, args)
+        if tool_name == "generate_visual":
+            return await self._tool_generate_visual(chat_id, args)
+        if tool_name == "get_chat_top":
+            return self._tool_get_chat_top(chat_id, args)
+        if tool_name == "send_dice":
+            return await self._tool_send_dice(chat_id, args)
         return "Неизвестный инструмент."
+
+    async def _tool_send_reaction(self, chat_id: int, args: dict[str, Any]) -> str:
+        emoji = str(args.get("emoji") or "").strip()
+        msg_id = args.get("message_id")
+        
+        if not emoji:
+            return "Реакция не поставлена: не указан эмодзи."
+            
+        try:
+            from aiogram.types import ReactionTypeEmoji
+            await self.bot.set_message_reaction(
+                chat_id=chat_id,
+                message_id=msg_id,
+                reaction=[ReactionTypeEmoji(emoji=emoji)]
+            )
+            return f"Реакция {emoji} успешно поставлена."
+        except Exception as exc:
+            self._log("reaction_error", error=str(exc))
+            return f"Не удалось поставить реакцию: {exc}"
+
+    async def _tool_generate_visual(self, chat_id: int, args: dict[str, Any]) -> str:
+        prompt = str(args.get("prompt") or "").strip()
+        if not prompt:
+            return "Не указан промпт для рисования."
+            
+        image_bytes = await self.generate_image(prompt)
+        if not image_bytes:
+            return "Не удалось сгенерировать изображение."
+            
+        try:
+            from aiogram.types import BufferedInputFile
+            await self.bot.send_photo(
+                chat_id=chat_id,
+                photo=BufferedInputFile(image_bytes, filename="nika_art.png"),
+                caption=f"🎨 Нарисовала специально для вас по запросу: {prompt[:100]}..."
+            )
+            return "Изображение успешно сгенерировано и отправлено в чат."
+        except Exception as exc:
+            return f"Ошибка при отправке изображения: {exc}"
+
+    def _tool_get_chat_top(self, chat_id: int, args: dict[str, Any]) -> str:
+        category = str(args.get("category") or "xp").lower()
+        users = self.db.get_top_users(chat_id, limit=5, order_by=category)
+        
+        if not users:
+            return "В чате пока нет данных для топа."
+            
+        lines = [f"Топ-5 по {category}:"]
+        for idx, u in enumerate(users, start=1):
+            val = u.level if category == "xp" else u.reputation
+            lines.append(f"{idx}. {u.display_name} — {val}")
+        return "\n".join(lines)
+
+    async def _tool_send_dice(self, chat_id: int, args: dict[str, Any]) -> str:
+        emoji = str(args.get("emoji") or "🎲")
+        try:
+            await self.bot.send_dice(chat_id=chat_id, emoji=emoji)
+            return f"Анимированный эмодзи {emoji} отправлен."
+        except Exception as exc:
+            return f"Ошибка при отправке кубика: {exc}"
 
     def _tool_calls_have_valid_json(self, tool_calls: list[Any]) -> bool:
         for call in tool_calls:
@@ -1502,6 +1628,42 @@ class AIService:
                         model=fallback_model,
                         messages=retry_messages,
                         temperature=self.settings.ai_temperature,
+                        max_tokens=min(self.settings.ai_max_tokens, 140),
+                    )
+                    return self._finalize_reply(raw_text, user_text=user_text)
+                except Exception as fallback_exc:
+                    self._log("retry_empty_fallback_error", error=str(fallback_exc))
+        return ""
+                 temperature=self.settings.ai_temperature,
+                        max_tokens=min(self.settings.ai_max_tokens, 140),
+                    )
+                    return self._finalize_reply(raw_text, user_text=user_text)
+                except Exception as fallback_exc:
+                    self._log("retry_empty_fallback_error", error=str(fallback_exc))
+        return ""
+text = await self._simple_completion(
+                    model=fallback_model,
+                    messages=retry_messages,
+                    temperature=self.settings.ai_temperature,
+                    max_tokens=min(self.settings.ai_max_tokens, 140),
+                )
+                return self._finalize_reply(raw_text, user_text=user_text)
+        except Exception as e:
+            self._log("retry_empty_error", error=str(e))
+            fallback_model = self.settings.ai_fallback_model
+            if fallback_model and fallback_model != self.settings.ai_model:
+                try:
+                    raw_text = await self._simple_completion(
+                        model=fallback_model,
+                        messages=retry_messages,
+                        temperature=self.settings.ai_temperature,
+                        max_tokens=min(self.settings.ai_max_tokens, 140),
+                    )
+                    return self._finalize_reply(raw_text, user_text=user_text)
+                except Exception as fallback_exc:
+                    self._log("retry_empty_fallback_error", error=str(fallback_exc))
+        return ""
+                 temperature=self.settings.ai_temperature,
                         max_tokens=min(self.settings.ai_max_tokens, 140),
                     )
                     return self._finalize_reply(raw_text, user_text=user_text)
