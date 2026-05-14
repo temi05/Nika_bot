@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from aiogram import Bot, Router
 from aiogram.filters import Command, CommandObject
-from aiogram.types import Message
+from aiogram.types import Message, ChatPermissions
 
 from app.services.supabase_db import SupabaseDB
 from app.utils import escape_html, get_sender_data
@@ -89,6 +89,98 @@ def build_admin_router(bot: Bot, db: SupabaseDB) -> Router:
             )
         except Exception:
             await message.answer("Не удалось разбанить пользователя.")
+
+    @router.message(Command("mute"))
+    async def mute_command(message: Message, command: CommandObject) -> None:
+        sender = get_sender_data(message)
+        if not await is_admin(bot, message.chat.id, sender.user_id):
+            await message.answer("⛔ Нет прав.")
+            return
+
+        target_id: int | None = None
+        target_name = "пользователя"
+        if message.reply_to_message:
+            reply_sender = get_sender_data(message.reply_to_message)
+            target_id = reply_sender.user_id
+            target_name = reply_sender.display_name
+        elif command.args and command.args.strip().isdigit():
+            target_id = int(command.args.strip())
+            target_name = f"ID {target_id}"
+        elif command.args:
+            found = db.search_user(message.chat.id, command.args.strip())
+            if found:
+                target_id = found.user_id
+                target_name = found.display_name
+
+        if not target_id:
+            await message.answer("Используй /mute в реплае или укажи @username / ID.")
+            return
+        if await is_admin(bot, message.chat.id, target_id):
+            await message.answer("Этого пользователя нельзя мутить.")
+            return
+
+        try:
+            await bot.restrict_chat_member(
+                message.chat.id,
+                target_id,
+                permissions=ChatPermissions(can_send_messages=False),
+            )
+            await message.answer(
+                f"🤐 <b>{escape_html(sender.display_name)}</b> выдал мут <b>{escape_html(target_name)}</b>.",
+                parse_mode="HTML",
+            )
+        except Exception:
+            await message.answer("Не удалось выдать мут.")
+
+    @router.message(Command("unmute"))
+    async def unmute_command(message: Message, command: CommandObject) -> None:
+        sender = get_sender_data(message)
+        if not await is_admin(bot, message.chat.id, sender.user_id):
+            await message.answer("⛔ Нет прав.")
+            return
+
+        target_id: int | None = None
+        target_name = "пользователя"
+        if message.reply_to_message:
+            reply_sender = get_sender_data(message.reply_to_message)
+            target_id = reply_sender.user_id
+            target_name = reply_sender.display_name
+        elif command.args and command.args.strip().isdigit():
+            target_id = int(command.args.strip())
+            target_name = f"ID {target_id}"
+        elif command.args:
+            found = db.search_user(message.chat.id, command.args.strip())
+            if found:
+                target_id = found.user_id
+                target_name = found.display_name
+
+        if not target_id:
+            await message.answer("Используй /unmute в реплае или укажи @username / ID.")
+            return
+
+        try:
+            await bot.restrict_chat_member(
+                message.chat.id,
+                target_id,
+                permissions=ChatPermissions(
+                    can_send_messages=True,
+                    can_send_audios=True,
+                    can_send_documents=True,
+                    can_send_photos=True,
+                    can_send_videos=True,
+                    can_send_video_notes=True,
+                    can_send_voice_notes=True,
+                    can_send_polls=True,
+                    can_send_other_messages=True,
+                    can_add_web_page_previews=True,
+                ),
+            )
+            await message.answer(
+                f"🔊 <b>{escape_html(sender.display_name)}</b> снял мут с <b>{escape_html(target_name)}</b>.",
+                parse_mode="HTML",
+            )
+        except Exception:
+            await message.answer("Не удалось снять мут.")
 
     @router.message(Command("banword"))
     async def banword(message: Message, command: CommandObject) -> None:
