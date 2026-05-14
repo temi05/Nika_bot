@@ -1484,6 +1484,24 @@ class AIService:
             return False
         return not bool(re.search(r'(?i)type="text"', normalized))
 
+    def _extract_current_plain_text(self, user_text: str) -> str:
+        # Извлекаем текст из тега <msg> (там сам текст сообщения)
+        msg_match = re.search(r"(?is)<msg[^>]*>(.*?)</msg>", user_text)
+        if msg_match:
+            content = msg_match.group(1).strip()
+            # Проверяем, есть ли там только пустые переносы
+            if not content:
+                # Если текста нет, но это медиа, вернем тип из атрибута type
+                type_match = re.search(r'(?i)type="([^"]+)"', user_text)
+                if type_match and type_match.group(1) != "text":
+                    return f"[{type_match.group(1)}]"
+                return ""
+            return content
+            
+        if "<reply_target" in user_text:
+            return ""
+        return user_text.strip()
+
     def _extract_current_message_id(self, user_text: str) -> int | None:
         match = re.search(r'(?i)<msg[^>]*id="(\d+)"', user_text)
         if match:
