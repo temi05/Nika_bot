@@ -950,6 +950,37 @@ class AIService:
         except Exception as exc:
             return f"Ошибка при отправке кубика: {exc}"
 
+    async def _tool_send_sticker(self, chat_id: int, args: dict[str, Any]) -> str:
+        emoji_hint = str(args.get("emoji_hint") or "").strip()
+        
+        try:
+            # Обновляем кэш стикеров, если он пуст
+            if not self._sticker_cache:
+                sticker_set = await self.bot.get_sticker_set(self.sticker_pack_name)
+                self._sticker_cache = sticker_set.stickers
+
+            if not self._sticker_cache:
+                return "В стикерпаке нет стикеров."
+
+            # Ищем стикер по эмодзи
+            target_sticker = None
+            if emoji_hint:
+                # Пытаемся найти точное совпадение или вхождение эмодзи
+                for s in self._sticker_cache:
+                    if emoji_hint in (s.emoji or ""):
+                        target_sticker = s
+                        break
+            
+            # Если не нашли по эмодзи, берем случайный
+            if not target_sticker:
+                target_sticker = random.choice(self._sticker_cache)
+
+            await self.bot.send_sticker(chat_id=chat_id, sticker=target_sticker.file_id)
+            return f"Стикер {target_sticker.emoji} из пака {self.sticker_pack_name} отправлен."
+        except Exception as exc:
+            self._log("sticker_error", error=str(exc))
+            return f"Не удалось отправить стикер: {exc}"
+
     def _tool_calls_have_valid_json(self, tool_calls: list[Any]) -> bool:
         for call in tool_calls:
             try:
@@ -1453,43 +1484,11 @@ class AIService:
             return False
         return not bool(re.search(r'(?i)type="text"', normalized))
 
-    def _extract_structured_block_field(self, block: str, field: str) -> str | None:
-        lines = block.splitlines()
-        prefix = f"{field}:"
-        for index, line in enumerate(lines):
-            if not line.lower().startswith(prefix.lower()):
-                continue
-
-            value = line[len(prefix) :].strip()
-            if value:
-                return value
-
-            collected: list[str] = []
-            for next_line in lines[index + 1 :]:
-                if re.match(r"^[a-z_]+:\s*", next_line, flags=re.IGNORECASE):
-                    break
-                collected.append(next_line)
-            joined = "\n".join(collected).strip()
-            return joined or None
+    def _extract_current_message_id(self, user_text: str) -> int | None:
+        match = re.search(r'(?i)<msg[^>]*id="(\d+)"', user_text)
+        if match:
+            return int(match.group(1))
         return None
-
-    def _extract_current_plain_text(self, user_text: str) -> str:
-        current_match = re.search(r"(?is)<current_message>\s*(.*?)\s*</current_message>", user_text)
-        if current_match:
-            current_block = current_match.group(1)
-            caption = self._extract_structured_block_field(current_block, "caption")
-            if caption:
-                return caption.strip()
-            text = self._extract_structured_block_field(current_block, "text")
-            if text:
-                return text.strip()
-            media_type = self._extract_structured_block_field(current_block, "type")
-            if media_type:
-                return f"[{media_type.strip()}]"
-            return ""
-        if "<reply_context>" in user_text:
-            return ""
-        return user_text.strip()
 
     def _remember_bot_reply(self, chat_id: int, reply: str) -> None:
         normalized = self._normalize_reply_key(reply)
@@ -1612,49 +1611,6 @@ class AIService:
                         model=fallback_model,
                         messages=retry_messages,
                         temperature=self.settings.ai_temperature,
-                        max_tokens=min(self.settings.ai_max_tokens, 140),
-                    )
-                    return self._finalize_reply(raw_text, user_text=user_text)
-                except Exception as fallback_exc:
-                    self._log("retry_empty_fallback_error", error=str(fallback_exc))
-        return ""
-                 temperature=self.settings.ai_temperature,
-                        max_tokens=min(self.settings.ai_max_tokens, 140),
-                    )
-                    return self._finalize_reply(raw_text, user_text=user_text)
-                except Exception as fallback_exc:
-                    self._log("retry_empty_fallback_error", error=str(fallback_exc))
-        return ""
-text = await self._simple_completion(
-                    model=fallback_model,
-                    messages=retry_messages,
-                    temperature=self.settings.ai_temperature,
-                    max_tokens=min(self.settings.ai_max_tokens, 140),
-                )
-                return self._finalize_reply(raw_text, user_text=user_text)
-        except Exception as e:
-            self._log("retry_empty_error", error=str(e))
-            fallback_model = self.settings.ai_fallback_model
-            if fallback_model and fallback_model != self.settings.ai_model:
-                try:
-                    raw_text = await self._simple_completion(
-                        model=fallback_model,
-                        messages=retry_messages,
-                        temperature=self.settings.ai_temperature,
-                        max_tokens=min(self.settings.ai_max_tokens, 140),
-                    )
-                    return self._finalize_reply(raw_text, user_text=user_text)
-                except Exception as fallback_exc:
-                    self._log("retry_empty_fallback_error", error=str(fallback_exc))
-        return ""
-                 temperature=self.settings.ai_temperature,
-                        max_tokens=min(self.settings.ai_max_tokens, 140),
-                    )
-                    return self._finalize_reply(raw_text, user_text=user_text)
-                except Exception as fallback_exc:
-                    self._log("retry_empty_fallback_error", error=str(fallback_exc))
-        return ""
-ngs.ai_temperature,
                         max_tokens=min(self.settings.ai_max_tokens, 140),
                     )
                     return self._finalize_reply(raw_text, user_text=user_text)
