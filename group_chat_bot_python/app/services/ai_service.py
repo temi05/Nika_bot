@@ -92,22 +92,16 @@ class AIService:
         self._log("remember", chat_id=chat_id, sender=sender.display_name, text=rendered[:160])
 
     def _render_chat_buffer_line(self, sender: Sender, text: str) -> str:
-        identity = f"{sender.display_name} (user_id={sender.user_id})"
-        message = self._summarize_for_history(text)
-        
-        # Пытаемся вытянуть автора, на чье сообщение отвечают (если текст структурирован)
-        reply_author = self._extract_reply_author(text)
-        reply_note = f" [REPLY_TO: {reply_author}]" if reply_author else ""
-        
-        return f"{identity}{reply_note}: {message}"
+        # text - это то, что мы передаем в remember_message (ai_input_text)
+        # Оно уже в XML формате. Просто возвращаем его, но убираем лишние переносы
+        return re.sub(r"\n+", " ", text.strip())
 
     def _extract_reply_author(self, text: str) -> str | None:
-        """Извлекает имя автора из <reply_context>, если оно там есть."""
-        match = re.search(r"(?is)<reply_context>.*?author_name:\s*(.*?)\n", text)
+        """Извлекает имя автора из <reply_target>, если оно там есть."""
+        match = re.search(r'(?is)<reply_target[^>]*author="([^"]+)"', text)
         if match:
             author = match.group(1).strip()
-            # Пытаемся также достать user_id для полноты
-            id_match = re.search(r"(?is)<reply_context>.*?author_user_id:\s*(\d+)", text)
+            id_match = re.search(r'(?is)<reply_target[^>]*user_id="(\d+)"', text)
             if id_match:
                 return f"{author} (user_id={id_match.group(1)})"
             return author
@@ -586,16 +580,10 @@ class AIService:
             return []
 
     def _extract_current_message_id(self, user_text: str) -> int | None:
-        current_match = re.search(r"(?is)<current_message>\s*(.*?)\s*</current_message>", user_text)
-        if not current_match:
-            return None
-        value = self._extract_structured_block_field(current_match.group(1), "message_id")
-        if not value:
-            return None
-        try:
-            return int(value)
-        except ValueError:
-            return None
+        match = re.search(r'(?i)<msg[^>]*id="(\d+)"', user_text)
+        if match:
+            return int(match.group(1))
+        return None
 
     def _build_generation_context(
         self,
@@ -610,18 +598,16 @@ class AIService:
     ) -> str:
         history_block = self._render_history_with_reply_chains(history) if history else "Недавней истории нет."
         addressed_to_bot = is_private_chat or reply_to_bot or mentioned
-        plain = plain_user_text.strip() if plain_user_text.strip() else "[медиа без текста]"
 
         return "\n".join(
             [
                 "<dialogue_input>",
                 "<attribution_rules>",
-                "- ВАЖНО: Если есть блок <reply_context>, текущее сообщение — это ПРЯМОЙ ОТВЕТ на него.",
-                "- Твой ответ должен быть логически связан с текстом в <reply_context>, если он есть.",
-                "- Строки в <recent_messages> имеют пометку [REPLY_TO: ...], если это были ответы. Используй это для отслеживания нити диалога.",
-                "- Каждая строка в <recent_messages> принадлежит только автору слева от двоеточия.",
-                "- user_id — уникальный ключ пользователя.",
-                "- Не путай отправителя и автора цитаты в <reply_context>.",
+                "- ВАЖНО: Диалог размечен тегами <msg>.",
+                "- Атрибуты: author (имя), user_id, type (тип), reply_to (на кого ответили), forwarded.",
+                "- Если есть блок <reply_target>, текущее сообщение (<current_message>) — это ПРЯМОЙ ОТВЕТ на него.",
+                "- Твой ответ должен быть логически связан с текстом в <reply_target>, если он есть.",
+                "- Не путай отправителя и автора цитаты в <reply_target>.",
                 "</attribution_rules>",
                 "<recent_messages>",
                 history_block,
@@ -632,7 +618,7 @@ class AIService:
                 f"addressed_to_bot: {addressed_to_bot}",
                 f"reply_to_bot: {reply_to_bot}",
                 f"mentioned_bot: {mentioned}",
-                f"is_reply: {'yes' if '<reply_context>' in user_text else 'no'}",
+                f"is_reply: {'yes' if '<reply_target>' in user_text else 'no'}",
                 "message_payload:",
                 user_text,
                 "</current_request>",
@@ -1256,15 +1242,13 @@ class AIService:
             return True
 
         bad_markers = (
-            "<reply_context>",
-            "<current_message>",
-            "reply_message_id:",
-            "author:",
-            "author_name:",
-            "author_user_id:",
-            "type:",
-            "text:",
-            "caption:",
+            "<reply_target",
+            "<msg",
+            "</msg>",
+            "reply_to=",
+            "author=",
+            "user_id=",
+            "type=",
         )
         joined = " ".join(options).casefold()
         if any(marker in joined for marker in bad_markers):
@@ -1465,9 +1449,9 @@ class AIService:
         normalized = user_text.strip().lower()
         if normalized.startswith("[media:"):
             return True
-        if "<current_message>" not in normalized:
+        if "<msg" not in normalized:
             return False
-        return not bool(re.search(r"(?m)^type:\s*text\s*$", normalized))
+        return not bool(re.search(r'(?i)type="text"', normalized))
 
     def _extract_structured_block_field(self, block: str, field: str) -> str | None:
         lines = block.splitlines()
@@ -1664,6 +1648,13 @@ text = await self._simple_completion(
                     self._log("retry_empty_fallback_error", error=str(fallback_exc))
         return ""
                  temperature=self.settings.ai_temperature,
+                        max_tokens=min(self.settings.ai_max_tokens, 140),
+                    )
+                    return self._finalize_reply(raw_text, user_text=user_text)
+                except Exception as fallback_exc:
+                    self._log("retry_empty_fallback_error", error=str(fallback_exc))
+        return ""
+ngs.ai_temperature,
                         max_tokens=min(self.settings.ai_max_tokens, 140),
                     )
                     return self._finalize_reply(raw_text, user_text=user_text)

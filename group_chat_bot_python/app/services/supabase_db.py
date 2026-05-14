@@ -864,7 +864,7 @@ class SupabaseDB:
             sname = str(row.get("sender_name") or "").strip()
             uid = int(row.get("user_id") or 0)
             if mid and sname:
-                id_to_name[mid] = f"{sname} (user_id={uid})"
+                id_to_name[mid] = f"{sname}"
 
         lines: list[str] = []
         for row in reversed(response.data):
@@ -885,20 +885,19 @@ class SupabaseDB:
             message_type = str(row.get("message_type") or "text").strip()
             reply_id = row.get("reply_to_message_id")
 
-            # Раскрываем reply_to в читаемое имя автора
+            # Формируем XML-like формат для лучшего понимания ИИ
+            reply_attr = ""
             if reply_id:
                 reply_author = id_to_name.get(int(reply_id))
                 if reply_author:
-                    reply_note = f" ↩ ответ_на=[{reply_author}]"
+                    reply_attr = f' reply_to="{reply_author}"'
                 else:
-                    reply_note = f" ↩ ответ_на=[msg_id={reply_id}]"
-            else:
-                reply_note = ""
+                    reply_attr = f' reply_to_id="{reply_id}"'
 
-            type_note = "" if message_type in ("text", "bot_reply") else f" [{message_type}]"
-            lines.append(f"{sender_name} (user_id={user_id}, msg={message_id}{type_note}){reply_note}: {raw_text[:900]}")
+            lines.append(f'<msg id="{message_id}" author="{sender_name}" user_id="{user_id}" type="{message_type}"{reply_attr}>{raw_text[:900]}</msg>')
             if len(lines) >= safe_limit:
                 break
+
         return lines
 
 

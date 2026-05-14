@@ -557,31 +557,16 @@ def _build_ai_input_text(message: Message, raw_text: str) -> str:
     media = _describe_message_media(message)
     sender = get_sender_data(message)
 
-    base_lines = [
-        "<current_message>",
-        f"message_id: {message.message_id}",
-        f"author_name: {sender.display_name}",
-        f"author_user_id: {sender.user_id}",
-        f"author_username: @{sender.username}" if sender.username else "author_username:",
-        f"author_is_bot: {sender.is_bot}",
-    ]
+    is_forwarded = getattr(message, "forward_date", None) is not None
+    forward_note = ' forwarded="true"' if is_forwarded else ""
 
     if media:
-        lines = [
-            *base_lines,
-            f"type: {media}",
-            "note: это медиа-сообщение от author_name, не обычный текст; учитывай тип медиа и подпись, если она есть.",
-        ]
-        if text:
-            lines.append("caption:")
-            lines.append(text)
-        lines.append("</current_message>")
-        return "\n".join(lines)
+        return f'<msg id="{message.message_id}" author="{sender.display_name}" user_id="{sender.user_id}" type="{media}"{forward_note}>\n{text}\n</msg>'
 
     if not text:
         return ""
 
-    return "\n".join([*base_lines, "type: text", "text:", text, "</current_message>"])
+    return f'<msg id="{message.message_id}" author="{sender.display_name}" user_id="{sender.user_id}" type="text"{forward_note}>\n{text}\n</msg>'
 
 
 def _build_reply_context(reply: Message | None) -> str:
@@ -591,31 +576,9 @@ def _build_reply_context(reply: Message | None) -> str:
     reply_sender = get_sender_data(reply)
     reply_text = (reply.text or reply.caption or "").strip()
     reply_media = _describe_message_media(reply)
+    media_type = reply_media if reply_media else "text"
 
-    lines = [
-        "<reply_context>",
-        f"reply_message_id: {reply.message_id}",
-        f"author_name: {reply_sender.display_name}",
-        f"author_user_id: {reply_sender.user_id}",
-        f"author_username: @{reply_sender.username}" if reply_sender.username else "author_username:",
-        f"author_is_bot: {reply_sender.is_bot}",
-        "relation: ВНИМАНИЕ: Текущий пользователь обращается ИМЕННО К ТЕБЕ (если автор цитаты — ты) или комментирует это сообщение. Это твой главный контекст.",
-    ]
-    if reply_media:
-        lines.append(f"type: {reply_media}")
-        lines.append("note: пользователь отвечает именно на это медиа-сообщение.")
-        if reply_text:
-            lines.append("caption:")
-            lines.append(reply_text[:700])
-    elif reply_text:
-        lines.append("type: text")
-        lines.append("text:")
-        lines.append(reply_text[:700])
-    else:
-        lines.append("type: unknown")
-        lines.append("note: пользователь ответил на сообщение без доступного текста.")
-    lines.append("</reply_context>")
-    return "\n".join(lines)
+    return f'<reply_target id="{reply.message_id}" author="{reply_sender.display_name}" user_id="{reply_sender.user_id}" type="{media_type}">\n{reply_text[:700]}\n</reply_target>'
 
 
 def _describe_message_media(message: Message) -> str:
