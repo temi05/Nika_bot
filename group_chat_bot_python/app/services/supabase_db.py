@@ -1240,7 +1240,11 @@ class SupabaseDB:
         if response and response.data:
             # Сбрасываем кэш пользователя, так как у него появились новые бейджи
             self._user_cache.clear()
-            return response.data # Вернет инфо об ачивке, если она была выдана
+            # RPC может вернуть список из одного элемента или просто объект
+            data = response.data
+            if isinstance(data, list) and len(data) > 0:
+                return data[0]
+            return data if isinstance(data, dict) else None
         return None
 
     def check_and_award_achievements(self, user: ChatUser) -> list[dict[str, Any]]:

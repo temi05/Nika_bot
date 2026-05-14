@@ -52,10 +52,15 @@ def build_economy_router(db: SupabaseDB, ai: AIService) -> Router:
         new_achievements = db.check_and_award_achievements(target)
         if new_achievements:
             for ach in new_achievements:
+                # Защита от отсутствующих полей
+                icon = ach.get('icon', '🏆')
+                title = ach.get('title', 'Достижение')
+                desc = ach.get('description', 'Описание отсутствует')
+                
                 await message.answer(
                     f"🎊 <b>Новое достижение!</b>\n"
-                    f"{ach['icon']} <b>{ach['title']}</b>\n"
-                    f"└ <i>{ach['description']}</i>",
+                    f"{icon} <b>{title}</b>\n"
+                    f"└ <i>{desc}</i>",
                     parse_mode="HTML"
                 )
         
