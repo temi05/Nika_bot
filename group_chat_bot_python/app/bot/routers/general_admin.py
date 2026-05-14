@@ -14,8 +14,8 @@ from aiogram.exceptions import TelegramBadRequest
 
 from app.services.ai_service import AIService
 from app.services.supabase_db import SupabaseDB
-from app.bot.routers.games import run_mine
 from app.bot.admin import is_admin
+
 from app.bot.routers.jail_helpers import (
     bail_cost,
     deny_if_jailed,
@@ -704,7 +704,8 @@ def build_general_admin_router(db: SupabaseDB, bot_name: str, ai: AIService) -> 
         if jail_remaining(db, sender):
             await query.answer("Из тюрьмы в шахту не ходят.", show_alert=True)
             return
-        await run_mine(db, query.message, sender, mode, edit=True)
+        await game_sessions.run_mine(db, query.message, sender, mode, edit=True)
+
         await query.answer()
 
     @router.message(Command("drop", "cookie_drop"))

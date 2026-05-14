@@ -24,6 +24,9 @@ def _max_game_bet(user) -> int:
     return min(user.reputation, 15000, balance_cap)
 
 
+
+
+
 def build_games_router(db: SupabaseDB, ai: AIService, bot_name: str) -> Router:
     router = Router(name="games")
 
