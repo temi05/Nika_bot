@@ -329,8 +329,4 @@ def _personality_profile(mode: str) -> dict[str, str]:
         },
     }
     return profiles.get(normalized, profiles["hard"])
-�ово всегда за тобой.",
-            "toxicity_guardrail": "Можешь быть ядовитой, но делай это стильно и умно.",
-        },
-    }
-    return profiles.get(normalized, profiles["hard"])
+
