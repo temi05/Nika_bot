@@ -284,8 +284,10 @@ class SupabaseDB:
         if now - user.last_message_time < 60:
             return user, False
 
-        gained = random.randint(15, 25)
-        xp = user.xp + gained
+        gained_xp = random.randint(15, 25)
+        gained_rep = random.randint(1, 3)
+        xp = user.xp + gained_xp
+        reputation = user.reputation + gained_rep
         level = user.level
         level_up = False
         while xp >= self.get_next_level_xp(level):
@@ -306,7 +308,7 @@ class SupabaseDB:
 
         updated = self.update_user(
             user.id,
-            {"xp": xp, "level": level, "last_message_time": now},
+            {"xp": xp, "level": level, "reputation": reputation, "last_message_time": now},
         )
         return updated, level_up
 
@@ -684,8 +686,8 @@ class SupabaseDB:
         if amount <= 0 or sender.reputation < amount or sender.user_id == receiver.user_id:
             return False, 0
             
-        # Налог 5% на перевод, минимум 1 печенька
-        tax = max(1, int(amount * 0.05))
+        # Налог 15% на перевод (увеличен для борьбы с инфляцией и RMT), минимум 1 печенька
+        tax = max(1, int(amount * 0.15))
         net_amount = amount - tax
         
         self.update_user(sender.id, {"reputation": sender.reputation - amount})

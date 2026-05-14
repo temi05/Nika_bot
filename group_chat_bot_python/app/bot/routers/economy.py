@@ -177,18 +177,13 @@ def build_economy_router(db: SupabaseDB, ai: AIService) -> Router:
             "2. Снять все предупреждения — <code>600 🍪</code>\n"
             "   Команда: <code>/buy 2</code>\n\n"
             f"3. ИИ-сигна — <code>{ai.settings.ai_sign_price} 🍪</code>\n"
-            "   Команда: <code>/signai текст на сигне</code>\n"
-            "   На сигне будет Ника в случайной позе/локации\n\n"
+            "   Команда: <code>/signai текст на сигне</code>\n\n"
             f"4. ИИ-картинка — <code>{ai.settings.ai_image_price} 🍪</code>\n"
             "   Команда: <code>/aiimage описание картинки</code>\n\n"
-            f"5. Сигна от человека — цена автора, минимум <code>{ai.settings.human_sign_min_price} 🍪</code>\n"
-            "   Базовая цена: <code>/setsignprice сумма</code>\n"
-            "   Тариф: <code>/setsignprice название цена описание</code>\n"
-            "   Цены: ответь человеку <code>/signprice</code>\n"
-            "   Заказ: ответь человеку <code>/signreq текст</code> или <code>/signreq # текст</code>\n"
-            "   На human-сигне должен быть автор, у которого заказали\n"
-            "   Мои заказы: <code>/signorders</code>, <code>/signorders мои</code>\n\n"
-            "<i>Основной стабильный доход — /daily, активность и редкие чат-события. Мини-игры нужны для риска, а не бесконечного фарма.</i>",
+            "⚠️ <b>ВНИМАНИЕ ОТ НИКИ:</b>\n"
+            "<i>«Я КАТЕГОРИЧЕСКИ запрещаю покупку или продажу печенек за реальные деньги! "
+            "Если я узнаю о таком — бан прилетит мгновенно и навсегда. Играйте честно!»</i>\n\n"
+            "<i>Основной стабильный доход — /daily, активность и редкие чат-события. Мини-игры отключены для борьбы со спамом и инфляцией.</i>",
             parse_mode="HTML",
         )
 
@@ -508,7 +503,7 @@ def build_economy_router(db: SupabaseDB, ai: AIService) -> Router:
             net_amount,
         )
         
-        tax_info = f"\n\n<i>Комиссия за перевод (5%): {tax} 🍪 ушли в джекпот чата.</i>"
+        tax_info = f"\n\n<i>Комиссия за перевод (15%): {tax} 🍪 ушли в джекпот чата.</i>"
         await message.answer(gift_message + tax_info, parse_mode="HTML")
 
     @router.message(Command("steal"))
