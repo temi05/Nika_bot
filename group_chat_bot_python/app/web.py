@@ -248,6 +248,9 @@ def create_app() -> FastAPI:
             payload = await request.json()
             if payload.get("message_reaction"):
                 await handle_message_reaction(payload["message_reaction"], db)
+            
+            if payload.get("poll_answer"):
+                await handle_poll_answer(payload["poll_answer"], db)
 
             update = Update.model_validate(payload, context={"bot": bot})
             await dispatcher.feed_update(bot, update)
@@ -284,6 +287,54 @@ async def handle_message_reaction(payload: dict, db: SupabaseDB) -> None:
     if not author:
         return
     db.update_user(author.id, {"reputation": author.reputation + delta})
+
+
+def _reaction_score(reactions: list[dict]) -> int:
+    if not reactions:
+        return 0
+    emoji = reactions[0].get("emoji")
+    if emoji in {"👎", "💩", "🤮"}:
+        return -1
+    return 1 if emoji else 0
+
+    if not poll_data:
+        return
+
+    chat_id = poll_data["chat_id"]
+    question = poll_data["question"]
+    options = poll_data["options"]
+    
+    # Собираем названия выбранных вариантов
+    selected_options = []
+    for idx in option_ids:
+        if 0 <= idx < len(options):
+            selected_options.append(options[idx])
+    
+    if not selected_options:
+        return
+
+    # Формируем Sender объект для логов
+    from app.models import Sender
+    sender = Sender(
+        user_id=user_id,
+        first_name=user_data.get("first_name", "User"),
+        last_name=user_data.get("last_name"),
+        username=user_data.get("username"),
+        is_bot=False
+    )
+
+    options_text = ", ".join(selected_options)
+    log_text = f"[ГОЛОС] Проголосовал(а) за '{options_text}' в опросе: {question}"
+    
+    # Сохраняем в контекст сообщений как системное событие от пользователя
+    # Используем отрицательный message_id или 0, чтобы не конфликтовать с реальными сообщениями
+    db.store_message_context(
+        chat_id=chat_id,
+        message_id=int(time.time() * 1000) % 1000000000, # Генерируем уникальный ID для лога
+        sender=sender,
+        text=log_text,
+        message_type="poll_vote"
+    )
 
 
 def _reaction_score(reactions: list[dict]) -> int:

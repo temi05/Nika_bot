@@ -504,6 +504,14 @@ class AIService:
                     continue
 
                 raw_text = self._coerce_model_content(message.content)
+                
+                # Если ИИ вызвал инструмент и не выдал текста - это нормально, не считаем это ошибкой
+                if not raw_text and tool_calls:
+                    self._log("only_tool_reply", chat_id=chat_id, tools=len(tool_calls))
+                    # Помечаем, что мы ответили (чтобы кулдаун работал)
+                    self._mark_group_reply(chat_id, is_private_chat=is_private_chat)
+                    return "" # Возвращаем пустую строку, обработчик в messages.py должен это понять как "успех без текста"
+
                 content = self._finalize_reply(raw_text, user_text=user_text)
                 
                 if not content:
@@ -1215,13 +1223,21 @@ class AIService:
             return "Опрос отменен: варианты похожи на системный мусор."
 
         try:
-            await self.bot.send_poll(
+            sent_msg = await self.bot.send_poll(
                 chat_id=chat_id,
                 question=question,
                 options=safe_options[:10],
                 is_anonymous=is_anonymous,
                 allows_multiple_answers=allows_multiple_answers,
             )
+            # Регистрируем опрос, чтобы отслеживать голоса
+            if sent_msg.poll:
+                self.db.register_poll(
+                    poll_id=sent_msg.poll.id,
+                    chat_id=chat_id,
+                    question=question,
+                    options=safe_options[:10]
+                )
             return "Опрос успешно создан и отправлен в чат."
         except Exception as exc:
             return f"Ошибка API Telegram при создании опроса: {exc}"

@@ -32,6 +32,7 @@ class SupabaseDB:
         self.active_chats: dict[int, float] = {}
         self.pending_verifications: dict[int, VerificationChallenge] = {}
         self.last_birthday_check: dict[int, str] = {}
+        self.poll_authors: dict[str, dict[str, Any]] = {}
         self._rich_message_logs_supported: bool | None = None
         self._knowledge_entities_supported: bool | None = None
         
@@ -764,6 +765,19 @@ class SupabaseDB:
             fallback=None,
             context=f"store_message_author chat_id={chat_id} message_id={message_id}",
         )
+
+    def register_poll(self, poll_id: str, chat_id: int, question: str, options: list[str]) -> None:
+        """Регистрирует опрос для последующего отслеживания голосов."""
+        # Можно хранить в оперативной памяти (сбросится при перезагрузке) 
+        # или в новой таблице. Для начала используем кэш.
+        self.poll_authors[poll_id] = {
+            "chat_id": chat_id,
+            "question": question,
+            "options": options
+        }
+
+    def get_poll_data(self, poll_id: str) -> dict[str, Any] | None:
+        return self.poll_authors.get(poll_id)
 
     def store_message_context(
         self,

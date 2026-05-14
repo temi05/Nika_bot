@@ -357,19 +357,24 @@ def build_messages_router(bot: Bot, settings: Settings, db: SupabaseDB, ai: AISe
                         reply = "Ой, что-то пошло не так в моих схемах. Давай попробуем позже."
                 print(f"🤖 [AI] Generation finished. Reply length: {len(reply) if reply else 0}")
             
-            if should_reply and not reply:
-                print("⚠️ [AI] Empty reply, using fallback.")
+            if should_reply and reply is None:
+                print("⚠️ [AI] Generation failed (None), using fallback.")
                 reply = "Я что-то задумалась и потеряла нить разговора... Можешь повторить?"
 
-            if reply:
-                print(f"✉️ [AI] Sending reply to chat {message.chat.id}...")
-                bot_sender = Sender(
-                    user_id=bot_id or 0,
-                    first_name=settings.bot_name,
-                    username=bot_username,
-                    is_bot=True,
-                )
-                await _send_ai_reply(bot, message, reply, db=db, bot_sender=bot_sender)
+            if reply is not None:
+                # Если ответ пустой (но не None), значит ИИ отработал только инструментами (стикер, реакция и т.д.)
+                # Это нормальное поведение.
+                if reply.strip() == "":
+                    print("✉️ [AI] Tool-only action performed, skipping text reply.")
+                else:
+                    print(f"✉️ [AI] Sending reply to chat {message.chat.id}...")
+                    bot_sender = Sender(
+                        user_id=bot_id or 0,
+                        first_name=settings.bot_name,
+                        username=bot_username,
+                        is_bot=True,
+                    )
+                    await _send_ai_reply(bot, message, reply, db=db, bot_sender=bot_sender)
 
     return router
 
