@@ -870,6 +870,53 @@ class AIService:
                     },
                 },
             },
+            {
+                "type": "function",
+                "function": {
+                    "name": "remember_user_fact",
+                    "description": "Запомнить важный факт о пользователе (имя, хобби, предпочтения, день рождения и т.д.) в базу данных для долговременной памяти.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "target_name": {"type": "string", "description": "Имя пользователя или @username, о ком факт"},
+                            "fact": {"type": "string", "description": "Сам факт (например: 'Обожает играть в Доту', 'День рождения 15 сентября')"}
+                        },
+                        "required": ["target_name", "fact"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "send_sticker",
+                    "description": "Отправить стикер из своего пака в чат для выражения эмоции (сарказм, смех, гнев, умиление и т.д.).",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "emoji_hint": {
+                                "type": "string",
+                                "description": "Смысловой эмодзи (например: 😂, 🤡, 😎, 😡), чтобы подобрать подходящий стикер."
+                            }
+                        }
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "flip_coin_decide",
+                    "description": "Бросить монетку для принятия случайного решения (Орел/Решка, Да/Нет). Используй для разрешения споров или когда просят случайный выбор.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "question": {
+                                "type": "string",
+                                "description": "Суть спора или вопрос, на который бросается монетка (необязательно)."
+                            }
+                        }
+                    }
+                }
+            },
         ]
 
     async def _run_tool_call(self, chat_id: int, sender: Sender, caller_is_admin: bool, tool_name: str, raw_arguments: str) -> str:
@@ -878,6 +925,14 @@ class AIService:
         except json.JSONDecodeError:
             return "Системная ошибка: не смогла разобрать аргументы."
 
+        if tool_name == "remember_user_fact":
+            args["action"] = "add_note"
+            args["content"] = args.pop("fact", "")
+            return self._tool_manage_user_profile(chat_id, sender, args)
+        if tool_name == "send_sticker":
+            return await self._tool_send_sticker(chat_id, args)
+        if tool_name == "flip_coin_decide":
+            return await self._tool_flip_coin_decide(chat_id, args)
         if tool_name == "user_lookup":
             return self._tool_user_lookup(chat_id, sender, args)
         if tool_name == "manage_user_profile":
@@ -918,6 +973,10 @@ class AIService:
             return f"Не удалось поставить реакцию: {exc}"
 
     async def _tool_generate_visual(self, chat_id: int, args: dict[str, Any]) -> str:
+        mood = self.moods.get(chat_id, 60)
+        if mood < 35:
+            return f"Отклонено: У Ники отвратительное настроение ({mood}/100), она наотрез отказывается рисовать для вас или выполнять ваши капризы. Пусть её сначала кто-то задобрит теплыми словами или печеньками!"
+
         prompt = str(args.get("prompt") or "").strip()
         if not prompt:
             return "Не указан промпт для рисования."
@@ -957,6 +1016,22 @@ class AIService:
             return f"Анимированный эмодзи {emoji} отправлен."
         except Exception as exc:
             return f"Ошибка при отправке кубика: {exc}"
+
+    async def _tool_flip_coin_decide(self, chat_id: int, args: dict[str, Any]) -> str:
+        question = str(args.get("question") or "").strip()
+        result = random.choice(["Орёл 🦅", "Решка 🪙"])
+        decision = random.choice(["ДА, однозначно!", "НЕТ, забудь об этом."])
+        
+        response_text = f"🪙 <b>Бросаю монетку...</b>\n"
+        if question:
+            response_text += f"Вопрос: <i>«{question}»</i>\n"
+        response_text += f"Результат: <b>{result}</b>\nРешение: <b>{decision}</b>"
+        
+        try:
+            await self.bot.send_message(chat_id=chat_id, text=response_text, parse_mode="HTML")
+            return f"Монетка брошена. Результат: {result}, решение: {decision}."
+        except Exception as exc:
+            return f"Не удалось бросить монетку: {exc}"
 
     async def _tool_send_sticker(self, chat_id: int, args: dict[str, Any]) -> str:
         emoji_hint = str(args.get("emoji_hint") or "").strip()
@@ -1243,6 +1318,10 @@ class AIService:
             return f"Ошибка API Telegram при создании опроса: {exc}"
 
     async def _tool_transfer_reputation(self, chat_id: int, sender: Sender, args: dict[str, Any]) -> str:
+        mood = self.moods.get(chat_id, 60)
+        if mood < 35:
+            return f"Отклонено: Ника слишком раздражена ({mood}/100), чтобы пересылать печеньки по вашему приказу. Она советует сначала её порадовать!"
+
         target_name = str(args.get("target_name") or "").strip()
         amount = int(args.get("amount") or 0)
         

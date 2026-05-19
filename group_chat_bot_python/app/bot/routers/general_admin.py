@@ -93,23 +93,13 @@ def build_general_admin_router(db: SupabaseDB, bot_name: str, ai: AIService) -> 
             "• <code>/top</code> — Рейтинг самых богатых"
         ),
         "games": (
-            "🎰 <b>Игры и Развлечения</b>\n\n"
-            "• <code>/casino [ставка]</code> — Премиальный слот-автомат\n"
-            "• <code>/tower [ставка]</code> — Рискованная Башня (до x40)\n"
-            "• <code>/dice [ставка] [чет/нечет/дубль/2-12]</code> — Кубики с риском и удвоением\n"
-            "• <code>/diceduel [ставка]</code> — Дуэль на кубиках (реплаем)\n"
-            "• <code>/box</code>, <code>/scratch</code>, <code>/mine</code> — Безопасные игры без проигрыша\n"
-            "• <code>/dailyquest</code> — Ежедневный квест без риска\n"
-            "• <code>/coin [ставка] [орел/решка]</code> — Монетка x2\n"
-            "• <code>/rps [ставка] [камень/ножницы/бумага]</code> — Дуэль с ботом\n"
-            "• <code>/duel [ставка] [камень/ножницы/бумага]</code> — Дуэль с игроком (реплаем)\n"
-            "• <code>/fish</code> — Рыбалка за печеньками\n"
+            "🎭 <b>Интерактив и Творчество</b>\n\n"
             "• <code>/aiimage [описание]</code> — ИИ-картинка за печеньки\n"
             "• <code>/signai [текст]</code> — ИИ-сигна за печеньки\n"
             "• <code>/setsignprice</code>, <code>/signreq</code>, <code>/signorders</code> — Сигны от людей\n"
-            "• Авто-событие: печенька падает в активный чат\n"
-            "• Авто-событие: викторина, первый правильный ответ получает приз\n"
-            "• <code>/rp [действие]</code> — Ролевые взаимодействия"
+            "• Авто-события: выпадение печенек и викторины в активных чатах\n"
+            "• <code>/rp [действие]</code> — Ролевые взаимодействия с участниками\n"
+            "• Бросить монетку или спросить совет можно прямо в диалоге с ИИ Ники!"
         ),
         "profile": (
             "👤 <b>Персонализация</b>\n\n"
@@ -136,7 +126,7 @@ def build_general_admin_router(db: SupabaseDB, bot_name: str, ai: AIService) -> 
         return InlineKeyboardMarkup(inline_keyboard=[
             [
                 InlineKeyboardButton(text="🍪 Экономика", callback_data="help_economy"),
-                InlineKeyboardButton(text="🎰 Игры", callback_data="help_games")
+                InlineKeyboardButton(text="🎭 Интерактив", callback_data="help_games")
             ],
             [
                 InlineKeyboardButton(text="👤 Профиль", callback_data="help_profile"),
