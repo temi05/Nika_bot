@@ -55,6 +55,9 @@ class ChatSettings:
     chat_id: int
     link_filter_enabled: bool = True
     casino_jackpot: int = 0
+    auto_drop_enabled: bool = True
+    auto_quiz_enabled: bool = True
+    ai_enabled: bool = True
 
 
 @dataclass(slots=True)

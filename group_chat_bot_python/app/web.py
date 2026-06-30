@@ -21,6 +21,7 @@ from app.bot.routers.games import build_games_router
 from app.bot.routers.profile_ai import build_profile_ai_router
 from app.bot.routers.chat_settings import build_chat_settings_router
 from app.config import get_settings
+from app.models import Sender
 from app.services.ai_service import AIService
 from app.services.memory_provider import build_memory_provider
 from app.services.persona_service import PersonaService
@@ -84,7 +85,7 @@ def create_app() -> FastAPI:
         await bot.set_webhook(
             webhook_url,
             secret_token=settings.webhook_secret_token,
-            allowed_updates=["message", "message_reaction", "callback_query", "chat_member"],
+            allowed_updates=["message", "message_reaction", "poll_answer", "callback_query", "chat_member"],
             drop_pending_updates=False,
         )
         
@@ -157,11 +158,14 @@ def create_app() -> FastAPI:
                         next_auto_drop.setdefault(chat_id, now + 35 * 60 + random.randint(0, 10 * 60))
                         next_auto_quiz.setdefault(chat_id, now + 45 * 60 + random.randint(0, 15 * 60))
 
+                        chat_settings = db.get_chat_settings(chat_id)
                         if now >= next_auto_drop[chat_id]:
-                            await send_auto_drop(chat_id)
+                            if chat_settings.auto_drop_enabled:
+                                await send_auto_drop(chat_id)
                             next_auto_drop[chat_id] = now + 35 * 60 + random.randint(0, 15 * 60)
                         if now >= next_auto_quiz[chat_id]:
-                            await send_auto_quiz(chat_id)
+                            if chat_settings.auto_quiz_enabled:
+                                await send_auto_quiz(chat_id)
                             next_auto_quiz[chat_id] = now + 45 * 60 + random.randint(0, 20 * 60)
                     except Exception as exc:
                         print(f"[auto_events:error] chat_id={chat_id} error={exc}")
@@ -281,51 +285,34 @@ async def handle_message_reaction(payload: dict, db: SupabaseDB) -> None:
     db.update_user(author.id, {"reputation": author.reputation + delta})
 
 
-def _reaction_score(reactions: list[dict]) -> int:
-    if not reactions:
-        return 0
-    emoji = reactions[0].get("emoji")
-    if emoji in {"👎", "💩", "🤮"}:
-        return -1
-    return 1 if emoji else 0
-
-    if not poll_data:
+async def handle_poll_answer(payload: dict, db: SupabaseDB) -> None:
+    poll_id = str(payload.get("poll_id") or "")
+    option_ids = payload.get("option_ids") or []
+    user_data = payload.get("user") or {}
+    user_id = int(user_data.get("id") or 0)
+    poll_data = db.get_poll_data(poll_id)
+    if not poll_id or not poll_data or not user_id:
         return
 
-    chat_id = poll_data["chat_id"]
-    question = poll_data["question"]
-    options = poll_data["options"]
-    
-    # Собираем названия выбранных вариантов
-    selected_options = []
-    for idx in option_ids:
-        if 0 <= idx < len(options):
-            selected_options.append(options[idx])
-    
+    options = poll_data.get("options") or []
+    selected_options = [str(options[idx]) for idx in option_ids if isinstance(idx, int) and 0 <= idx < len(options)]
     if not selected_options:
         return
 
-    # Формируем Sender объект для логов
-    from app.models import Sender
     sender = Sender(
         user_id=user_id,
-        first_name=user_data.get("first_name", "User"),
-        last_name=user_data.get("last_name"),
+        first_name=str(user_data.get("first_name") or "User"),
         username=user_data.get("username"),
-        is_bot=False
+        is_bot=False,
     )
-
     options_text = ", ".join(selected_options)
-    log_text = f"[ГОЛОС] Проголосовал(а) за '{options_text}' в опросе: {question}"
-    
-    # Сохраняем в контекст сообщений как системное событие от пользователя
-    # Используем отрицательный message_id или 0, чтобы не конфликтовать с реальными сообщениями
+    question = str(poll_data.get("question") or "опрос")
     db.store_message_context(
-        chat_id=chat_id,
-        message_id=int(time.time() * 1000) % 1000000000, # Генерируем уникальный ID для лога
+        chat_id=int(poll_data["chat_id"]),
+        message_id=int(time.time() * 1000) % 1_000_000_000,
         sender=sender,
-        text=log_text,
-        message_type="poll_vote"
+        text=f"[ГОЛОС] {sender.display_name} выбрал(а) '{options_text}' в опросе: {question}",
+        message_type="poll_vote",
     )
 
 

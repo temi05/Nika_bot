@@ -463,7 +463,10 @@ class SupabaseDB:
             settings = ChatSettings(
                 chat_id=chat_id,
                 link_filter_enabled=bool(row.get("link_filter_enabled", True)),
-                casino_jackpot=int(row.get("casino_jackpot", 0))
+                casino_jackpot=int(row.get("casino_jackpot", 0)),
+                auto_drop_enabled=bool(row.get("auto_drop_enabled", True)),
+                auto_quiz_enabled=bool(row.get("auto_quiz_enabled", True)),
+                ai_enabled=bool(row.get("ai_enabled", True))
             )
             self._chat_settings_cache[chat_id] = (settings, time.time() + self._cache_ttl)
             return settings
@@ -483,7 +486,10 @@ class SupabaseDB:
             return ChatSettings(
                 chat_id=chat_id, 
                 link_filter_enabled=bool(row.get("link_filter_enabled", True)),
-                casino_jackpot=int(row.get("casino_jackpot", 0))
+                casino_jackpot=int(row.get("casino_jackpot", 0)),
+                auto_drop_enabled=bool(row.get("auto_drop_enabled", True)),
+                auto_quiz_enabled=bool(row.get("auto_quiz_enabled", True)),
+                ai_enabled=bool(row.get("ai_enabled", True))
             )
 
         # Safe fallback when DB is temporarily unavailable.
@@ -968,6 +974,21 @@ class SupabaseDB:
             self._knowledge().delete().eq("chat_id", chat_id).ilike("fact", f"%{query}%"),
             fallback=None,
             context=f"delete_memory chat_id={chat_id}",
+        )
+        if not rows or not rows.data:
+            return 0
+        return len(rows.data)
+
+    def delete_memory_by_source_id(self, chat_id: int, source_message_id: int) -> int:
+        if not source_message_id:
+            return 0
+        rows = self._safe_execute(
+            self._knowledge()
+            .delete()
+            .eq("chat_id", chat_id)
+            .eq("source_message_id", source_message_id),
+            fallback=None,
+            context=f"delete_memory_by_source_id chat_id={chat_id} source_message_id={source_message_id}",
         )
         if not rows or not rows.data:
             return 0

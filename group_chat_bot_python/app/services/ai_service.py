@@ -449,7 +449,7 @@ class AIService:
                     request_kwargs["tools"] = self._tool_definitions()
                     request_kwargs["tool_choice"] = "auto"
                 
-                response = await self.client.chat.completions.create(**request_kwargs)
+                response = await self._chat_completion(**request_kwargs)
                 message = response.choices[0].message
                 tool_calls = list(message.tool_calls or [])
                 self._log(
@@ -1103,7 +1103,7 @@ class AIService:
 
     async def _retry_text_only_after_vision_error(self, *, messages: list[dict[str, Any]], user_text: str, error: str) -> str:
         try:
-            response = await self.client.chat.completions.create(
+            response = await self._chat_completion(
                 model=self.settings.ai_model,
                 messages=self._strip_images_from_messages(messages),
                 temperature=self.settings.ai_temperature,
@@ -1637,6 +1637,22 @@ class AIService:
             return retry
         return content
 
+    async def _chat_completion(self, **kwargs: Any) -> Any:
+        last_exc: Exception | None = None
+        delay = 0.8
+        for attempt in range(1, 4):
+            try:
+                return await self.client.chat.completions.create(**kwargs)
+            except Exception as exc:
+                last_exc = exc
+                if attempt >= 3:
+                    break
+                self._log("completion_retry", attempt=attempt, error=str(exc)[:180])
+                await asyncio.sleep(delay)
+                delay *= 2
+        assert last_exc is not None
+        raise last_exc
+
     async def _retry_repetitive_reply(self, *, messages: list[dict[str, Any]], sender_name: str, user_text: str, previous_reply: str) -> str:
         retry_messages = [
             *messages,
@@ -1646,7 +1662,7 @@ class AIService:
             },
         ]
         try:
-            response = await self.client.chat.completions.create(
+            response = await self._chat_completion(
                 model=self.settings.ai_model, messages=retry_messages, temperature=max(self.settings.ai_temperature, 0.9), max_tokens=min(self.settings.ai_max_tokens, 140)
             )
             raw_text = self._coerce_model_content(response.choices[0].message.content)
@@ -1655,7 +1671,7 @@ class AIService:
             return ""
 
     async def _simple_completion(self, *, model: str, messages: list[dict[str, Any]], temperature: float, max_tokens: int) -> str:
-        response = await self.client.chat.completions.create(
+        response = await self._chat_completion(
             model=model,
             messages=messages,
             temperature=temperature,

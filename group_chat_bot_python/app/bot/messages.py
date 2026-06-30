@@ -308,9 +308,12 @@ def build_messages_router(bot: Bot, settings: Settings, db: SupabaseDB, ai: AISe
         if ai_input_text:
             caller_is_admin = await _message_sender_is_admin(bot, message, sender)
             is_private_chat = message.chat.type == "private"
+            chat_settings = db.get_chat_settings(message.chat.id)
             should_reply = is_private_chat or is_reply_to_bot or is_mentioned
+            if not is_private_chat and not chat_settings.ai_enabled:
+                should_reply = False
             
-            print(f"🔍 [DEBUG] should_reply={should_reply}, is_private={is_private_chat}")
+            print(f"🔍 [DEBUG] should_reply={should_reply}, is_private={is_private_chat}, ai_enabled={chat_settings.ai_enabled}")
             memory_signal = _looks_like_memory_signal(text)
             should_capture_memory = (
                 settings.memory_capture_all_messages

@@ -93,7 +93,7 @@ def build_profile_ai_router(db: SupabaseDB, ai: AIService, bot_name: str) -> Rou
         )
 
     @router.callback_query(F.data.startswith("forget_fact_"))
-    async def forget_fact_callback(query: Message, bot: Bot) -> None:
+    async def forget_fact_callback(query: CallbackQuery) -> None:
         # В aiogram 3 callback_query.message может быть разным, берем ID
         msg_id_str = query.data.replace("forget_fact_", "")
         try:
@@ -389,6 +389,9 @@ def build_profile_ai_router(db: SupabaseDB, ai: AIService, bot_name: str) -> Rou
                 parse_mode="HTML",
             )
             return
+        if message.chat.type != "private" and not db.get_chat_settings(message.chat.id).ai_enabled:
+            await message.answer("🤖 ИИ-функции в этом чате сейчас выключены администратором.")
+            return
         sender = db.get_or_create_user(message.chat.id, get_sender_data(message))
         if await _deny_if_jailed(message, sender, "/aiimage"):
             return
@@ -451,6 +454,9 @@ def build_profile_ai_router(db: SupabaseDB, ai: AIService, bot_name: str) -> Rou
                 "Внешность берется из сохраненного /setnika, а reply-картинка дает только позу/ракурс.",
                 parse_mode="HTML",
             )
+            return
+        if message.chat.type != "private" and not db.get_chat_settings(message.chat.id).ai_enabled:
+            await message.answer("🤖 ИИ-функции в этом чате сейчас выключены администратором.")
             return
         sender = db.get_or_create_user(message.chat.id, get_sender_data(message))
         if await _deny_if_jailed(message, sender, "/signai"):
