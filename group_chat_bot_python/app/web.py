@@ -20,6 +20,7 @@ from app.bot.routers.error import build_error_router
 from app.bot.routers.games import build_games_router
 from app.bot.routers.profile_ai import build_profile_ai_router
 from app.bot.routers.chat_settings import build_chat_settings_router
+from app.bot.routers.memes import build_memes_router
 from app.config import get_settings
 from app.models import Sender
 from app.services.ai_service import AIService
@@ -44,6 +45,7 @@ def create_app() -> FastAPI:
     dispatcher.include_router(build_profile_ai_router(db, ai_service, settings.bot_name))
     dispatcher.include_router(build_general_admin_router(db, settings.bot_name, ai_service))
     dispatcher.include_router(build_rp_router(db))
+    dispatcher.include_router(build_memes_router(db))
     dispatcher.include_router(build_feedback_router(bot, db))
     dispatcher.include_router(build_messages_router(bot, settings, db, ai_service))
     dispatcher.include_router(build_error_router())

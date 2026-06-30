@@ -466,7 +466,8 @@ class SupabaseDB:
                 casino_jackpot=int(row.get("casino_jackpot", 0)),
                 auto_drop_enabled=bool(row.get("auto_drop_enabled", True)),
                 auto_quiz_enabled=bool(row.get("auto_quiz_enabled", True)),
-                ai_enabled=bool(row.get("ai_enabled", True))
+                ai_enabled=bool(row.get("ai_enabled", True)),
+                proactive_enabled=bool(row.get("proactive_enabled", True))
             )
             self._chat_settings_cache[chat_id] = (settings, time.time() + self._cache_ttl)
             return settings
@@ -489,7 +490,8 @@ class SupabaseDB:
                 casino_jackpot=int(row.get("casino_jackpot", 0)),
                 auto_drop_enabled=bool(row.get("auto_drop_enabled", True)),
                 auto_quiz_enabled=bool(row.get("auto_quiz_enabled", True)),
-                ai_enabled=bool(row.get("ai_enabled", True))
+                ai_enabled=bool(row.get("ai_enabled", True)),
+                proactive_enabled=bool(row.get("proactive_enabled", True))
             )
 
         # Safe fallback when DB is temporarily unavailable.
@@ -1011,6 +1013,54 @@ class SupabaseDB:
         if not rows:
             return []
         return [row["fact"] for row in rows.data or []]
+
+    def add_meme_knowledge(self, chat_id: int, text: str, *, author_id: int, author_name: str) -> bool:
+        clean = " ".join((text or "").split()).strip()
+        if len(clean) < 3:
+            return False
+        self.store_memory(
+            chat_id,
+            MemoryRecord(
+                fact=f"Мем/контекст чата: {clean[:700]}",
+                source="meme_knowledge",
+                confidence=0.95,
+                meta={"author_id": author_id, "author_name": author_name, "kind": "meme"},
+            ),
+        )
+        return True
+
+    def search_meme_knowledge(self, chat_id: int, query: str, limit: int = 5) -> list[str]:
+        clean = " ".join((query or "").split()).strip()
+        request = self._knowledge().select("fact,last_seen_at").eq("chat_id", chat_id).eq("fact_type", "meme_knowledge").eq("status", "confirmed")
+        if clean:
+            tokens = [token for token in clean.split() if len(token) >= 3][:4]
+            if tokens:
+                request = request.ilike("fact", f"%{tokens[0]}%")
+        rows = self._safe_execute(
+            request.order("last_seen_at", desc=True).limit(limit),
+            fallback=None,
+            context=f"search_meme_knowledge chat_id={chat_id}",
+        )
+        if not rows:
+            return []
+        return [row["fact"] for row in rows.data or []]
+
+    def delete_meme_knowledge(self, chat_id: int, query: str) -> int:
+        clean = " ".join((query or "").split()).strip()
+        if not clean:
+            return 0
+        rows = self._safe_execute(
+            self._knowledge()
+            .delete()
+            .eq("chat_id", chat_id)
+            .eq("fact_type", "meme_knowledge")
+            .ilike("fact", f"%{clean}%"),
+            fallback=None,
+            context=f"delete_meme_knowledge chat_id={chat_id}",
+        )
+        if not rows or not rows.data:
+            return 0
+        return len(rows.data)
 
     def get_recent_memories(self, chat_id: int, limit: int = 5) -> list[str]:
         rows = self._safe_execute(

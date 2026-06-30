@@ -29,6 +29,7 @@ def _get_cached(db: SupabaseDB, chat_id: int) -> dict[str, Any]:
             "auto_drop_enabled": s.auto_drop_enabled,
             "auto_quiz_enabled": s.auto_quiz_enabled,
             "ai_enabled": s.ai_enabled,
+            "proactive_enabled": s.proactive_enabled,
         }
     return _settings_cache[chat_id]
 
@@ -56,6 +57,7 @@ def _build_settings_text(settings: dict[str, Any], chat_title: str | None) -> st
         f"🍪 Авто-дропы: <b>{_status(settings['auto_drop_enabled'])}</b>",
         f"🧠 Авто-викторины: <b>{_status(settings['auto_quiz_enabled'])}</b>",
         f"🤖 ИИ-функции: <b>{_status(settings['ai_enabled'])}</b>",
+        f"💬 Самостоятельные реплики: <b>{_status(settings['proactive_enabled'])}</b>",
         f"🎰 Джекпот казино: <b>{settings['casino_jackpot']} 🍪</b>",
         "",
         "<i>Менять настройки могут только администраторы.</i>",
@@ -85,6 +87,12 @@ def _build_settings_kb(settings: dict[str, Any]) -> InlineKeyboardMarkup:
             InlineKeyboardButton(
                 text=f"{_bool_icon(settings['ai_enabled'])} ИИ-функции",
                 callback_data="cs_toggle_ai",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                text=f"{_bool_icon(settings['proactive_enabled'])} Самостоятельные реплики",
+                callback_data="cs_toggle_proactive",
             ),
         ],
         [InlineKeyboardButton(text="🔄 Обновить", callback_data="cs_refresh")],
@@ -151,6 +159,10 @@ def build_chat_settings_router(db: SupabaseDB) -> Router:
     @router.callback_query(F.data == "cs_toggle_ai")
     async def toggle_ai(query: CallbackQuery) -> None:
         await _toggle_setting(query, "ai_enabled", "ИИ-функции")
+
+    @router.callback_query(F.data == "cs_toggle_proactive")
+    async def toggle_proactive(query: CallbackQuery) -> None:
+        await _toggle_setting(query, "proactive_enabled", "Самостоятельные реплики")
 
     @router.callback_query(F.data == "cs_refresh")
     async def refresh_settings(query: CallbackQuery) -> None:

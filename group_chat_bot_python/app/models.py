@@ -58,6 +58,7 @@ class ChatSettings:
     auto_drop_enabled: bool = True
     auto_quiz_enabled: bool = True
     ai_enabled: bool = True
+    proactive_enabled: bool = True
 
 
 @dataclass(slots=True)

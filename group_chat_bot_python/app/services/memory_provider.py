@@ -174,6 +174,9 @@ class DatabaseMemoryProvider(BaseMemoryProvider):
         for token in tokens:
             topic_facts.extend(self.db.search_memory(chat_id, token, limit=3))
 
+        meme_facts = self.db.search_meme_knowledge(chat_id, user_message, limit=4)
+        topic_facts.extend(meme_facts)
+
         recent_facts = self.db.get_recent_memories(chat_id, limit=4)
         context = format_memory_context(
             profile_facts=_clean_memory_items(list(dict.fromkeys(profile_facts)))[:4],

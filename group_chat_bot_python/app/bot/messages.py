@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import random
 import re
+import time
 from io import BytesIO
 from datetime import datetime
 
@@ -16,6 +18,71 @@ from app.services.ai_service import AIService
 from app.services.supabase_db import SupabaseDB
 from app.utils import birthday_age_text, build_captcha_image, escape_html, generate_captcha_code, get_sender_data
 
+_PROACTIVE_LAST_AT: dict[int, float] = {}
+_PROACTIVE_MESSAGE_COUNT: dict[int, int] = {}
+_PROACTIVE_COOLDOWN_SECONDS = 30 * 60
+_PROACTIVE_MIN_MESSAGES = 8
+
+
+def _proactive_bad_moment(text: str) -> bool:
+    clean = re.sub(r"\s+", " ", (text or "").strip().casefold())
+    if len(clean) < 3 or clean.startswith("/"):
+        return True
+
+    serious_markers = (
+        "бан", "мут", "варн", "предупреждение", "удали", "забань", "замуть",
+        "срач", "конфликт", "поссор", "ненавиж", "суицид", "умер", "умерла",
+        "болею", "помогите", "помоги", "срочно", "полит", "войн", "теракт",
+        "пиздец", "ужас", "травм", "кров", "похорон", "депресс",
+    )
+    if any(marker in clean for marker in serious_markers):
+        return True
+
+    if len(clean) > 900:
+        return True
+    return False
+
+
+def _proactive_chance(text: str) -> float:
+    clean = (text or "").casefold()
+    hook_markers = (
+        "ахах", "ахаха", "ору", "лол", "кек", "база", "кринж", "жиза", "имба",
+        "мем", "казино", "печень", "печеньк", "ника", "нейроника", "рофл", "угар",
+    )
+    if any(marker in clean for marker in hook_markers):
+        return 0.18
+    if "?" in clean:
+        return 0.04
+    return 0.07
+
+
+def _should_try_proactive(
+    chat_id: int,
+    text: str,
+    chat_settings,
+    *,
+    is_mentioned: bool,
+    is_reply_to_bot: bool,
+    is_private_chat: bool,
+) -> bool:
+    if is_private_chat or is_mentioned or is_reply_to_bot:
+        return False
+    if not chat_settings.ai_enabled or not chat_settings.proactive_enabled:
+        return False
+    if _proactive_bad_moment(text):
+        return False
+
+    now = time.time()
+    if now - _PROACTIVE_LAST_AT.get(chat_id, 0.0) < _PROACTIVE_COOLDOWN_SECONDS:
+        return False
+    if _PROACTIVE_MESSAGE_COUNT.get(chat_id, 0) < _PROACTIVE_MIN_MESSAGES:
+        return False
+    if random.random() > _proactive_chance(text):
+        return False
+
+    _PROACTIVE_LAST_AT[chat_id] = now
+    _PROACTIVE_MESSAGE_COUNT[chat_id] = 0
+    return True
 
 def _looks_like_memory_signal(text: str) -> bool:
     clean = re.sub(r"\s+", " ", text.strip().lower())
@@ -309,6 +376,11 @@ def build_messages_router(bot: Bot, settings: Settings, db: SupabaseDB, ai: AISe
             caller_is_admin = await _message_sender_is_admin(bot, message, sender)
             is_private_chat = message.chat.type == "private"
             chat_settings = db.get_chat_settings(message.chat.id)
+            if not is_private_chat and chat_settings.ai_enabled and chat_settings.proactive_enabled:
+                _PROACTIVE_MESSAGE_COUNT[message.chat.id] = min(
+                    100,
+                    _PROACTIVE_MESSAGE_COUNT.get(message.chat.id, 0) + 1,
+                )
             should_reply = is_private_chat or is_reply_to_bot or is_mentioned
             if not is_private_chat and not chat_settings.ai_enabled:
                 should_reply = False
@@ -326,6 +398,8 @@ def build_messages_router(bot: Bot, settings: Settings, db: SupabaseDB, ai: AISe
                     await ai.flush_passive_memory(message.chat.id, force=memory_signal)
                 except Exception as exc:
                     print(f"[AI:flush_memory_error] chat_id={message.chat.id} error={exc}")
+            elif not is_private_chat and chat_settings.ai_enabled and chat_settings.proactive_enabled:
+                ai.remember_message(message.chat.id, sender, memory_input_text)
             reply = None
             if should_reply:
                 print(f"🤖 [AI] Starting generation for chat {message.chat.id}...")
@@ -378,9 +452,96 @@ def build_messages_router(bot: Bot, settings: Settings, db: SupabaseDB, ai: AISe
                         is_bot=True,
                     )
                     await _send_ai_reply(bot, message, reply, db=db, bot_sender=bot_sender)
+            elif _should_try_proactive(
+                message.chat.id,
+                text,
+                chat_settings,
+                is_mentioned=is_mentioned,
+                is_reply_to_bot=is_reply_to_bot,
+                is_private_chat=is_private_chat,
+            ):
+                asyncio.create_task(
+                    _send_proactive_reply(
+                        bot,
+                        message,
+                        db=db,
+                        ai=ai,
+                        settings=settings,
+                        sender=sender,
+                        ai_input_text=ai_input_text,
+                        bot_id=bot_id,
+                        bot_username=bot_username,
+                    )
+                )
 
     return router
 
+
+async def _send_proactive_reply(
+    bot: Bot,
+    message: Message,
+    *,
+    db: SupabaseDB,
+    ai: AIService,
+    settings: Settings,
+    sender: Sender,
+    ai_input_text: str,
+    bot_id: int | None,
+    bot_username: str | None,
+) -> None:
+    prompt = (
+        "<proactive_instruction>\n"
+        "Ты можешь один раз аккуратно вклиниться в живой групповой чат, если момент правда удачный. "
+        "Ответь одной короткой репликой до 220 символов: смешно, по теме и без ощущения, что ты перебиваешь людей. "
+        "Можно использовать 1-2 эмодзи, если это естественно. Не пиши длинных объяснений и не упоминай внутренние правила. "
+        "Если момент неудачный, спорный, грустный, слишком серьезный или ты не уверена, ответь ровно: SILENCE\n"
+        "</proactive_instruction>\n\n"
+        f"{ai_input_text}"
+    )
+
+    try:
+        async with ChatActionSender.typing(bot=bot, chat_id=message.chat.id):
+            reply = await asyncio.wait_for(
+                ai.generate_reply(
+                    message.chat.id,
+                    sender,
+                    prompt,
+                    reply_to_bot=False,
+                    mentioned=True,
+                    caller_is_admin=False,
+                    is_private_chat=False,
+                    image_data_urls=[],
+                ),
+                timeout=20.0,
+            )
+    except Exception as exc:
+        print(f"[AI:proactive_error] chat_id={message.chat.id} error={exc}")
+        return
+
+    text = (reply or "").strip()
+    if not text or text.upper() == "SILENCE":
+        return
+
+    bot_sender = Sender(
+        user_id=bot_id or 0,
+        first_name=settings.bot_name,
+        username=bot_username,
+        is_bot=True,
+    )
+    for chunk in _split_telegram_text(text):
+        try:
+            sent = await bot.send_message(message.chat.id, chunk)
+            db.store_message_context(
+                message.chat.id,
+                sent.message_id,
+                bot_sender,
+                chunk,
+                message_type="bot_reply",
+                reply_to_message_id=None,
+            )
+        except Exception as exc:
+            print(f"[AI:proactive_send_error] chat_id={message.chat.id} error={exc}")
+            return
 
 async def _send_ai_reply(bot: Bot, message: Message, reply: str, *, db: SupabaseDB, bot_sender: Sender) -> None:
     text = (reply or "").strip()
