@@ -5,12 +5,13 @@ from io import BytesIO
 
 from aiogram import Router, F
 from aiogram.filters import Command, CommandObject
-from aiogram.types import Message, BufferedInputFile, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import Message, BufferedInputFile, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 
 from app.models import MemoryRecord
 from app.services.ai_service import AIService
 from app.services.supabase_db import SupabaseDB
 from app.bot.admin import is_admin
+from app.bot.routers.jail_helpers import deny_if_jailed
 from app.utils import build_progress_bar, escape_html, get_sender_data, parse_birthday_parts
 
 NIKA_REFERENCE_ASSET_KEY = "nika_reference"
@@ -393,7 +394,7 @@ def build_profile_ai_router(db: SupabaseDB, ai: AIService, bot_name: str) -> Rou
             await message.answer("🤖 ИИ-функции в этом чате сейчас выключены администратором.")
             return
         sender = db.get_or_create_user(message.chat.id, get_sender_data(message))
-        if await _deny_if_jailed(message, sender, "/aiimage"):
+        if await deny_if_jailed(db, message, sender, "/aiimage"):
             return
             
         price = max(1, dynamic_price)
@@ -459,7 +460,7 @@ def build_profile_ai_router(db: SupabaseDB, ai: AIService, bot_name: str) -> Rou
             await message.answer("🤖 ИИ-функции в этом чате сейчас выключены администратором.")
             return
         sender = db.get_or_create_user(message.chat.id, get_sender_data(message))
-        if await _deny_if_jailed(message, sender, "/signai"):
+        if await deny_if_jailed(db, message, sender, "/signai"):
             return
             
         price = max(1, dynamic_price)

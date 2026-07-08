@@ -597,28 +597,6 @@ def build_economy_router(db: SupabaseDB, ai: AIService) -> Router:
         if level >= 5: return "Активный"
         return "Новичок"
 
-    def _get_tower_multiplier(floor: int) -> float:
-        multipliers = [0.90, 1.00, 1.14, 1.42, 2.00, 2.90, 4.60, 8.10, 16.0, 40.0]
-        if floor < 1: return 1.0
-        if floor > 10: return multipliers[-1]
-        return multipliers[floor-1]
-
-    def _get_tower_reward_multiplier(floor: int, weather: dict) -> float:
-        weather_mod = weather["reward_mod"] if floor > 1 else 1.0
-        return _get_tower_multiplier(floor) * weather_mod
-
-    def _get_tower_success_chance(floor: int, weather: dict) -> float:
-        chances = [0.95, 0.86, 0.77, 0.67, 0.57, 0.48, 0.39, 0.31, 0.23, 0.16]
-        base_chance = chances[floor - 1] if 1 <= floor <= len(chances) else 0.20
-        return min(0.97, max(0.08, base_chance + weather["chance_mod"]))
-
-    def _format_tower_chance(chance: float) -> str:
-        percent = round(chance * 100, 1)
-        return f"{percent:.0f}%" if percent.is_integer() else f"{percent:.1f}%"
-
-    # --- ИГРА: БАШНЯ ФОРТУНЫ (COMPACT & DYNAMIC VERSION) ---
-
-    
     return router
 
 

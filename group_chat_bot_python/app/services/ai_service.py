@@ -1393,18 +1393,13 @@ class AIService:
         if "дай печеньку" in lowered_req or "хочу печеньку" in lowered_req:
             return reply
 
-        # СНАЧАЛА ПРОВЕРЯЕМ НА ГРУБОСТЬ (Умный штраф)
-        if self._is_hostile_user_text(user_text):
-            # Проверяем кулдаун на штрафы (300 секунд), чтобы не списать всё сразу
-            if self.db.can_adjust_reputation(0, sender.user_id, cooldown_seconds=300):
-                user = self.db.get_or_create_user(chat_id, sender)
-                if user.reputation > 0:
-                    self.db.update_user(user.id, {"reputation": max(0, user.reputation - 1)})
-                    # Снижаем настроение Ники
-                    self.moods[chat_id] = max(0, self.moods[chat_id] - 15)
-                    return f"{reply}\n\n💢 <b>-1 🍪 за грубость.</b> Не смей мне хамить!"
 
-        # Если не грубил, проверяем на заслуженную награду
+        # Грубость к Нике больше не списывает печеньки.
+        # Она влияет только на настроение и тон ответа, без экономического наказания.
+        if self._is_hostile_user_text(user_text):
+            self.moods[chat_id] = max(0, self.moods[chat_id] - 10)
+            return reply
+
         if not self._message_deserves_cookie(user_text):
             return reply
         if not self.db.can_adjust_reputation(0, sender.user_id, cooldown_seconds=180):
@@ -1596,12 +1591,6 @@ class AIService:
         if "<reply_target" in user_text:
             return ""
         return user_text.strip()
-
-    def _extract_current_message_id(self, user_text: str) -> int | None:
-        match = re.search(r'(?i)<msg[^>]*id="(\d+)"', user_text)
-        if match:
-            return int(match.group(1))
-        return None
 
     def _remember_bot_reply(self, chat_id: int, reply: str) -> None:
         normalized = self._normalize_reply_key(reply)

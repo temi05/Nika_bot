@@ -150,6 +150,17 @@ def create_app() -> FastAPI:
             while True:
                 await asyncio.sleep(60)
                 now = asyncio.get_running_loop().time()
+
+                # Очистка устаревших сессий авто-дропов и авто-викторин (старше 30 минут)
+                now_ts = time.time()
+                for key in list(game_sessions.AUTO_DROP_SESSIONS):
+                    session = game_sessions.AUTO_DROP_SESSIONS.get(key)
+                    if session and now_ts - int(session.get("created_at", 0)) > 30 * 60:
+                        game_sessions.AUTO_DROP_SESSIONS.pop(key, None)
+                for key in list(game_sessions.AUTO_QUIZ_SESSIONS):
+                    session = game_sessions.AUTO_QUIZ_SESSIONS.get(key)
+                    if session and now_ts - int(session.get("created_at", 0)) > 30 * 60:
+                        game_sessions.AUTO_QUIZ_SESSIONS.pop(key, None)
                 active_chat_ids = db.get_active_chat_ids(minutes=10, limit=30)
                 for chat_id in list(next_auto_drop):
                     if chat_id not in active_chat_ids:

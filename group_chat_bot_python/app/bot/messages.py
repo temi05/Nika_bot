@@ -5,6 +5,7 @@ import base64
 import random
 import re
 import time
+from collections import defaultdict, deque
 from io import BytesIO
 from datetime import datetime
 
@@ -19,9 +20,20 @@ from app.services.supabase_db import SupabaseDB
 from app.utils import birthday_age_text, build_captcha_image, escape_html, generate_captcha_code, get_sender_data
 
 _PROACTIVE_LAST_AT: dict[int, float] = {}
-_PROACTIVE_MESSAGE_COUNT: dict[int, int] = {}
-_PROACTIVE_COOLDOWN_SECONDS = 30 * 60
-_PROACTIVE_MIN_MESSAGES = 8
+_PROACTIVE_MESSAGE_COUNT: dict[int, int] = defaultdict(int)
+_PROACTIVE_RECENT_AUTHORS: dict[int, deque[int]] = defaultdict(lambda: deque(maxlen=18))
+_PROACTIVE_RECENT_TOPICS: dict[int, deque[str]] = defaultdict(lambda: deque(maxlen=5))
+_PROACTIVE_COOLDOWN_SECONDS = 6 * 60
+_PROACTIVE_HOT_COOLDOWN_SECONDS = 3 * 60
+_PROACTIVE_MIN_MESSAGES = 3
+
+
+def _track_proactive_activity(chat_id: int, user_id: int, text: str) -> None:
+    if not text or text.startswith("/"):
+        return
+    _PROACTIVE_MESSAGE_COUNT[chat_id] = min(100, _PROACTIVE_MESSAGE_COUNT[chat_id] + 1)
+    if user_id:
+        _PROACTIVE_RECENT_AUTHORS[chat_id].append(user_id)
 
 
 def _proactive_bad_moment(text: str) -> bool:
@@ -30,30 +42,44 @@ def _proactive_bad_moment(text: str) -> bool:
         return True
 
     serious_markers = (
-        "бан", "мут", "варн", "предупреждение", "удали", "забань", "замуть",
-        "срач", "конфликт", "поссор", "ненавиж", "суицид", "умер", "умерла",
-        "болею", "помогите", "помоги", "срочно", "полит", "войн", "теракт",
-        "пиздец", "ужас", "травм", "кров", "похорон", "депресс",
+        "суицид", "самоуб", "умер", "умерла", "погиб", "погибла", "болею",
+        "помогите", "помоги срочно", "срочно помог", "войн", "теракт", "кров",
+        "похорон", "депресс", "больница", "рак", "травм", "избили", "угроз",
+        "докс", "деанон", "слив адрес", "номер телефона",
     )
-    if any(marker in clean for marker in serious_markers):
-        return True
-
-    if len(clean) > 900:
-        return True
-    return False
+    return any(marker in clean for marker in serious_markers) or len(clean) > 900
 
 
-def _proactive_chance(text: str) -> float:
+def _proactive_topic_key(text: str) -> str:
+    words = re.findall(r"[\w@-]{4,}", (text or "").casefold())
+    stop = {"это", "если", "тебя", "меня", "просто", "сейчас", "очень", "когда", "почему", "может"}
+    useful = [word for word in words if word not in stop]
+    return " ".join(useful[:3]) if useful else (text or "").casefold()[:32]
+
+
+def _proactive_signal_score(text: str) -> int:
     clean = (text or "").casefold()
-    hook_markers = (
-        "ахах", "ахаха", "ору", "лол", "кек", "база", "кринж", "жиза", "имба",
-        "мем", "казино", "печень", "печеньк", "ника", "нейроника", "рофл", "угар",
+    score = 0
+    marker_groups = (
+        (("ахах", "ахаха", "хах", "ору", "рофл", "угар", "лол", "кек"), 4),
+        (("мем", "база", "кринж", "жиза", "имба", "сигма", "вайб"), 3),
+        (("казино", "джекпот", "ставк", "печень", "печеньк"), 3),
+        (("ника", "нейроника", "ботиха"), 2),
+        (("спор", "решите", "кто прав", "выбираем", "голосуем"), 2),
+        (("что делать", "как думаете", "как думаешь", "почему"), 1),
     )
-    if any(marker in clean for marker in hook_markers):
-        return 0.18
+    for markers, value in marker_groups:
+        if any(marker in clean for marker in markers):
+            score += value
     if "?" in clean:
-        return 0.04
-    return 0.07
+        score += 1
+    if re.search(r"(^|\s)(\+\+|\+1|жесть|реально|сильно)($|\s)", clean):
+        score += 1
+    if len(clean) <= 18 and score <= 1:
+        score -= 1
+    if len(clean) > 450:
+        score -= 2
+    return max(0, score)
 
 
 def _should_try_proactive(
@@ -72,17 +98,49 @@ def _should_try_proactive(
     if _proactive_bad_moment(text):
         return False
 
+    message_count = _PROACTIVE_MESSAGE_COUNT.get(chat_id, 0)
+    score = _proactive_signal_score(text)
+    unique_authors = len(set(_PROACTIVE_RECENT_AUTHORS.get(chat_id, ())))
+    if message_count < _PROACTIVE_MIN_MESSAGES and score < 6:
+        return False
+    if unique_authors < 2 and message_count < 10 and score < 6:
+        return False
+
     now = time.time()
-    if now - _PROACTIVE_LAST_AT.get(chat_id, 0.0) < _PROACTIVE_COOLDOWN_SECONDS:
+    cooldown = _PROACTIVE_HOT_COOLDOWN_SECONDS if score >= 6 else _PROACTIVE_COOLDOWN_SECONDS
+    if now - _PROACTIVE_LAST_AT.get(chat_id, 0.0) < cooldown:
         return False
-    if _PROACTIVE_MESSAGE_COUNT.get(chat_id, 0) < _PROACTIVE_MIN_MESSAGES:
+
+    topic_key = _proactive_topic_key(text)
+    if topic_key and topic_key in _PROACTIVE_RECENT_TOPICS[chat_id] and score < 6:
         return False
-    if random.random() > _proactive_chance(text):
+
+    chance = min(0.45, 0.05 + score * 0.06)
+    if unique_authors >= 3:
+        chance += 0.05
+    if message_count >= 14:
+        chance += 0.04
+    if random.random() > min(0.55, chance):
         return False
 
     _PROACTIVE_LAST_AT[chat_id] = now
     _PROACTIVE_MESSAGE_COUNT[chat_id] = 0
+    if topic_key:
+        _PROACTIVE_RECENT_TOPICS[chat_id].append(topic_key)
     return True
+
+
+def _message_directed_at_bot_for_moderation(message: Message, text: str, bot_name: str, bot_username: str | None) -> bool:
+    if _message_mentions_bot(text, bot_name, bot_username):
+        return True
+    replied = message.reply_to_message.from_user if message.reply_to_message else None
+    if not replied:
+        return False
+    if bot_username and (replied.username or "").casefold() == bot_username.casefold():
+        return True
+    reply_name = (replied.first_name or "").casefold()
+    return bool(replied.is_bot and bot_name.casefold() in reply_name)
+
 
 def _looks_like_memory_signal(text: str) -> bool:
     clean = re.sub(r"\s+", " ", text.strip().lower())
@@ -297,16 +355,24 @@ def build_messages_router(bot: Bot, settings: Settings, db: SupabaseDB, ai: AISe
             lowered = text.lower()
             found_bad_word = any(word and _word_in_text(lowered, word) for word in bad_words)
             promo_link = "t.me/" in lowered or "telegram.me/" in lowered
+            directed_at_nika = _message_directed_at_bot_for_moderation(
+                message,
+                text,
+                settings.bot_name,
+                settings.bot_username,
+            )
 
             sender_is_admin = await _message_sender_is_admin(bot, message, sender)
-            if found_bad_word or (promo_link and settings_row.link_filter_enabled and not sender_is_admin):
+            bad_word_violation = found_bad_word and not directed_at_nika
+            link_violation = promo_link and settings_row.link_filter_enabled and not sender_is_admin
+            if bad_word_violation or link_violation:
                 try:
                     await message.delete()
                 except Exception:
                     pass
                 updated = db.apply_warn(user)
                 warns_now = updated.warns if updated else user.warns + 1
-                reason = "Ссылки t.me запрещены." if promo_link and settings_row.link_filter_enabled else "Нарушение правил чата."
+                reason = "Ссылки t.me запрещены." if link_violation else "Нарушение правил чата."
                 await message.answer(f"{sender.display_name}, {reason} Предупреждение {warns_now}/{settings.warn_limit}.")
                 return
 
@@ -377,10 +443,7 @@ def build_messages_router(bot: Bot, settings: Settings, db: SupabaseDB, ai: AISe
             is_private_chat = message.chat.type == "private"
             chat_settings = db.get_chat_settings(message.chat.id)
             if not is_private_chat and chat_settings.ai_enabled and chat_settings.proactive_enabled:
-                _PROACTIVE_MESSAGE_COUNT[message.chat.id] = min(
-                    100,
-                    _PROACTIVE_MESSAGE_COUNT.get(message.chat.id, 0) + 1,
-                )
+                _track_proactive_activity(message.chat.id, sender.user_id, text)
             should_reply = is_private_chat or is_reply_to_bot or is_mentioned
             if not is_private_chat and not chat_settings.ai_enabled:
                 should_reply = False
@@ -491,10 +554,13 @@ async def _send_proactive_reply(
 ) -> None:
     prompt = (
         "<proactive_instruction>\n"
-        "Ты можешь один раз аккуратно вклиниться в живой групповой чат, если момент правда удачный. "
-        "Ответь одной короткой репликой до 220 символов: смешно, по теме и без ощущения, что ты перебиваешь людей. "
-        "Можно использовать 1-2 эмодзи, если это естественно. Не пиши длинных объяснений и не упоминай внутренние правила. "
-        "Если момент неудачный, спорный, грустный, слишком серьезный или ты не уверена, ответь ровно: SILENCE\n"
+        "Ты сама решаешь, стоит ли вмешиваться в живой групповой чат. "
+        "Твоя цель — добавить вайба, разрядить момент, подколоть по теме или поставить точный невербальный жест. "
+        "Выбери один режим: SILENCE, tool-only реакция/стикер, или одна короткая реплика. "
+        "Если достаточно реакции/стикера — используй инструмент и не добавляй текст. "
+        "Если пишешь текст, максимум 180 символов, без приветствий, без объяснения правил, без вопроса ради вопроса. "
+        "Не вклинивайся в боль, срочные проблемы, жесткий конфликт, личные данные или админские разборки. "
+        "Если момент слабый или ты не уверена, ответь ровно: SILENCE.\n"
         "</proactive_instruction>\n\n"
         f"{ai_input_text}"
     )
@@ -528,17 +594,19 @@ async def _send_proactive_reply(
         username=bot_username,
         is_bot=True,
     )
+    reply_to_id = message.message_id
     for chunk in _split_telegram_text(text):
         try:
-            sent = await bot.send_message(message.chat.id, chunk)
+            sent = await bot.send_message(message.chat.id, chunk, reply_to_message_id=reply_to_id)
             db.store_message_context(
                 message.chat.id,
                 sent.message_id,
                 bot_sender,
                 chunk,
                 message_type="bot_reply",
-                reply_to_message_id=None,
+                reply_to_message_id=reply_to_id,
             )
+            reply_to_id = None
         except Exception as exc:
             print(f"[AI:proactive_send_error] chat_id={message.chat.id} error={exc}")
             return
