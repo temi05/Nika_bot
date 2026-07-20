@@ -486,6 +486,7 @@ def build_messages_router(bot: Bot, settings: Settings, db: SupabaseDB, ai: AISe
                                 caller_is_admin,
                                 is_private_chat=is_private_chat,
                                 image_data_urls=image_data_urls,
+                                source_message_id=message.message_id,
                             ),
                             timeout=25.0
                         )
@@ -502,8 +503,6 @@ def build_messages_router(bot: Bot, settings: Settings, db: SupabaseDB, ai: AISe
                 reply = "Я что-то задумалась и потеряла нить разговора... Можешь повторить?"
 
             if reply is not None:
-                # Если ответ пустой (но не None), значит ИИ отработал только инструментами (стикер, реакция и т.д.)
-                # Это нормальное поведение.
                 if reply.strip() == "":
                     print("✉️ [AI] Tool-only action performed, skipping text reply.")
                 else:
@@ -514,7 +513,16 @@ def build_messages_router(bot: Bot, settings: Settings, db: SupabaseDB, ai: AISe
                         username=bot_username,
                         is_bot=True,
                     )
-                    await _send_ai_reply(bot, message, reply, db=db, bot_sender=bot_sender)
+                    is_remember_triggered = getattr(ai, "_remember_triggered_in_chat", {}).get(message.chat.id, False)
+                    await _send_ai_reply(
+                        bot,
+                        message,
+                        reply,
+                        db=db,
+                        bot_sender=bot_sender,
+                        attach_forget_button=is_remember_triggered,
+                        source_message_id=message.message_id,
+                    )
             elif _should_try_proactive(
                 message.chat.id,
                 text,
@@ -611,7 +619,16 @@ async def _send_proactive_reply(
             print(f"[AI:proactive_send_error] chat_id={message.chat.id} error={exc}")
             return
 
-async def _send_ai_reply(bot: Bot, message: Message, reply: str, *, db: SupabaseDB, bot_sender: Sender) -> None:
+async def _send_ai_reply(
+    bot: Bot,
+    message: Message,
+    reply: str,
+    *,
+    db: SupabaseDB,
+    bot_sender: Sender,
+    attach_forget_button: bool = False,
+    source_message_id: int | None = None
+) -> None:
     text = (reply or "").strip()
     if not text:
         return
@@ -620,7 +637,13 @@ async def _send_ai_reply(bot: Bot, message: Message, reply: str, *, db: Supabase
     for index, chunk in enumerate(chunks):
         try:
             if index == 0:
-                sent = await message.reply(chunk)
+                reply_markup = None
+                if attach_forget_button and source_message_id:
+                    from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+                    reply_markup = InlineKeyboardMarkup(inline_keyboard=[
+                        [InlineKeyboardButton(text="❌ Забыть этот факт", callback_data=f"forget_fact_{source_message_id}")]
+                    ])
+                sent = await message.reply(chunk, reply_markup=reply_markup)
             else:
                 sent = await bot.send_message(message.chat.id, chunk)
             db.store_message_context(

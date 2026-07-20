@@ -546,7 +546,7 @@ class SupabaseDB:
         )
         return updated
 
-    def append_ai_note(self, user: ChatUser, note: str) -> ChatUser | None:
+    def append_ai_note(self, user: ChatUser, note: str, source_message_id: int | None = None) -> ChatUser | None:
         clean_note = note.strip()[:300]
         if not clean_note:
             return user
@@ -562,6 +562,7 @@ class SupabaseDB:
                 meta={"user_id": user.user_id},
                 entity_user_id=user.user_id,
                 entity_name=user.display_name,
+                source_message_id=source_message_id,
             ),
         )
         return updated
@@ -984,6 +985,35 @@ class SupabaseDB:
     def delete_memory_by_source_id(self, chat_id: int, source_message_id: int) -> int:
         if not source_message_id:
             return 0
+
+        # Сначала найдем записи памяти, чтобы очистить ai_notes у пользователей
+        memories = self._safe_execute(
+            self._knowledge()
+            .select("fact, entity_user_id, fact_type")
+            .eq("chat_id", chat_id)
+            .eq("source_message_id", source_message_id),
+            fallback=None,
+            context=f"get_memory_before_delete chat_id={chat_id} source_message_id={source_message_id}",
+        )
+
+        if memories and memories.data:
+            for item in memories.data:
+                fact_text = item.get("fact") or ""
+                entity_user_id = item.get("entity_user_id")
+                fact_type = item.get("fact_type") or ""
+
+                if entity_user_id and fact_type == "ai_note" and ": " in fact_text:
+                    try:
+                        clean_note = fact_text.split(": ", 1)[1].strip()
+                        user = self.get_user_by_platform_id(chat_id, int(entity_user_id))
+                        if user and user.ai_notes:
+                            lines = [line.strip() for line in user.ai_notes.split("\n") if line.strip()]
+                            target_line = f"- {clean_note}"
+                            filtered = [l for l in lines if l != target_line and clean_note not in l]
+                            self.update_user(user.id, {"ai_notes": "\n".join(filtered) if filtered else None})
+                    except Exception as exc:
+                        print(f"[DB:delete_memory_sync_error] error={exc}")
+
         rows = self._safe_execute(
             self._knowledge()
             .delete()

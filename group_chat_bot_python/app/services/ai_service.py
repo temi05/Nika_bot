@@ -81,6 +81,8 @@ class AIService:
         self.last_group_reply_at: dict[int, datetime] = {}
         self.sticker_pack_name = "neuronics_pack_by_MoiStikiBot"
         self._sticker_cache: list[Any] = []
+        self._current_source_message_id: dict[int, int | None] = {}
+        self._remember_triggered_in_chat: dict[int, bool] = defaultdict(bool)
 
     def _log(self, event: str, **kwargs: Any) -> None:
         details = " ".join(f"{key}={value!r}" for key, value in kwargs.items())
@@ -354,15 +356,18 @@ class AIService:
         caller_is_admin: bool = False,
         is_private_chat: bool = False,
         image_data_urls: list[str] | None = None,
+        source_message_id: int | None = None,
     ) -> str | None:
+        self._current_source_message_id[chat_id] = source_message_id
+        self._remember_triggered_in_chat[chat_id] = False
+
         if not user_text:
             self._log("skip", reason="empty_text", chat_id=chat_id)
             return None
 
         plain_user_text = self._extract_current_plain_text(user_text)
-        
-        # Сначала проверяем прямые команды, но даем на них живой ответ
         direct_reply = await self._maybe_handle_direct_action(chat_id, sender, plain_user_text)
+
         if direct_reply:
             self.remember_message(chat_id, Sender(user_id=0, first_name=self.settings.bot_name), direct_reply)
             self._remember_bot_reply(chat_id, direct_reply)
@@ -917,6 +922,56 @@ class AIService:
                     }
                 }
             },
+            {
+                "type": "function",
+                "function": {
+                    "name": "send_gif",
+                    "description": "Найти и отправить GIF-анимацию из Nekos.best API в чат. Используй для живого выражения эмоций (смех, смущение, злость, танец, фейспалм и др.) или по просьбе пользователя.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query": {"type": "string", "description": "Название эмоции на английском или русском для поиска (например: hug, cry, smug, laugh, angry)"},
+                            "caption": {"type": "string", "description": "Текстовая подпись к гифке (необязательно)"}
+                        },
+                        "required": ["query"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "send_rp_action",
+                    "description": "Выполнить ролевое интерактивное действие (обнять, поцеловать, погладить, ударить, сделать кусь, подразнить и т.д.) от лица Ники по отношению к пользователю.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "target_name": {"type": "string", "description": "Имя пользователя или его @username, на кого направлено действие"},
+                            "action": {
+                                "type": "string", 
+                                "enum": ["hug", "pat", "kiss", "slap", "bite", "punch", "cuddle", "tickle", "smug"],
+                                "description": "Тип ролевого действия (hug - обнять, pat - погладить, kiss - поцеловать, slap - шлепнуть, bite - сделать кусь, punch - ударить, cuddle - прижать, tickle - пощекотать, smug - подразнить)"
+                            },
+                            "custom_text": {"type": "string", "description": "Дополнительный комментарий Ники к действию (необязательно)"}
+                        },
+                        "required": ["target_name", "action"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "challenge_user_to_duel",
+                    "description": "Бросить вызов пользователю на дуэль за печеньки. Ника сама играет против указанного пользователя. Списывается ставка, кидаются кости и определяется победитель.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "target_name": {"type": "string", "description": "Имя соперника или его @username"},
+                            "amount": {"type": "integer", "description": "Ставка печенек (от 10 до 100)"}
+                        },
+                        "required": ["target_name", "amount"]
+                    }
+                }
+            },
         ]
 
     async def _run_tool_call(self, chat_id: int, sender: Sender, caller_is_admin: bool, tool_name: str, raw_arguments: str) -> str:
@@ -951,6 +1006,12 @@ class AIService:
             return self._tool_get_chat_top(chat_id, args)
         if tool_name == "send_dice":
             return await self._tool_send_dice(chat_id, args)
+        if tool_name == "send_gif":
+            return await self._tool_send_gif(chat_id, args)
+        if tool_name == "send_rp_action":
+            return await self._tool_send_rp_action(chat_id, sender, args)
+        if tool_name == "challenge_user_to_duel":
+            return await self._tool_challenge_user_to_duel(chat_id, sender, args)
         return "Неизвестный инструмент."
 
     async def _tool_send_reaction(self, chat_id: int, args: dict[str, Any]) -> str:
@@ -1202,7 +1263,9 @@ class AIService:
             self.db.set_bio(target, content)
             return f"Био для {target.display_name} успешно обновлено."
         if action == "add_note":
-            self.db.append_ai_note(target, content)
+            source_msg_id = self._current_source_message_id.get(chat_id)
+            self.db.append_ai_note(target, content, source_message_id=source_msg_id)
+            self._remember_triggered_in_chat[chat_id] = True
             return f"Факт о {target.display_name} сохранен в базу."
         return "Неизвестное действие с профилем."
 
@@ -1735,3 +1798,147 @@ class AIService:
                 except Exception as fallback_exc:
                     self._log("retry_empty_fallback_error", error=str(fallback_exc))
         return ""
+
+    async def _tool_send_gif(self, chat_id: int, args: dict[str, Any]) -> str:
+        query = str(args.get("query") or "").strip()
+        caption = str(args.get("caption") or "").strip()
+        if not query:
+            return "Не указан запрос для поиска гифки."
+        
+        from app.bot.rp_commands import _find_nekos_best_gif
+        try:
+            url = await _find_nekos_best_gif(query)
+            if not url:
+                return f"Гифка по запросу '{query}' не найдена."
+            
+            await self.bot.send_animation(
+                chat_id=chat_id,
+                animation=url,
+                caption=caption if caption else None,
+                parse_mode="HTML"
+            )
+            return "Гифка успешно отправлена в чат."
+        except Exception as exc:
+            self._log("send_gif_error", error=str(exc))
+            return f"Не удалось отправить гифку: {exc}"
+
+    async def _tool_send_rp_action(self, chat_id: int, sender: Sender, args: dict[str, Any]) -> str:
+        target_name = str(args.get("target_name") or "").strip()
+        action = str(args.get("action") or "").strip().lower()
+        custom_text = str(args.get("custom_text") or "").strip()
+
+        if not target_name:
+            return "Не указана цель для ролевого действия."
+        if not action:
+            return "Не указано действие."
+
+        target = self._resolve_target_user(chat_id, sender, target_name)
+        if not target:
+            return f"Пользователь '{target_name}' не найден."
+
+        action_map = {
+            "hug": ("обняла", "🤗"),
+            "pat": ("погладила по головке", "👋"),
+            "kiss": ("поцеловала", "💋"),
+            "slap": ("шлёпнула", "😵"),
+            "bite": ("сделала кусь", "🦷"),
+            "punch": ("ударила", "👊"),
+            "cuddle": ("нежно прижала к себе", "🤱"),
+            "tickle": ("пощекотала", "😆"),
+            "smug": ("подмигнула с усмешкой", "😏"),
+        }
+
+        verb, emoji = action_map.get(action, (f"сделала {action}", "✨"))
+        
+        from app.bot.rp_commands import _find_nekos_best_gif
+        url = await _find_nekos_best_gif(action)
+
+        caption = f"✨ <b>{self.settings.bot_name}</b> {verb} <b>{target.display_name}</b> {emoji}"
+        if custom_text:
+            caption += f"\n\n<i>{custom_text}</i>"
+
+        try:
+            if url:
+                await self.bot.send_animation(
+                    chat_id=chat_id,
+                    animation=url,
+                    caption=caption,
+                    parse_mode="HTML"
+                )
+            else:
+                await self.bot.send_message(
+                    chat_id=chat_id,
+                    text=caption,
+                    parse_mode="HTML"
+                )
+            return "Ролевое действие успешно отправлено в чат."
+        except Exception as exc:
+            self._log("send_rp_action_error", error=str(exc))
+            return f"Не удалось отправить ролевое действие: {exc}"
+
+    async def _tool_challenge_user_to_duel(self, chat_id: int, sender: Sender, args: dict[str, Any]) -> str:
+        target_name = str(args.get("target_name") or "").strip()
+        amount = int(args.get("amount") or 20)
+
+        if not target_name:
+            return "Не указан соперник для дуэли."
+        if amount <= 0:
+            return "Ставка должна быть положительной."
+
+        target = self._resolve_target_user(chat_id, sender, target_name)
+        if not target:
+            return f"Пользователь '{target_name}' не найден."
+
+        if target.display_name == self.settings.bot_name:
+            return "Я не могу играть сама с собой."
+
+        target_user = self.db.get_or_create_user(chat_id, Sender(
+            user_id=target.user_id,
+            first_name=target.first_name,
+            username=target.username,
+            is_bot=False
+        ))
+
+        if target_user.reputation < amount:
+            return f"У {target.display_name} недостаточно печенек для дуэли (нужно {amount}, есть {target_user.reputation})."
+
+        bot_roll = random.randint(1, 6)
+        user_roll = random.randint(1, 6)
+
+        dice_emojis = {1: "⚀", 2: "⚁", 3: "⚂", 4: "⚃", 5: "⚄", 6: "⚅"}
+        bot_dice = dice_emojis[bot_roll]
+        user_dice = dice_emojis[user_roll]
+
+        title = f"⚔️ <b>ИИ-Дуэль: {self.settings.bot_name} против {target.display_name}!</b>"
+        bet_info = f"Ставка: <code>{amount} 🍪</code>\n"
+
+        lines = [
+            title,
+            bet_info,
+            f"🤖 <b>{self.settings.bot_name}</b> бросает: {bot_dice} (<code>{bot_roll}</code>)",
+            f"👤 <b>{target.display_name}</b> бросает: {user_dice} (<code>{user_roll}</code>)",
+            ""
+        ]
+
+        if bot_roll > user_roll:
+            self.db.update_user(target_user.id, {"reputation": target_user.reputation - amount})
+            lines.append(f"🏆 <b>Победа Ники!</b>\n└ {target.display_name} теряет <code>{amount} 🍪</code> (осталось: <code>{target_user.reputation - amount}</code>).")
+            result_str = "Я выиграла дуэль!"
+        elif user_roll > bot_roll:
+            self.db.update_user(target_user.id, {"reputation": target_user.reputation + amount})
+            lines.append(f"🏆 <b>Победа {target.display_name}!</b>\n└ Получает <code>{amount} 🍪</code> (теперь у него: <code>{target_user.reputation + amount}</code>).")
+            result_str = "Пользователь выиграл дуэль."
+        else:
+            lines.append("🤝 <b>Ничья!</b> Все остались при своих.")
+            result_str = "Ничья в дуэли."
+
+        try:
+            await self.bot.send_message(
+                chat_id=chat_id,
+                text="\n".join(lines),
+                parse_mode="HTML"
+            )
+            return f"Дуэль проведена. Результат: {result_str}"
+        except Exception as exc:
+            self._log("challenge_duel_error", error=str(exc))
+            return f"Не удалось провести дуэль: {exc}"

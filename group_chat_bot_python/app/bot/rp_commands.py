@@ -229,55 +229,91 @@ def _extract_animation_id(message: Message) -> str | None:
     return None
 
 
-async def _find_tenor_gif(action_name: str) -> str | None:
+RP_ACTION_TO_NEKOS_BEST = {
+    "обнять": "hug",
+    "погладить": "pat",
+    "поцеловать": "kiss",
+    "пожать_руку": "handshake",
+    "взять_за_руку": "handhold",
+    "похлопать": "clap",
+    "поддержать": "thumbsup",
+    "утешить": "cuddle",
+    "порадоваться": "happy",
+    "поздравить": "wave",
+    "пощекотать": "tickle",
+    "подразнить": "smug",
+    "шлепнуть": "slap",
+    "укусить": "bite",
+    "кусь": "bite",
+    "убить": "shoot",
+    "ударить": "punch",
+    "покормить": "feed",
+    "прижать": "cuddle",
+    "облизать": "bleh",
+    "лизнуть": "bleh",
+    "шепнуть": "lurk",
+}
+
+
+async def _find_nekos_best_gif(action_name: str) -> str | None:
     if action_name in RP_GIF_CACHE:
         return RP_GIF_CACHE[action_name]
 
-    settings = get_settings()
-    if not settings.rp_gif_autosearch or not settings.tenor_api_key:
-        return None
+    category = RP_ACTION_TO_NEKOS_BEST.get(action_name)
+    if not category:
+        category = action_name.lower().strip()
+        supported_categories = {
+            "angry", "baka", "bite", "bleh", "blowkiss", "blush", "bonk", "bored", "carry", "clap",
+            "confused", "cry", "cuddle", "dance", "facepalm", "feed", "handhold", "handshake",
+            "happy", "highfive", "hug", "kabedon", "kick", "kiss", "lap", "laugh", "lurk", "nod",
+            "nom", "nope", "nyan", "pat", "peck", "poke", "pout", "punch", "run", "salute", "shake",
+            "shoot", "shrug", "sip", "slap", "sleep", "smile", "smug", "spin", "stare", "tableflip",
+            "think", "thumbsup", "tickle", "wave", "wink", "yawn", "yeet"
+        }
+        if category not in supported_categories:
+            clean_act = category.casefold()
+            if any(w in clean_act for w in ["смех", "laugh", "lol", "haha", "хаха", "ору"]):
+                category = "laugh"
+            elif any(w in clean_act for w in ["груст", "плач", "cry", "sad"]):
+                category = "cry"
+            elif any(w in clean_act for w in ["зло", "angry", "rage", "бесит"]):
+                category = "angry"
+            elif any(w in clean_act for w in ["дума", "think", "хмм"]):
+                category = "think"
+            elif any(w in clean_act for w in ["привет", "wave", "hi", "hello"]):
+                category = "wave"
+            elif any(w in clean_act for w in ["сон", "sleep", "tired"]):
+                category = "sleep"
+            elif any(w in clean_act for w in ["подмиг", "wink"]):
+                category = "wink"
+            elif any(w in clean_act for w in ["смущ", "blush", "стыд"]):
+                category = "blush"
+            else:
+                category = "happy"
 
-    queries = RP_GIF_QUERIES.get(action_name) or [f"anime {action_name}"]
-    query = random.choice(queries)
-    params = {
-        "key": settings.tenor_api_key,
-        "client_key": settings.tenor_client_key,
-        "q": query,
-        "limit": 12,
-        "media_filter": "gif,tinygif",
-        "contentfilter": "medium",
-        "random": "true",
-    }
+    headers = {"User-Agent": "NikaBot/1.0 (https://t.me/NikaBot)"}
     try:
         async with httpx.AsyncClient(timeout=8) as client:
-            response = await client.get("https://tenor.googleapis.com/v2/search", params=params)
+            response = await client.get(f"https://nekos.best/api/v2/{category}", headers=headers)
             response.raise_for_status()
             payload = response.json()
     except Exception as exc:
-        print(f"[RP:tenor_search_error] action={action_name} query={query!r} error={exc}")
+        print(f"[RP:nekos_best_error] action={action_name} category={category} error={exc}")
         return None
 
     results = payload.get("results") if isinstance(payload, dict) else None
     if not isinstance(results, list) or not results:
         return None
 
-    random.shuffle(results)
-    for item in results:
-        media_formats = item.get("media_formats") if isinstance(item, dict) else None
-        if not isinstance(media_formats, dict):
-            continue
-        media = media_formats.get("gif") or media_formats.get("tinygif")
-        if not isinstance(media, dict):
-            continue
-        url = str(media.get("url") or "").strip()
-        if url:
-            RP_GIF_CACHE[action_name] = url
-            return url
+    url = str(results[0].get("url") or "").strip()
+    if url:
+        RP_GIF_CACHE[action_name] = url
+        return url
     return None
 
 
 async def _answer_rp(message: Message, text: str, *, action_name: str, parse_mode: str | None = None) -> None:
-    animation = _load_rp_gifs().get(action_name) or await _find_tenor_gif(action_name)
+    animation = _load_rp_gifs().get(action_name) or await _find_nekos_best_gif(action_name)
     if not animation:
         await message.answer(text, parse_mode=parse_mode)
         return
