@@ -21,6 +21,9 @@ class LightweightEmbeddingFunction:
     def __init__(self, dim: int = 128) -> None:
         self.dim = dim
 
+    def name(self) -> str:
+        return "lightweight_embedding_function"
+
     def __call__(self, input: list[str]) -> list[list[float]]:
         embeddings = []
         for text in input:
@@ -34,6 +37,7 @@ class LightweightEmbeddingFunction:
                 vec = [x / norm for x in vec]
             embeddings.append(vec)
         return embeddings
+
 
 
 class ChromaMemoryProvider(BaseMemoryProvider):
