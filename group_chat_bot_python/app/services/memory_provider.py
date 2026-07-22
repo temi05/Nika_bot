@@ -302,5 +302,11 @@ class DatabaseMemoryProvider(BaseMemoryProvider):
         return {"summary": "", "facts": facts, "participants": participants}
 
 
-def build_memory_provider(settings: Settings, db: SupabaseDB) -> BaseMemoryProvider:
+def build_memory_provider(settings: Settings, db: SupabaseDB, backup_service=None) -> BaseMemoryProvider:
+    if settings.memory_provider == "chroma":
+        try:
+            from app.services.chroma_memory_provider import ChromaMemoryProvider
+            return ChromaMemoryProvider(settings, db, backup_service)
+        except Exception as e:
+            print(f"[MEMORY:chroma_fallback] Failed to load ChromaMemoryProvider, falling back to DatabaseMemoryProvider: {e}")
     return DatabaseMemoryProvider(settings, db)

@@ -34,7 +34,13 @@ def create_app() -> FastAPI:
     bot = Bot(settings.telegram_bot_token)
     dispatcher = Dispatcher()
     db = SupabaseDB(settings)
-    memory = build_memory_provider(settings, db)
+
+    from pathlib import Path
+    from app.services.telegram_backup import TelegramBackupService
+    data_dir = Path(__file__).resolve().parents[1] / "data" / "chroma_db"
+    backup_service = TelegramBackupService(bot, settings.memory_backup_chat_id, data_dir)
+
+    memory = build_memory_provider(settings, db, backup_service)
     persona = PersonaService(db)
     ai_service = AIService(settings, db, memory, persona, bot)
 

@@ -59,8 +59,9 @@ class Settings(BaseSettings):
     tenor_client_key: str = Field(default="neuronika_rp", alias="TENOR_CLIENT_KEY")
     rp_gif_autosearch: bool = Field(default=False, alias="RP_GIF_AUTOSEARCH")
 
-    # Провайдер памяти: только "database" (Supabase)
-    memory_provider: str = Field(default="database", alias="MEMORY_PROVIDER")
+    # Провайдер памяти: "database" (Supabase) или "chroma" (ChromaDB + Telegram)
+    memory_provider: str = Field(default="chroma", alias="MEMORY_PROVIDER")
+    memory_backup_chat_id: int | str | None = Field(default=None, alias="MEMORY_BACKUP_CHAT_ID")
 
     link_filter_default: bool = Field(default=True, alias="LINK_FILTER_DEFAULT")
     warn_limit: int = Field(default=3, alias="WARN_LIMIT")

@@ -805,4 +805,22 @@ def build_profile_ai_router(db: SupabaseDB, ai: AIService, bot_name: str) -> Rou
                 parse_mode="HTML"
             )
 
+    @router.message(Command("nika_brain", "мозг"))
+    async def nika_brain_command(message: Message, command: CommandObject) -> None:
+        """Просмотр памяти ИИ Ники по запросу"""
+        query = (command.args or "").strip()
+        if not query:
+            await message.answer("🧠 Использование: <code>/nika_brain запрос</code> (например: <i>/nika_brain кто любит пиццу</i>)", parse_mode="HTML")
+            return
+
+        facts = await ai.memory.get_relevant_facts(message.chat.id, query, message.from_user.first_name if message.from_user else "")
+        if not facts:
+            await message.answer(f"🧠 В памяти ничего не найдено по запросу: <i>{escape_html(query)}</i>", parse_mode="HTML")
+            return
+
+        await message.answer(
+            f"🧠 <b>Результаты поиска в памяти по запросу «{escape_html(query)}»:</b>\n\n{escape_html(facts)}",
+            parse_mode="HTML",
+        )
+
     return router
