@@ -82,6 +82,8 @@ def build_profile_ai_router(db: SupabaseDB, ai: AIService, bot_name: str) -> Rou
         )
         
         ok = db.store_memory(message.chat.id, record)
+        if hasattr(ai.memory, "store_single_fact"):
+            ai.memory.store_single_fact(message.chat.id, f"{sender.display_name}: {fact[:500]}", sender.display_name)
         
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="❌ Забыть этот факт", callback_data=f"forget_fact_{message.message_id}")]
@@ -813,6 +815,201 @@ def build_profile_ai_router(db: SupabaseDB, ai: AIService, bot_name: str) -> Rou
             await message.answer("🧠 Использование: <code>/nika_brain запрос</code> (например: <i>/nika_brain кто любит пиццу</i>)", parse_mode="HTML")
             return
 
+        lines = [
+            f"✍️ <b>Цены сигн у {escape_html(target.display_name)}</b>",
+            "",
+            f"Базовая: <b>{price}</b> 🍪",
+        ]
+        if options:
+            lines.append("")
+            lines.append("<b>Тарифы:</b>")
+            for option in options:
+                description = str(option.get("description") or "").strip()
+                lines.append(
+                    f"#{option['id']} — <b>{escape_html(str(option.get('title') or 'сигна'))}</b>: "
+                    f"<b>{int(option.get('price') or 0)}</b> 🍪"
+                    + (f"\n<i>{escape_html(description)}</i>" if description else "")
+                )
+            lines.append("")
+            lines.append("Заказ по тарифу: ответь автору <code>/signreq # текст</code>")
+        else:
+            lines.append("Отдельных тарифов пока нет.")
+        await message.answer("\n".join(lines), parse_mode="HTML")
+
+    def _sign_status_label(status: str) -> str:
+        return {
+            "pending": "ждет автора",
+            "accepted": "в работе",
+            "delivered": "ждет подтверждения",
+            "paid": "оплачен",
+            "cancelled": "отменен",
+        }.get(status, status)
+
+    def _format_sign_order(row: dict, *, role: str) -> str:
+        other = row.get("buyer_name") if role == "author" else row.get("author_name")
+        other_label = "Покупатель" if role == "author" else "Автор"
+        option_line = f"Тариф: <b>{escape_html(str(row.get('option_title')))}</b>\n" if row.get("option_title") else ""
+        return (
+            f"#{row.get('id')} | <b>{_sign_status_label(str(row.get('status')))}</b> | "
+            f"<b>{int(row.get('price') or 0)}</b> 🍪\n"
+            f"{other_label}: {escape_html(str(other or 'unknown'))}\n"
+            f"{option_line}"
+            f"Текст: <i>{escape_html(str(row.get('text') or '')[:120])}</i>"
+        )
+
+    def _sign_order_keyboard(rows: list[dict], *, viewer_id: int) -> InlineKeyboardMarkup | None:
+        buttons = []
+        for row in rows:
+            order_id = int(row.get("id") or 0)
+            status = row.get("status")
+            if status == "pending" and int(row.get("author_id") or 0) == viewer_id:
+                buttons.append([
+                    InlineKeyboardButton(text=f"Принять #{order_id}", callback_data=f"sign_accept_{order_id}"),
+                    InlineKeyboardButton(text=f"Отказать #{order_id}", callback_data=f"sign_decline_{order_id}"),
+                ])
+            elif status == "accepted" and int(row.get("author_id") or 0) == viewer_id:
+                buttons.append([
+                    InlineKeyboardButton(text=f"Готово #{order_id}", callback_data=f"sign_done_{order_id}"),
+                    InlineKeyboardButton(text=f"Отменить #{order_id}", callback_data=f"sign_cancel_{order_id}"),
+                ])
+            elif status == "delivered" and int(row.get("buyer_id") or 0) == viewer_id:
+                buttons.append([InlineKeyboardButton(text=f"Подтвердить оплату #{order_id}", callback_data=f"sign_pay_{order_id}")])
+        if not buttons:
+            return None
+        return InlineKeyboardMarkup(inline_keyboard=buttons[:10])
+
+    @router.message(Command("signorders"))
+    async def sign_orders_command(message: Message, command: CommandObject) -> None:
+        user = db.get_or_create_user(message.chat.id, get_sender_data(message))
+        arg = (command.args or "").strip().lower()
+        role = "buyer" if arg in {"buy", "buyer", "bought", "мои", "купил", "заказал"} else "author"
+        rows = db.list_sign_orders(message.chat.id, user.user_id, role=role, limit=10)
+        if not rows:
+            text = "Тебе пока не заказывали сигны." if role == "author" else "Ты пока не заказывал(а) сигны."
+            await message.answer(text)
+            return
+        title = "✍️ <b>Сигны, которые заказали у тебя</b>" if role == "author" else "✍️ <b>Сигны, которые заказал(а) ты</b>"
+        body = "\n\n".join(_format_sign_order(row, role=role) for row in rows)
+        await message.answer(
+            f"{title}\n\n{body}",
+            reply_markup=_sign_order_keyboard(rows, viewer_id=user.user_id),
+            parse_mode="HTML",
+        )
+
+    @router.message(Command("signstats"))
+    async def sign_stats_command(message: Message) -> None:
+        user = db.get_or_create_user(message.chat.id, get_sender_data(message))
+        stats = db.sign_order_stats(message.chat.id, user.user_id)
+        await message.answer(
+            "📊 <b>Статистика сигн</b>\n\n"
+            f"Тебе заказали: <b>{stats['authored_total']}</b>\n"
+            f"Активных у тебя: <b>{stats['authored_active']}</b>\n"
+            f"Оплаченных тобой сделанных: <b>{stats['authored_paid']}</b>\n"
+            f"Заработано: <b>{stats['earned']}</b> 🍪\n\n"
+            f"Ты заказал(а): <b>{stats['bought_total']}</b>\n"
+            f"Твои активные заказы: <b>{stats['bought_active']}</b>\n"
+            f"Потрачено: <b>{stats['spent']}</b> 🍪",
+            parse_mode="HTML",
+        )
+
+    @router.message(Command("signreq", "signrequest"))
+    async def sign_request_command(message: Message, command: CommandObject) -> None:
+        if not message.reply_to_message or not message.reply_to_message.from_user:
+            await message.answer("Ответь на сообщение автора сигны: <code>/signreq текст</code> или <code>/signreq номер_тарифа текст</code>", parse_mode="HTML")
+            return
+        raw_text = (command.args or "").strip()
+        if not raw_text:
+            await message.answer("Напиши текст заказа: <code>/signreq текст</code> или <code>/signreq номер_тарифа текст</code>", parse_mode="HTML")
+            return
+        buyer = db.get_or_create_user(message.chat.id, get_sender_data(message))
+        target_sender = get_sender_data(message.reply_to_message)
+        if target_sender.is_bot or target_sender.user_id == buyer.user_id:
+            await message.answer("❌ Заказывать сигну можно только у другого человека.")
+            return
+        target = db.get_or_create_user(message.chat.id, target_sender)
+        option_id = None
+        option_title = None
+        text = raw_text
+        first_part, _, rest = raw_text.partition(" ")
+        normalized_option = first_part.lstrip("#")
+        price = target.sign_price or ai.settings.human_sign_min_price
+        if normalized_option.isdigit() and rest.strip():
+            option = db.get_sign_price_option(message.chat.id, target.user_id, int(normalized_option))
+            if not option:
+                await message.answer("❌ У автора нет такого активного тарифа. Посмотри цены: ответь ему <code>/signprice</code>", parse_mode="HTML")
+                return
+            option_id = int(option["id"])
+            option_title = str(option.get("title") or "")
+            price = int(option.get("price") or price)
+            text = rest.strip()
+        if buyer.reputation < price:
+            await message.answer(f"❌ Нужно <b>{price}</b> 🍪. Баланс: <b>{buyer.reputation}</b> 🍪", parse_mode="HTML")
+            return
+        order = db.create_sign_order(buyer, target, price, text, option_id=option_id, option_title=option_title)
+        if not order:
+            await message.answer("❌ Не смог создать заказ. Проверь, применена ли миграция signs_and_ai_images.sql.")
+            return
+        order_id = int(order["id"])
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(text="Принять", callback_data=f"sign_accept_{order_id}"),
+                InlineKeyboardButton(text="Отказать", callback_data=f"sign_decline_{order_id}"),
+            ]
+        ])
+        option_line = f"Тариф: <b>{escape_html(option_title)}</b>\n" if option_title else ""
+        await message.answer(
+            f"✍️ <b>Заказ сигны #{order_id}</b>\n\n"
+            f"Автор: {escape_html(target.display_name)}\n"
+            f"Покупатель: {escape_html(buyer.display_name)}\n"
+            f"{option_line}"
+            f"Цена: <b>{price}</b> 🍪\n"
+            f"Текст: <i>{escape_html(text[:300])}</i>\n\n"
+            "Автор должен принять заказ кнопкой. На сигне должен быть сам автор заказа: фото/рисунок/стиль на его выбор, "
+            "но табличка с текстом должна быть видна. Деньги уйдут в эскроу и попадут автору после подтверждения.",
+            reply_markup=keyboard,
+            parse_mode="HTML",
+        )
+
+
+    @router.message(Command("forget", "забудь"))
+    async def forget_command(message: Message, command: CommandObject) -> None:
+        sender = get_sender_data(message)
+        if not await is_admin(message.bot, message.chat.id, sender.user_id):
+            await message.answer("❌ Заставлять меня забывать факты могут только администраторы.")
+            return
+        if not command.args:
+            await message.answer(
+                "🧹 <b>Забыть факт</b>\n\n"
+                "Использование: <code>/forget текст факта</code>\n"
+                "Я удалю из памяти все записи, содержащие этот текст.\n"
+                "<i>Минимум 3 символа.</i>",
+                parse_mode="HTML"
+            )
+            return
+        query = command.args.strip()
+        if len(query) < 3:
+            await message.answer("❌ Запрос слишком короткий. Укажите минимум 3 символа.")
+            return
+        deleted_count = db.delete_memory(message.chat.id, query)
+        if deleted_count > 0:
+            await message.answer(
+                f"🧹 <b>Готово!</b> Удалила <b>{deleted_count}</b> записей из памяти по запросу «{escape_html(query)}».",
+                parse_mode="HTML"
+            )
+        else:
+            await message.answer(
+                f"🤷‍♀️ Ничего не нашла в памяти по запросу «{escape_html(query)}».",
+                parse_mode="HTML"
+            )
+
+    @router.message(Command("nika_brain", "мозг"))
+    async def nika_brain_command(message: Message, command: CommandObject) -> None:
+        """Просмотр памяти ИИ Ники по запросу"""
+        query = (command.args or "").strip()
+        if not query:
+            await message.answer("🧠 Использование: <code>/nika_brain запрос</code> (например: <i>/nika_brain кто любит пиццу</i>)", parse_mode="HTML")
+            return
+
         facts = await ai.memory.get_relevant_facts(message.chat.id, query, message.from_user.first_name if message.from_user else "")
         if not facts:
             await message.answer(f"🧠 В памяти ничего не найдено по запросу: <i>{escape_html(query)}</i>", parse_mode="HTML")
@@ -822,5 +1019,22 @@ def build_profile_ai_router(db: SupabaseDB, ai: AIService, bot_name: str) -> Rou
             f"🧠 <b>Результаты поиска в памяти по запросу «{escape_html(query)}»:</b>\n\n{escape_html(facts)}",
             parse_mode="HTML",
         )
+
+    @router.message(Command("backup_memory", "бэкап"))
+    async def backup_memory_command(message: Message) -> None:
+        """Принудительная выгрузка бэкапа векторной базы данных в Telegram"""
+        sender = get_sender_data(message)
+        if not await is_admin(message.bot, message.chat.id, sender.user_id):
+            await message.answer("❌ Эта команда доступна только администраторам.")
+            return
+
+        if hasattr(ai.memory, "backup_service") and ai.memory.backup_service:
+            success = await ai.memory.backup_service.upload_backup("💾 Ручной бэкап памяти по команде /backup_memory")
+            if success:
+                await message.answer("💾 <b>Успех!</b> Файл бэкапа векторной памяти выгружен в бэкап-чат.", parse_mode="HTML")
+            else:
+                await message.answer("❌ <b>Ошибка выгрузки:</b> Проверьте права бота в чате бэкапа.", parse_mode="HTML")
+        else:
+            await message.answer("ℹ️ Использование бэкапов доступно при <code>MEMORY_PROVIDER=chroma</code>.", parse_mode="HTML")
 
     return router
