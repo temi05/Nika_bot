@@ -815,26 +815,16 @@ def build_profile_ai_router(db: SupabaseDB, ai: AIService, bot_name: str) -> Rou
             await message.answer("🧠 Использование: <code>/nika_brain запрос</code> (например: <i>/nika_brain кто любит пиццу</i>)", parse_mode="HTML")
             return
 
-        lines = [
-            f"✍️ <b>Цены сигн у {escape_html(target.display_name)}</b>",
-            "",
-            f"Базовая: <b>{price}</b> 🍪",
-        ]
-        if options:
-            lines.append("")
-            lines.append("<b>Тарифы:</b>")
-            for option in options:
-                description = str(option.get("description") or "").strip()
-                lines.append(
-                    f"#{option['id']} — <b>{escape_html(str(option.get('title') or 'сигна'))}</b>: "
-                    f"<b>{int(option.get('price') or 0)}</b> 🍪"
-                    + (f"\n<i>{escape_html(description)}</i>" if description else "")
-                )
-            lines.append("")
-            lines.append("Заказ по тарифу: ответь автору <code>/signreq # текст</code>")
-        else:
-            lines.append("Отдельных тарифов пока нет.")
-        await message.answer("\n".join(lines), parse_mode="HTML")
+        facts = await ai.memory.get_relevant_facts(message.chat.id, query, message.from_user.first_name if message.from_user else "")
+        if not facts:
+            await message.answer(f"🧠 В памяти ничего не найдено по запросу: <i>{escape_html(query)}</i>", parse_mode="HTML")
+            return
+
+        await message.answer(
+            f"🧠 <b>Результаты поиска в памяти по запросу «{escape_html(query)}»:</b>\n\n{escape_html(facts)}",
+            parse_mode="HTML",
+        )
+
 
     def _sign_status_label(status: str) -> str:
         return {
