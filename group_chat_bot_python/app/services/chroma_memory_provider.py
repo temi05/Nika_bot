@@ -367,20 +367,23 @@ class ChromaMemoryProvider(BaseMemoryProvider):
                 pass
         return count
 
-    def get_all_facts_paged(self, chat_id: int, page: int = 1, page_size: int = 5) -> dict[str, Any]:
-        """Возвращает пагинированный список фактов с ID для интерактивного интерфейса"""
+    def get_all_facts_paged(self, chat_id: int, page: int = 1, page_size: int = 5, query: str = "") -> dict[str, Any]:
+        """Возвращает пагинированный список фактов с опциональной фильтрацией по участнику или тексту"""
         if not self._collection:
-            return {"facts": [], "total": 0, "page": page, "pages": 1}
+            return {"facts": [], "total": 0, "page": page, "pages": 1, "query": query}
         results = self._collection.get(where={"chat_id": str(chat_id)})
         facts = []
+        clean_q = query.lstrip("@").strip().casefold() if query else ""
         if results and results.get("ids"):
             for doc_id, doc, meta in zip(results["ids"], results["documents"], results["metadatas"]):
-                facts.append({
-                    "id": doc_id,
-                    "text": doc,
-                    "entity_name": meta.get("entity_name", ""),
-                    "source": meta.get("source", "fact"),
-                })
+                entity = str(meta.get("entity_name") or "")
+                if not clean_q or clean_q in entity.casefold() or clean_q in doc.casefold():
+                    facts.append({
+                        "id": doc_id,
+                        "text": doc,
+                        "entity_name": entity,
+                        "source": meta.get("source", "fact"),
+                    })
         total = len(facts)
         pages = max(1, (total + page_size - 1) // page_size)
         page = max(1, min(page, pages))
@@ -390,7 +393,9 @@ class ChromaMemoryProvider(BaseMemoryProvider):
             "total": total,
             "page": page,
             "pages": pages,
+            "query": query,
         }
+
 
     def delete_fact_by_id(self, chat_id: int, doc_id: str) -> bool:
         """Удаляет конкретный факт по его первичному ключу ID в ChromaDB"""

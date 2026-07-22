@@ -1140,6 +1140,8 @@ def build_profile_ai_router(db: SupabaseDB, ai: AIService, bot_name: str) -> Rou
         page = paged_data["page"]
         pages = paged_data["pages"]
         facts = paged_data["facts"]
+        query = paged_data.get("query", "")
+        q_param = f":{query}" if query else ""
 
         for idx, fact in enumerate(facts, 1):
             doc_id = fact["id"]
@@ -1154,26 +1156,26 @@ def build_profile_ai_router(db: SupabaseDB, ai: AIService, bot_name: str) -> Rou
         # Быстрый переход в самое начало и в самый конец
         fast_nav = []
         if page > 1:
-            fast_nav.append(InlineKeyboardButton(text="⏮ В начало", callback_data="facts_page_1"))
+            fast_nav.append(InlineKeyboardButton(text="⏮ В начало", callback_data=f"facts_page_1{q_param}"))
         if page < pages:
-            fast_nav.append(InlineKeyboardButton(text="В конец ⏭", callback_data=f"facts_page_{pages}"))
+            fast_nav.append(InlineKeyboardButton(text="В конец ⏭", callback_data=f"facts_page_{pages}{q_param}"))
         if fast_nav:
             keyboard_rows.append(fast_nav)
 
         # Основная навигация: [ ◀️ Назад ] [ 🔢 Стр X/Y ] [ Вперёд ▶️ ]
         nav_row = []
         if page > 1:
-            nav_row.append(InlineKeyboardButton(text="◀️ Назад", callback_data=f"facts_page_{page - 1}"))
+            nav_row.append(InlineKeyboardButton(text="◀️ Назад", callback_data=f"facts_page_{page - 1}{q_param}"))
         nav_row.append(InlineKeyboardButton(text=f"🔢 Стр {page}/{pages}", callback_data=f"facts_goto_{page}"))
         if page < pages:
-            nav_row.append(InlineKeyboardButton(text="Вперёд ▶️", callback_data=f"facts_page_{page + 1}"))
+            nav_row.append(InlineKeyboardButton(text="Вперёд ▶️", callback_data=f"facts_page_{page + 1}{q_param}"))
         
         keyboard_rows.append(nav_row)
         return InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
 
     @router.message(Command("all_facts", "факты_меню"))
     async def all_facts_command(message: Message, command: CommandObject) -> None:
-        """Интерактивное меню просмотра и удаления всех фактов"""
+        """Интерактивное меню просмотра и удаления всех фактов с фильтрацией по участникам/словам"""
         sender = get_sender_data(message)
         if not await is_admin(message.bot, message.chat.id, sender.user_id):
             await message.answer("❌ Интерактивный менеджер фактов доступен только администраторам.")
@@ -1184,15 +1186,21 @@ def build_profile_ai_router(db: SupabaseDB, ai: AIService, bot_name: str) -> Rou
             return
 
         target_page = 1
-        if command.args and command.args.strip().isdigit():
-            target_page = int(command.args.strip())
+        query = ""
+        raw_args = (command.args or "").strip()
+        if raw_args.isdigit():
+            target_page = int(raw_args)
+        else:
+            query = raw_args
 
-        paged_data = ai.memory.get_all_facts_paged(message.chat.id, page=target_page, page_size=5)
+        paged_data = ai.memory.get_all_facts_paged(message.chat.id, page=target_page, page_size=5, query=query)
         if not paged_data["facts"]:
-            await message.answer("🧠 В памяти пока нет сохранённых фактов.")
+            q_info = f" по запросу «<b>{escape_html(query)}</b>»" if query else ""
+            await message.answer(f"🧠 В памяти пока нет сохранённых фактов{q_info}.", parse_mode="HTML")
             return
 
-        lines = [f"📚 <b>Интерактивная база знаний Ники (Всего: {paged_data['total']})</b>\n"]
+        filter_title = f" (фильтр: «<b>{escape_html(query)}</b>»)" if query else ""
+        lines = [f"📚 <b>Интерактивная база знаний Ники{filter_title} (Найдено: {paged_data['total']})</b>\n"]
         for idx, item in enumerate(paged_data["facts"], 1):
             entity = f" [@{item['entity_name']}]" if item.get('entity_name') else ""
             lines.append(f"<b>#{idx}</b>{escape_html(entity)}: <i>{escape_html(item['text'][:120])}</i>")
@@ -1203,16 +1211,19 @@ def build_profile_ai_router(db: SupabaseDB, ai: AIService, bot_name: str) -> Rou
     @router.callback_query(F.data.startswith("facts_goto_"))
     async def facts_goto_callback(callback: CallbackQuery) -> None:
         await callback.answer(
-            "💡 Для моментального перехода к любой странице укажите её номер:\n/all_facts 15",
+            "💡 Для фильтрации или перехода укажите параметр:\n/all_facts @SCTemi или /all_facts 15",
             show_alert=True
         )
 
-
     @router.callback_query(F.data.startswith("facts_page_"))
     async def facts_page_callback(callback: CallbackQuery) -> None:
-        page = int(callback.data.split("_")[2])
-        paged_data = ai.memory.get_all_facts_paged(callback.message.chat.id, page=page, page_size=5)
-        lines = [f"📚 <b>Интерактивная база знаний Ники (Всего: {paged_data['total']})</b>\n"]
+        payload = callback.data.replace("facts_page_", "")
+        page_str, _, query = payload.partition(":")
+        page = int(page_str) if page_str.isdigit() else 1
+
+        paged_data = ai.memory.get_all_facts_paged(callback.message.chat.id, page=page, page_size=5, query=query)
+        filter_title = f" (фильтр: «<b>{escape_html(query)}</b>»)" if query else ""
+        lines = [f"📚 <b>Интерактивная база знаний Ники{filter_title} (Найдено: {paged_data['total']})</b>\n"]
         for idx, item in enumerate(paged_data["facts"], 1):
             entity = f" [@{item['entity_name']}]" if item.get('entity_name') else ""
             lines.append(f"<b>#{idx}</b>{escape_html(entity)}: <i>{escape_html(item['text'][:120])}</i>")
@@ -1220,6 +1231,7 @@ def build_profile_ai_router(db: SupabaseDB, ai: AIService, bot_name: str) -> Rou
         reply_markup = _build_facts_keyboard(callback.message.chat.id, paged_data)
         await callback.message.edit_text("\n\n".join(lines), reply_markup=reply_markup, parse_mode="HTML")
         await callback.answer()
+
 
     @router.callback_query(F.data.startswith("del_fact_"))
     async def delete_fact_callback(callback: CallbackQuery) -> None:
