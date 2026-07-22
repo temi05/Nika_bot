@@ -367,3 +367,46 @@ class ChromaMemoryProvider(BaseMemoryProvider):
                 pass
         return count
 
+    def get_all_facts_paged(self, chat_id: int, page: int = 1, page_size: int = 5) -> dict[str, Any]:
+        """Возвращает пагинированный список фактов с ID для интерактивного интерфейса"""
+        if not self._collection:
+            return {"facts": [], "total": 0, "page": page, "pages": 1}
+        results = self._collection.get(where={"chat_id": str(chat_id)})
+        facts = []
+        if results and results.get("ids"):
+            for doc_id, doc, meta in zip(results["ids"], results["documents"], results["metadatas"]):
+                facts.append({
+                    "id": doc_id,
+                    "text": doc,
+                    "entity_name": meta.get("entity_name", ""),
+                    "source": meta.get("source", "fact"),
+                })
+        total = len(facts)
+        pages = max(1, (total + page_size - 1) // page_size)
+        page = max(1, min(page, pages))
+        start = (page - 1) * page_size
+        return {
+            "facts": facts[start:start + page_size],
+            "total": total,
+            "page": page,
+            "pages": pages,
+        }
+
+    def delete_fact_by_id(self, chat_id: int, doc_id: str) -> bool:
+        """Удаляет конкретный факт по его первичному ключу ID в ChromaDB"""
+        if not self._collection:
+            return False
+        try:
+            self._collection.delete(ids=[doc_id])
+            if self.backup_service:
+                try:
+                    loop = asyncio.get_running_loop()
+                    loop.create_task(self.backup_service.upload_backup("💾 Авто-бэкап после удаления факта кнопкой"))
+                except RuntimeError:
+                    pass
+            return True
+        except Exception as e:
+            self._log("delete_fact_by_id_error", error=str(e))
+            return False
+
+

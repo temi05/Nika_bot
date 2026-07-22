@@ -1112,6 +1112,107 @@ def build_profile_ai_router(db: SupabaseDB, ai: AIService, bot_name: str) -> Rou
         else:
             await message.answer("ℹ️ Прямое редактирование текста доступно при <code>MEMORY_PROVIDER=chroma</code>.", parse_mode="HTML")
 
+    def _build_facts_keyboard(chat_id: int, paged_data: dict[str, Any]) -> InlineKeyboardMarkup:
+        keyboard_rows = []
+        page = paged_data["page"]
+        pages = paged_data["pages"]
+        facts = paged_data["facts"]
+
+        for idx, fact in enumerate(facts, 1):
+            doc_id = fact["id"]
+            short_id = doc_id[:16]
+            keyboard_rows.append([
+                InlineKeyboardButton(
+                    text=f"❌ Удалить #{idx}",
+                    callback_data=f"del_fact_{page}_{short_id}"
+                )
+            ])
+
+        nav_row = []
+        if page > 1:
+            nav_row.append(InlineKeyboardButton(text="◀️ Назад", callback_data=f"facts_page_{page - 1}"))
+        nav_row.append(InlineKeyboardButton(text=f"Стр {page}/{pages}", callback_data="ignore_facts"))
+        if page < pages:
+            nav_row.append(InlineKeyboardButton(text="Вперёд ▶️", callback_data=f"facts_page_{page + 1}"))
+        
+        keyboard_rows.append(nav_row)
+        return InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
+
+    @router.message(Command("all_facts", "факты_меню"))
+    async def all_facts_command(message: Message) -> None:
+        """Интерактивное меню просмотра и удаления всех фактов"""
+        sender = get_sender_data(message)
+        if not await is_admin(message.bot, message.chat.id, sender.user_id):
+            await message.answer("❌ Интерактивный менеджер фактов доступен только администраторам.")
+            return
+
+        if not hasattr(ai.memory, "get_all_facts_paged"):
+            await message.answer("ℹ️ Просмотр списка фактов доступен при <code>MEMORY_PROVIDER=chroma</code>.", parse_mode="HTML")
+            return
+
+        paged_data = ai.memory.get_all_facts_paged(message.chat.id, page=1, page_size=5)
+        if not paged_data["facts"]:
+            await message.answer("🧠 В памяти пока нет сохранённых фактов.")
+            return
+
+        lines = [f"📚 <b>Интерактивная база знаний Ники (Всего: {paged_data['total']})</b>\n"]
+        for idx, item in enumerate(paged_data["facts"], 1):
+            entity = f" [@{item['entity_name']}]" if item.get('entity_name') else ""
+            lines.append(f"<b>#{idx}</b>{escape_html(entity)}: <i>{escape_html(item['text'][:120])}</i>")
+
+        reply_markup = _build_facts_keyboard(message.chat.id, paged_data)
+        await message.answer("\n\n".join(lines), reply_markup=reply_markup, parse_mode="HTML")
+
+    @router.callback_query(F.data.startswith("facts_page_"))
+    async def facts_page_callback(callback: CallbackQuery) -> None:
+        page = int(callback.data.split("_")[2])
+        paged_data = ai.memory.get_all_facts_paged(callback.message.chat.id, page=page, page_size=5)
+        lines = [f"📚 <b>Интерактивная база знаний Ники (Всего: {paged_data['total']})</b>\n"]
+        for idx, item in enumerate(paged_data["facts"], 1):
+            entity = f" [@{item['entity_name']}]" if item.get('entity_name') else ""
+            lines.append(f"<b>#{idx}</b>{escape_html(entity)}: <i>{escape_html(item['text'][:120])}</i>")
+
+        reply_markup = _build_facts_keyboard(callback.message.chat.id, paged_data)
+        await callback.message.edit_text("\n\n".join(lines), reply_markup=reply_markup, parse_mode="HTML")
+        await callback.answer()
+
+    @router.callback_query(F.data.startswith("del_fact_"))
+    async def delete_fact_callback(callback: CallbackQuery) -> None:
+        sender_id = callback.from_user.id
+        if not await is_admin(callback.bot, callback.message.chat.id, sender_id):
+            await callback.answer("❌ Удалять факты могут только администраторы.", show_alert=True)
+            return
+
+        parts = callback.data.split("_")
+        page = int(parts[2])
+        short_id = parts[3]
+
+        all_data = ai.memory.get_all_facts_paged(callback.message.chat.id, page=1, page_size=1000)
+        target_id = None
+        for item in all_data["facts"]:
+            if item["id"].startswith(short_id):
+                target_id = item["id"]
+                break
+
+        if target_id and ai.memory.delete_fact_by_id(callback.message.chat.id, target_id):
+            await callback.answer("✅ Факт успешно удалён из памяти!", show_alert=True)
+        else:
+            await callback.answer("❌ Не удалось найти или удалить факт.", show_alert=True)
+
+        paged_data = ai.memory.get_all_facts_paged(callback.message.chat.id, page=page, page_size=5)
+        if not paged_data["facts"]:
+            await callback.message.edit_text("🧠 В памяти больше нет сохранённых фактов.")
+            return
+
+        lines = [f"📚 <b>Интерактивная база знаний Ники (Всего: {paged_data['total']})</b>\n"]
+        for idx, item in enumerate(paged_data["facts"], 1):
+            entity = f" [@{item['entity_name']}]" if item.get('entity_name') else ""
+            lines.append(f"<b>#{idx}</b>{escape_html(entity)}: <i>{escape_html(item['text'][:120])}</i>")
+
+        reply_markup = _build_facts_keyboard(callback.message.chat.id, paged_data)
+        await callback.message.edit_text("\n\n".join(lines), reply_markup=reply_markup, parse_mode="HTML")
+
     return router
+
 
 
