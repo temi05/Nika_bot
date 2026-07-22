@@ -1148,6 +1148,10 @@ def build_profile_ai_router(db: SupabaseDB, ai: AIService, bot_name: str) -> Rou
             short_id = doc_id[:16]
             keyboard_rows.append([
                 InlineKeyboardButton(
+                    text=f"✏️ Изменить #{idx}",
+                    callback_data=f"edit_fact_{page}_{short_id}"
+                ),
+                InlineKeyboardButton(
                     text=f"❌ Удалить #{idx}",
                     callback_data=f"del_fact_{page}_{short_id}"
                 )
@@ -1232,6 +1236,58 @@ def build_profile_ai_router(db: SupabaseDB, ai: AIService, bot_name: str) -> Rou
         await callback.message.edit_text("\n\n".join(lines), reply_markup=reply_markup, parse_mode="HTML")
         await callback.answer()
 
+    @router.callback_query(F.data.startswith("edit_fact_"))
+    async def edit_fact_callback(callback: CallbackQuery) -> None:
+        sender_id = callback.from_user.id
+        if not await is_admin(callback.bot, callback.message.chat.id, sender_id):
+            await callback.answer("❌ Редактировать факты могут только администраторы.", show_alert=True)
+            return
+
+        parts = callback.data.split("_")
+        page = int(parts[2])
+        short_id = parts[3]
+
+        all_data = ai.memory.get_all_facts_paged(callback.message.chat.id, page=1, page_size=1000)
+        target_item = None
+        for item in all_data["facts"]:
+            if item["id"].startswith(short_id):
+                target_item = item
+                break
+
+        if not target_item:
+            await callback.answer("❌ Не удалось найти этот факт.", show_alert=True)
+            return
+
+        await callback.message.answer(
+            f"✏️ <b>Редактирование факта (ID: <code>{target_item['id']}</code>)</b>\n\n"
+            f"Текущий текст:\n<i>{escape_html(target_item['text'])}</i>\n\n"
+            "<b>Ответьте (Reply) на это сообщение новым текстом для этого факта.</b>",
+            parse_mode="HTML"
+        )
+        await callback.answer()
+
+    @router.message(F.reply_to_message & F.reply_to_message.text.contains("Редактирование факта (ID:"))
+    async def handle_edit_fact_reply(message: Message) -> None:
+        sender = get_sender_data(message)
+        if not await is_admin(message.bot, message.chat.id, sender.user_id):
+            await message.answer("❌ Редактировать факты могут только администраторы.")
+            return
+
+        reply_text = message.reply_to_message.text or ""
+        match = re.search(r"\(ID:\s*<code>([^<]+)</code>\)", reply_text)
+        if not match:
+            return
+
+        doc_id = match.group(1).strip()
+        new_text = (message.text or "").strip()
+        if not new_text:
+            await message.answer("❌ Новое содержание факта не может быть пустым.")
+            return
+
+        if hasattr(ai.memory, "update_fact_text_by_id") and ai.memory.update_fact_text_by_id(message.chat.id, doc_id, new_text):
+            await message.answer(f"✅ <b>Факт успешно обновлён!</b>\n\nНовый текст:\n<i>{escape_html(new_text)}</i>", parse_mode="HTML")
+        else:
+            await message.answer("❌ Не удалось обновить факт.")
 
     @router.callback_query(F.data.startswith("del_fact_"))
     async def delete_fact_callback(callback: CallbackQuery) -> None:
@@ -1270,6 +1326,7 @@ def build_profile_ai_router(db: SupabaseDB, ai: AIService, bot_name: str) -> Rou
         await callback.message.edit_text("\n\n".join(lines), reply_markup=reply_markup, parse_mode="HTML")
 
     return router
+
 
 
 

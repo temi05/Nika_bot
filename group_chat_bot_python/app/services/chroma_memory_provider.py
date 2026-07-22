@@ -414,4 +414,30 @@ class ChromaMemoryProvider(BaseMemoryProvider):
             self._log("delete_fact_by_id_error", error=str(e))
             return False
 
+    def update_fact_text_by_id(self, chat_id: int, doc_id: str, new_text: str) -> bool:
+        """Обновляет текст конкретного факта по его ID"""
+        if not self._collection or not new_text.strip():
+            return False
+        try:
+            results = self._collection.get(ids=[doc_id])
+            if results and results.get("metadatas"):
+                meta = results["metadatas"][0]
+                self._collection.upsert(
+                    documents=[new_text.strip()],
+                    metadatas=[meta],
+                    ids=[doc_id],
+                )
+                if self.backup_service:
+                    try:
+                        loop = asyncio.get_running_loop()
+                        loop.create_task(self.backup_service.upload_backup("💾 Авто-бэкап после обновления факта кнопкой"))
+                    except RuntimeError:
+                        pass
+                return True
+            return False
+        except Exception as e:
+            self._log("update_fact_text_by_id_error", error=str(e))
+            return False
+
+
 
