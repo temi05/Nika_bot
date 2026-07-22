@@ -24,7 +24,7 @@ class LightweightEmbeddingFunction:
     def name(self) -> str:
         return "lightweight_embedding_function"
 
-    def __call__(self, input: list[str]) -> list[list[float]]:
+    def embed_documents(self, input: list[str]) -> list[list[float]]:
         embeddings = []
         for text in input:
             tokens = re.findall(r"\w+", text.lower())
@@ -37,6 +37,17 @@ class LightweightEmbeddingFunction:
                 vec = [x / norm for x in vec]
             embeddings.append(vec)
         return embeddings
+
+    def embed_query(self, input: Any) -> Any:
+        if isinstance(input, str):
+            return self.embed_documents([input])[0]
+        elif isinstance(input, list):
+            return self.embed_documents(input)
+        return self.embed_documents([str(input)])
+
+    def __call__(self, input: list[str]) -> list[list[float]]:
+        return self.embed_documents(input)
+
 
 
 
