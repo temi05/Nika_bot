@@ -16,6 +16,26 @@ from app.services.supabase_db import SupabaseDB
 from app.services.telegram_backup import TelegramBackupService
 
 
+class LightweightEmbeddingFunction:
+    """Легковесный математический векторный эмбеддер для экономии RAM на Render (<20 MB)"""
+    def __init__(self, dim: int = 128) -> None:
+        self.dim = dim
+
+    def __call__(self, input: list[str]) -> list[list[float]]:
+        embeddings = []
+        for text in input:
+            tokens = re.findall(r"\w+", text.lower())
+            vec = [0.0] * self.dim
+            for token in tokens:
+                idx = abs(hash(token)) % self.dim
+                vec[idx] += 1.0
+            norm = sum(x * x for x in vec) ** 0.5
+            if norm > 0:
+                vec = [x / norm for x in vec]
+            embeddings.append(vec)
+        return embeddings
+
+
 class ChromaMemoryProvider(BaseMemoryProvider):
     def __init__(
         self,
@@ -41,6 +61,7 @@ class ChromaMemoryProvider(BaseMemoryProvider):
 
         self._chroma_client = None
         self._collection = None
+        self._embedding_function = LightweightEmbeddingFunction()
         self._migrated_from_supabase = False
         self._init_chroma()
 
@@ -55,12 +76,14 @@ class ChromaMemoryProvider(BaseMemoryProvider):
             self._chroma_client = chromadb.PersistentClient(path=str(self.data_dir))
             self._collection = self._chroma_client.get_or_create_collection(
                 name="nika_vector_memory",
+                embedding_function=self._embedding_function,
                 metadata={"hnsw:space": "cosine"},
             )
             self._log("init_success", count=self._collection.count())
             self._migrate_if_needed()
         except Exception as e:
             self._log("init_error", error=str(e))
+
 
     def _migrate_if_needed(self) -> None:
         """Однократный перенос старых фактов из Supabase bot_knowledge в ChromaDB при пустой базе"""
