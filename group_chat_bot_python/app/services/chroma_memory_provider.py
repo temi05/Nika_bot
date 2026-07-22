@@ -69,7 +69,7 @@ class ChromaMemoryProvider(BaseMemoryProvider):
 
         try:
             self._log("migration_start", status="fetching_from_supabase")
-            records = self.db._knowledge().select("id,chat_id,fact").execute()
+            records = self.db._knowledge().select("id,chat_id,fact,entity_name,fact_type,confidence").execute()
             if not records.data:
                 self._log("migration_empty", reason="no_records_in_supabase")
                 self._migrated_from_supabase = True
@@ -85,7 +85,8 @@ class ChromaMemoryProvider(BaseMemoryProvider):
                     continue
                 chat_id = str(item.get("chat_id") or "0")
                 entity_name = str(item.get("entity_name") or "")
-                source = str(item.get("fact_type") or item.get("source") or "supabase_migrated")
+                source = str(item.get("fact_type") or "fact")
+                confidence = float(item.get("confidence") or 0.55)
 
                 documents.append(fact_text)
                 metadatas.append(
@@ -93,9 +94,11 @@ class ChromaMemoryProvider(BaseMemoryProvider):
                         "chat_id": chat_id,
                         "entity_name": entity_name,
                         "source": source,
+                        "confidence": confidence,
                     }
                 )
                 ids.append(f"supa_{item.get('id') or idx}")
+
 
 
             if documents:
