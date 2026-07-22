@@ -1027,4 +1027,30 @@ def build_profile_ai_router(db: SupabaseDB, ai: AIService, bot_name: str) -> Rou
         else:
             await message.answer("ℹ️ Использование бэкапов доступно при <code>MEMORY_PROVIDER=chroma</code>.", parse_mode="HTML")
 
+    @router.message(Command("restore_memory", "восстановить"))
+    async def restore_memory_command(message: Message) -> None:
+        """Восстановление векторной памяти из прикрепленного zip файла бэкапа"""
+        sender = get_sender_data(message)
+        if not await is_admin(message.bot, message.chat.id, sender.user_id):
+            await message.answer("❌ Восстанавливать память могут только администраторы.")
+            return
+
+        doc = message.document or (message.reply_to_message.document if message.reply_to_message else None)
+        if not doc or not (doc.file_name and doc.file_name.endswith(".zip")):
+            await message.answer("📥 Отправь zip-файл бэкапа с подписью <code>/restore_memory</code> или ответь на файл этим сообщением.", parse_mode="HTML")
+            return
+
+        file = await message.bot.get_file(doc.file_id)
+        file_bytes = await message.bot.download_file(file.file_path)
+
+        if hasattr(ai.memory, "restore_from_zip_bytes"):
+            success = await ai.memory.restore_from_zip_bytes(file_bytes.read())
+            if success:
+                await message.answer("✅ <b>Память Ники успешно восстановлена из бэкап-файла!</b>", parse_mode="HTML")
+            else:
+                await message.answer("❌ Ошибка при распаковке архива памяти.", parse_mode="HTML")
+        else:
+            await message.answer("ℹ️ Восстановление из архивов доступно при <code>MEMORY_PROVIDER=chroma</code>.", parse_mode="HTML")
+
     return router
+

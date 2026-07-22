@@ -88,6 +88,16 @@ class ChromaMemoryProvider(BaseMemoryProvider):
         except Exception as e:
             self._log("init_error", error=str(e))
 
+    async def restore_from_zip_bytes(self, zip_bytes: bytes) -> bool:
+        """Восстанавливает ChromaDB напрямую из загруженных байтов ZIP архива"""
+        if not self.backup_service:
+            return False
+        success = await self.backup_service.restore_from_zip_bytes(zip_bytes)
+        if success:
+            self._init_chroma()
+        return success
+
+
 
     def _migrate_if_needed(self) -> None:
         """Однократный перенос старых фактов из Supabase bot_knowledge в ChromaDB при пустой базе"""
