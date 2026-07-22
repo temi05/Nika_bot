@@ -133,9 +133,14 @@ class ChromaMemoryProvider(BaseMemoryProvider):
                 self._log("migration_success", imported_count=len(documents))
                 self._migrated_from_supabase = True
                 if self.backup_service:
-                    asyncio.create_task(self.backup_service.upload_backup("💾 Первичный бэкап с фактами из Supabase"))
+                    try:
+                        loop = asyncio.get_running_loop()
+                        loop.create_task(self.backup_service.upload_backup("💾 Первичный бэкап с 939 фактами из Supabase"))
+                    except RuntimeError:
+                        pass
         except Exception as e:
             self._log("migration_error", error=str(e))
+
 
     async def get_relevant_facts(
         self,
