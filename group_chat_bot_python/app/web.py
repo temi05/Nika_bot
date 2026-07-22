@@ -67,6 +67,18 @@ def create_app() -> FastAPI:
 
     reminder_task: asyncio.Task | None = None
     auto_event_task: asyncio.Task | None = None
+    backup_task: asyncio.Task | None = None
+
+    async def backup_loop() -> None:
+        try:
+            while True:
+                await asyncio.sleep(12 * 3600)
+                if backup_service:
+                    await backup_service.upload_backup("💾 Периодический авто-бэкап памяти (каждые 12 часов)")
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            print(f"[backup_loop error] {e}")
 
     async def reminders_loop() -> None:
         try:
@@ -78,12 +90,46 @@ def create_app() -> FastAPI:
                             reminder.chat_id,
                             f"Напоминание для {mention}:\n\n{reminder.text}",
                         )
-                        db.mark_reminder_sent(reminder.id)
-                except Exception:
-                    pass
-                await asyncio.sleep(60)
+                        db.remove_reminder(reminder.id)
+                except Exception as e:
+                    print(f"[reminders_loop_error] {e}")
+                await asyncio.sleep(10)
         except asyncio.CancelledError:
             pass
+
+    async def auto_events_loop() -> None:
+        try:
+            while True:
+                await asyncio.sleep(1800)
+                try:
+                    active_chats = db.get_active_chats_for_events(hours=12)
+                    for chat_id in active_chats:
+                        await try_trigger_random_event(bot, db, chat_id, ai_service)
+                except Exception as e:
+                    print(f"[auto_events_loop_error] {e}")
+        except asyncio.CancelledError:
+            pass
+
+    @asynccontextmanager
+    async def lifespan(_: FastAPI):
+        nonlocal reminder_task, auto_event_task, backup_task
+        me = await bot.get_me()
+        settings.bot_username = me.username
+        try:
+            await configure_webhook()
+        except Exception:
+            pass
+        reminder_task = asyncio.create_task(reminders_loop())
+        auto_event_task = asyncio.create_task(auto_events_loop())
+        backup_task = asyncio.create_task(backup_loop())
+        yield
+        if backup_task:
+            backup_task.cancel()
+        if auto_event_task:
+            auto_event_task.cancel()
+        if reminder_task:
+            reminder_task.cancel()
+        await bot.session.close()
 
     async def configure_webhook() -> None:
         base_url = settings.render_external_url.rstrip("/")
