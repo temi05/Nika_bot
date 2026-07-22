@@ -1052,5 +1052,66 @@ def build_profile_ai_router(db: SupabaseDB, ai: AIService, bot_name: str) -> Rou
         else:
             await message.answer("ℹ️ Восстановление из архивов доступно при <code>MEMORY_PROVIDER=chroma</code>.", parse_mode="HTML")
 
+    @router.message(Command("add_fact", "добавить_факт"))
+    async def add_fact_command(message: Message, command: CommandObject) -> None:
+        """Ручное добавление факта администратором"""
+        sender = get_sender_data(message)
+        if not await is_admin(message.bot, message.chat.id, sender.user_id):
+            await message.answer("❌ Добавлять факты вручную могут только администраторы.")
+            return
+
+        text = (command.args or "").strip()
+        if not text:
+            await message.answer("📝 <b>Добавление факта</b>\n\nИспользование: <code>/add_fact [@username] текст факта</code>", parse_mode="HTML")
+            return
+
+        entity_name = ""
+        if text.startswith("@"):
+            parts = text.split(" ", 1)
+            entity_name = parts[0].lstrip("@")
+            text = parts[1] if len(parts) > 1 else text
+
+        if hasattr(ai.memory, "add_single_fact"):
+            success = ai.memory.add_single_fact(message.chat.id, text, entity_name=entity_name)
+            if success:
+                await message.answer(f"✅ <b>Факт сохранён в мозг Ники!</b>\n\n<i>{escape_html(text)}</i>", parse_mode="HTML")
+            else:
+                await message.answer("❌ Не удалось сохранить факт.")
+        else:
+            db.add_memory(message.chat.id, sender.user_id, text, "confirmed")
+            await message.answer(f"✅ <b>Факт сохранён!</b>\n\n<i>{escape_html(text)}</i>", parse_mode="HTML")
+
+    @router.message(Command("edit_fact", "изменить_факт"))
+    async def edit_fact_command(message: Message, command: CommandObject) -> None:
+        """Редактирование текста фактов администратором"""
+        sender = get_sender_data(message)
+        if not await is_admin(message.bot, message.chat.id, sender.user_id):
+            await message.answer("❌ Редактировать факты могут только администраторы.")
+            return
+
+        args = (command.args or "").strip()
+        if "=>" not in args:
+            await message.answer(
+                "✏️ <b>Замена текста в памяти</b>\n\n"
+                "Использование: <code>/edit_fact старый текст => новый текст</code>\n"
+                "<i>Пример: /edit_fact Любит котиков => Обожает собачек</i>",
+                parse_mode="HTML"
+            )
+            return
+
+        old_part, _, new_part = args.partition("=>")
+        old_text = old_part.strip()
+        new_text = new_part.strip()
+
+        if hasattr(ai.memory, "edit_fact_text"):
+            count = ai.memory.edit_fact_text(message.chat.id, old_text, new_text)
+            if count > 0:
+                await message.answer(f"✏️ <b>Успешно изменено {count} записей!</b>\n\n«{escape_html(old_text)}» ➔ «{escape_html(new_text)}»", parse_mode="HTML")
+            else:
+                await message.answer(f"🤷‍♀️ Записи со словом «{escape_html(old_text)}» не найдены в памяти.", parse_mode="HTML")
+        else:
+            await message.answer("ℹ️ Прямое редактирование текста доступно при <code>MEMORY_PROVIDER=chroma</code>.", parse_mode="HTML")
+
     return router
+
 

@@ -310,8 +310,60 @@ class ChromaMemoryProvider(BaseMemoryProvider):
                         self._collection.delete(ids=[doc_id])
                         deleted += 1
             if deleted > 0 and self.backup_service:
-                asyncio.create_task(self.backup_service.upload_backup("💾 Бэкап после удаления факта"))
+                try:
+                    loop = asyncio.get_running_loop()
+                    loop.create_task(self.backup_service.upload_backup("💾 Бэкап после удаления факта"))
+                except RuntimeError:
+                    pass
             return deleted
         except Exception as e:
             self._log("delete_fact_error", error=str(e))
             return 0
+
+    def add_single_fact(self, chat_id: int, fact_text: str, entity_name: str = "") -> bool:
+        """Ручное добавление факта админом"""
+        if not self._collection or not fact_text.strip():
+            return False
+        doc_id = f"manual_{chat_id}_{hash(fact_text) & 0xFFFFFFFF}"
+        self._collection.upsert(
+            documents=[fact_text.strip()],
+            metadatas=[{
+                "chat_id": str(chat_id),
+                "entity_name": entity_name,
+                "source": "manual_admin",
+                "confidence": 1.0,
+            }],
+            ids=[doc_id]
+        )
+        if self.backup_service:
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(self.backup_service.upload_backup("💾 Авто-бэкап (ручное добавление факта)"))
+            except RuntimeError:
+                pass
+        return True
+
+    def edit_fact_text(self, chat_id: int, old_text: str, new_text: str) -> int:
+        """Редактирование/замена текста в фактах"""
+        if not self._collection or not old_text.strip() or not new_text.strip():
+            return 0
+        all_data = self._collection.get(where={"chat_id": str(chat_id)})
+        count = 0
+        if all_data and all_data.get("documents"):
+            for doc_id, doc, meta in zip(all_data["ids"], all_data["documents"], all_data["metadatas"]):
+                if old_text.casefold() in doc.casefold():
+                    updated_doc = re.sub(re.escape(old_text), new_text, doc, flags=re.IGNORECASE)
+                    self._collection.upsert(
+                        documents=[updated_doc],
+                        metadatas=[meta],
+                        ids=[doc_id]
+                    )
+                    count += 1
+        if count > 0 and self.backup_service:
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(self.backup_service.upload_backup(f"💾 Авто-бэкап (изменено {count} фактов)"))
+            except RuntimeError:
+                pass
+        return count
+
