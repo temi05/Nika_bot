@@ -1135,11 +1135,44 @@ def build_profile_ai_router(db: SupabaseDB, ai: AIService, bot_name: str) -> Rou
         if page < pages:
             nav_row.append(InlineKeyboardButton(text="Вперёд ▶️", callback_data=f"facts_page_{page + 1}"))
         
+    def _build_facts_keyboard(chat_id: int, paged_data: dict[str, Any]) -> InlineKeyboardMarkup:
+        keyboard_rows = []
+        page = paged_data["page"]
+        pages = paged_data["pages"]
+        facts = paged_data["facts"]
+
+        for idx, fact in enumerate(facts, 1):
+            doc_id = fact["id"]
+            short_id = doc_id[:16]
+            keyboard_rows.append([
+                InlineKeyboardButton(
+                    text=f"❌ Удалить #{idx}",
+                    callback_data=f"del_fact_{page}_{short_id}"
+                )
+            ])
+
+        # Быстрый переход в самое начало и в самый конец
+        fast_nav = []
+        if page > 1:
+            fast_nav.append(InlineKeyboardButton(text="⏮ В начало", callback_data="facts_page_1"))
+        if page < pages:
+            fast_nav.append(InlineKeyboardButton(text="В конец ⏭", callback_data=f"facts_page_{pages}"))
+        if fast_nav:
+            keyboard_rows.append(fast_nav)
+
+        # Основная навигация: [ ◀️ Назад ] [ 🔢 Стр X/Y ] [ Вперёд ▶️ ]
+        nav_row = []
+        if page > 1:
+            nav_row.append(InlineKeyboardButton(text="◀️ Назад", callback_data=f"facts_page_{page - 1}"))
+        nav_row.append(InlineKeyboardButton(text=f"🔢 Стр {page}/{pages}", callback_data=f"facts_goto_{page}"))
+        if page < pages:
+            nav_row.append(InlineKeyboardButton(text="Вперёд ▶️", callback_data=f"facts_page_{page + 1}"))
+        
         keyboard_rows.append(nav_row)
         return InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
 
     @router.message(Command("all_facts", "факты_меню"))
-    async def all_facts_command(message: Message) -> None:
+    async def all_facts_command(message: Message, command: CommandObject) -> None:
         """Интерактивное меню просмотра и удаления всех фактов"""
         sender = get_sender_data(message)
         if not await is_admin(message.bot, message.chat.id, sender.user_id):
@@ -1150,7 +1183,11 @@ def build_profile_ai_router(db: SupabaseDB, ai: AIService, bot_name: str) -> Rou
             await message.answer("ℹ️ Просмотр списка фактов доступен при <code>MEMORY_PROVIDER=chroma</code>.", parse_mode="HTML")
             return
 
-        paged_data = ai.memory.get_all_facts_paged(message.chat.id, page=1, page_size=5)
+        target_page = 1
+        if command.args and command.args.strip().isdigit():
+            target_page = int(command.args.strip())
+
+        paged_data = ai.memory.get_all_facts_paged(message.chat.id, page=target_page, page_size=5)
         if not paged_data["facts"]:
             await message.answer("🧠 В памяти пока нет сохранённых фактов.")
             return
@@ -1162,6 +1199,14 @@ def build_profile_ai_router(db: SupabaseDB, ai: AIService, bot_name: str) -> Rou
 
         reply_markup = _build_facts_keyboard(message.chat.id, paged_data)
         await message.answer("\n\n".join(lines), reply_markup=reply_markup, parse_mode="HTML")
+
+    @router.callback_query(F.data.startswith("facts_goto_"))
+    async def facts_goto_callback(callback: CallbackQuery) -> None:
+        await callback.answer(
+            "💡 Для моментального перехода к любой странице укажите её номер:\n/all_facts 15",
+            show_alert=True
+        )
+
 
     @router.callback_query(F.data.startswith("facts_page_"))
     async def facts_page_callback(callback: CallbackQuery) -> None:
