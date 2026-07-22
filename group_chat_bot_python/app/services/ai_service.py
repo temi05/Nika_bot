@@ -1161,19 +1161,22 @@ class AIService:
                 cleaned_messages.append(message)
         return cleaned_messages
 
-    async def _retry_text_only_after_vision_error(self, *, messages: list[dict[str, Any]], user_text: str, error: str) -> str:
-        try:
-            response = await self._chat_completion(
-                model=self.settings.ai_model,
-                messages=self._strip_images_from_messages(messages),
-                temperature=self.settings.ai_temperature,
-                max_tokens=self.settings.ai_max_tokens,
-            )
-            message = response.choices[0].message
-            raw_text = self._coerce_model_content(message.content)
-            return self._finalize_reply(raw_text, user_text=user_text)
-        except Exception:
-            return ""
+    def _finalize_reply(self, content: str, *, user_text: str) -> str:
+        cleaned = content.strip()
+        # Вырезаем системные XML-теги <msg...> </msg>, если модель случайно скопировала их формат
+        cleaned = re.sub(r"<msg[^>]*>", "", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"</msg>", "", cleaned, flags=re.IGNORECASE).strip()
+
+        bot_name = self.settings.bot_name or "Ника"
+        cleaned = re.sub(rf"^(?:{bot_name}\s*:\s*)+", "", cleaned, flags=re.IGNORECASE).strip()
+        cleaned = re.sub(r"^\s*нейроника\s*:\s*", "", cleaned, flags=re.IGNORECASE).strip()
+        cleaned = re.sub(r"\s{2,}", " ", cleaned)
+
+        cleaned = self._enforce_personality_mode(cleaned)
+        cleaned = self._soften_personal_attacks(cleaned)
+        cleaned = self._trim_incomplete_tail(cleaned)
+        return cleaned
+
 
     def _tool_user_lookup(self, chat_id: int, sender: Sender, args: dict[str, Any]) -> str:
         action = str(args.get("action") or "").lower()
