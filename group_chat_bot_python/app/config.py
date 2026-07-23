@@ -28,8 +28,9 @@ class Settings(BaseSettings):
     polza_api_key: str | None = Field(default=None, validation_alias="POLZA_API_KEY")
     openai_base_url: str = Field(default="https://api.openai.com/v1", alias="OPENAI_BASE_URL")
 
-    ai_model: str = Field(default="google/gemini-2.0-flash-lite", alias="AI_MODEL")
+    ai_model: str = Field(default="google/gemini-3.5-flash-lite", alias="AI_MODEL")
     ai_fallback_model: str = Field(default="gpt-4o-mini", alias="AI_FALLBACK_MODEL")
+
 
 
     ai_image_model: str = Field(default="openai/gpt-image-1.5", alias="AI_IMAGE_MODEL")
