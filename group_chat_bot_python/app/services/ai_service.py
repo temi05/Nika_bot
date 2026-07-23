@@ -175,8 +175,9 @@ class AIService:
         return random.choice(messages)
 
     async def flush_passive_memory(self, chat_id: int, *, force: bool = False) -> None:
-        if len(self.chat_buffers[chat_id]) < (1 if force else 20):
+        if len(self.chat_buffers[chat_id]) < (1 if force else 5):
             return
+
 
         transcript = "\n".join(self.chat_buffers[chat_id])
         participants = list(dict.fromkeys(line.split(":", 1)[0] for line in self.chat_buffers[chat_id]))
