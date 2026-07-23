@@ -10,7 +10,7 @@ from openai import AsyncOpenAI
 
 from app.config import Settings
 from app.models import MemoryRecord
-from app.services.memory_provider import BaseMemoryProvider, _compact_transcript, _clean_memory_items
+from app.services.memory_provider import BaseMemoryProvider, _compact_transcript, _clean_memory_items, _parse_json_content
 from app.services.prompt_builders import build_memory_extraction_messages, format_memory_context
 from app.services.supabase_db import SupabaseDB
 from app.services.telegram_backup import TelegramBackupService
@@ -264,7 +264,8 @@ class ChromaMemoryProvider(BaseMemoryProvider):
                 max_tokens=500,
             )
             content = response.choices[0].message.content or ""
-            return json.loads(re.sub(r"^```(?:json)?|```$", "", content.strip()).strip())
+            return _parse_json_content(content)
+
         except Exception as e:
             self._log("extraction_error", error=str(e))
             return None

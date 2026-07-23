@@ -18,6 +18,8 @@ def _compact_transcript(transcript: str, limit: int = 3000) -> str:
 
 def _parse_json_content(content: str) -> dict[str, Any]:
     cleaned = content.strip()
+    if not cleaned:
+        return {}
     if cleaned.startswith("```"):
         cleaned = re.sub(r"^```(?:json)?", "", cleaned).strip()
         cleaned = re.sub(r"```$", "", cleaned).strip()
@@ -26,8 +28,9 @@ def _parse_json_content(content: str) -> dict[str, Any]:
     except json.JSONDecodeError:
         match = re.search(r"\{.*\}", cleaned, re.S)
         if not match:
-            raise
+            return {}
         return json.loads(match.group(0))
+
 
 
 def _looks_memory_worthy_message(message: str) -> bool:
