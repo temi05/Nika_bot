@@ -45,8 +45,43 @@ class LightweightEmbeddingFunction:
             return self.embed_documents(input)
         return self.embed_documents([str(input)])
 
-    def __call__(self, input: list[str]) -> list[list[float]]:
-        return self.embed_documents(input)
+def _clean_legacy_fact(text: str) -> str:
+    if not text:
+        return ""
+    cleaned = text.strip()
+    
+    ephemeral = [
+        "заснул", "хочет спать", "хочет пасочку", "покрасить яички", 
+        "пошел кушать", "отрубилась", "легла", "потянувся", "проспала",
+        "недопонимание", "эмоция:", "состояние:", "состояние "
+    ]
+    if any(k in cleaned.lower() for k in ephemeral):
+        return ""
+
+    cleaned = re.sub(r"^УЗЕЛ:\s*", "", cleaned)
+    cleaned = re.sub(r"^СВЯЗЬ:\s*", "", cleaned)
+    cleaned = re.sub(r"\s*\|\s*интерес:\s*", " увлекается: ", cleaned)
+    cleaned = re.sub(r"\s*\|\s*предпочитает:\s*", " предпочитает ", cleaned)
+    cleaned = re.sub(r"\s*\|\s*факт:\s*", " — ", cleaned)
+    cleaned = re.sub(r"\s*\|\s*роль:\s*", " имеет роль ", cleaned)
+    cleaned = re.sub(r"\s*\|\s*прозвище:\s*", " имеет прозвище ", cleaned)
+
+    name_map = {
+        r"\bДанила\b": "Danil (@Markvannes)",
+        r"\bDanil\b(?!\s*\(@)": "Danil (@Markvannes)",
+        r"\bЧика\b(?!\s*\(@)": "Чика (@SCTemi)",
+        r"\bsanechk_aaa\b(?!\s*\(@)": "sanechk_aaa (@sanechkkk_aaa)",
+        r"\bСанечка\b": "sanechk_aaa (@sanechkkk_aaa)",
+        r"\bЛексон⁴²\b(?!\s*\(@)": "Лексон⁴² (@LeksikN6)",
+        r"\bЛюбимый\b(?!\s*\(@)": "Любимый (@Lubimbi_director)",
+    }
+    for pattern, repl in name_map.items():
+        cleaned = re.sub(pattern, repl, cleaned)
+
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned if len(cleaned) >= 5 else ""
+
+
 
 
 
@@ -128,9 +163,11 @@ class ChromaMemoryProvider(BaseMemoryProvider):
             ids = []
 
             for idx, item in enumerate(records.data):
-                fact_text = (item.get("fact") or "").strip()
+                raw_fact = (item.get("fact") or "").strip()
+                fact_text = _clean_legacy_fact(raw_fact)
                 if not fact_text:
                     continue
+
                 chat_id = str(item.get("chat_id") or "0")
                 entity_name = str(item.get("entity_name") or "")
                 source = str(item.get("fact_type") or "fact")
