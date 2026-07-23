@@ -46,13 +46,13 @@ def run_supabase_cleanup():
     db = SupabaseDB(settings)
     print("🔍 Подключение к Supabase memories...")
     
-    response = db.client.table("memories").select("*").limit(2000).execute()
+    response = db.client.table("bot_knowledge").select("*").limit(2000).execute()
     if not response or not response.data:
-        print("⚠️ Записи памяти в Supabase не найдены.")
+        print("⚠️ Записи памяти в Supabase bot_knowledge не найдены.")
         return
 
     records = response.data
-    print(f"📊 Найдено записей в Supabase: {len(records)}")
+    print(f"📊 Найдено записей в Supabase bot_knowledge: {len(records)}")
 
     ephemeral_keywords = [
         "заснул", "хочет спать", "хочет пасочку", "покрасить яички", 
@@ -71,29 +71,30 @@ def run_supabase_cleanup():
         # 1. Сиюминутные состояния / эмоции
         fact_lower = fact_text.lower()
         if any(keyword in fact_lower for keyword in ephemeral_keywords):
-            db.client.table("memories").delete().eq("id", rec_id).execute()
+            db.client.table("bot_knowledge").delete().eq("id", rec_id).execute()
             deleted_count += 1
             continue
 
         # 2. Очистка текста
         cleaned = clean_fact_text(fact_text)
         if not cleaned or len(cleaned) < 5:
-            db.client.table("memories").delete().eq("id", rec_id).execute()
+            db.client.table("bot_knowledge").delete().eq("id", rec_id).execute()
             deleted_count += 1
             continue
 
         # 3. Дедупликация
         norm_key = cleaned.lower()
         if norm_key in seen_facts:
-            db.client.table("memories").delete().eq("id", rec_id).execute()
+            db.client.table("bot_knowledge").delete().eq("id", rec_id).execute()
             deleted_count += 1
             continue
         seen_facts.add(norm_key)
 
         # 4. Обновление если изменилось
         if cleaned != fact_text:
-            db.client.table("memories").update({"fact": cleaned}).eq("id", rec_id).execute()
+            db.client.table("bot_knowledge").update({"fact": cleaned}).eq("id", rec_id).execute()
             updated_count += 1
+
 
     print(f"✅ Очистка Supabase завершена!")
     print(f"   Удалено сиюминутных/дубликатов: {deleted_count}")

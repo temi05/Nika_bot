@@ -169,16 +169,17 @@ class ChromaMemoryProvider(BaseMemoryProvider):
                 if not fact_text:
                     if rec_id:
                         try:
-                            self.db.client.table("memories").delete().eq("id", rec_id).execute()
+                            self.db._knowledge().delete().eq("id", rec_id).execute()
                         except Exception:
                             pass
                     continue
 
                 if fact_text != raw_fact and rec_id:
                     try:
-                        self.db.client.table("memories").update({"fact": fact_text}).eq("id", rec_id).execute()
+                        self.db._knowledge().update({"fact": fact_text}).eq("id", rec_id).execute()
                     except Exception:
                         pass
+
 
 
                 chat_id = str(item.get("chat_id") or "0")
