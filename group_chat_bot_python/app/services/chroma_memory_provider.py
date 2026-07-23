@@ -174,15 +174,35 @@ class ChromaMemoryProvider(BaseMemoryProvider):
             return ""
 
         try:
-            # 1. Факты о конкретном пользователе
             user_facts: list[str] = []
+            mentioned_facts: list[str] = []
+
             all_data = self._collection.get(where={"chat_id": str(chat_id)})
             if all_data and all_data.get("documents"):
-                for doc, meta in zip(all_data["documents"], all_data["metadatas"]):
+                docs = all_data["documents"]
+                metas = all_data["metadatas"]
+
+                # 1. Факты об отправителе
+                for doc, meta in zip(docs, metas):
                     if meta.get("entity_name") == user_name or user_name.casefold() in doc.casefold():
                         user_facts.append(doc)
 
-            # 2. Векторный семантический поиск по смыслу сообщения
+                # 2. Точный поиск фактов об упомянутых участниках/сущностях в сообщении
+                raw_words = [w.strip(" .,!?:;\"'()[]{}<>-").casefold() for w in re.findall(r"\b[\w\d_@]+\b", user_message)]
+                stop_words = {"расскажи", "что", "про", "тебя", "меня", "кого", "какое", "знаешь", "есть", "тогда", "скажи", "какой", "какая", "почему", "зачем", "когда", "где", "как", "еще", "ещё"}
+                target_words = [w for w in raw_words if len(w) >= 3 and w not in stop_words]
+
+                for doc, meta in zip(docs, metas):
+                    doc_lower = doc.casefold()
+                    entity_lower = str(meta.get("entity_name") or "").casefold()
+                    for word in target_words:
+                        # Снимаем падежные окончания для поиска основы русской формы (например, псинке -> псинк)
+                        stem = word[:4] if len(word) >= 5 else word
+                        if stem in doc_lower or (entity_lower and stem in entity_lower):
+                            mentioned_facts.append(doc)
+                            break
+
+            # 3. Векторный семантический поиск по смыслу сообщения
             semantic_facts: list[str] = []
             if user_message and len(user_message.strip()) >= 3:
                 results = self._collection.query(
@@ -193,16 +213,17 @@ class ChromaMemoryProvider(BaseMemoryProvider):
                 if results and results.get("documents") and results["documents"][0]:
                     semantic_facts = results["documents"][0]
 
-            # Объединяем и очищаем дубликаты
-            combined = _clean_memory_items(list(dict.fromkeys(user_facts[:4] + semantic_facts[:4])))
+            # Объединяем факты (упомянутые лица сначала, потом отправитель, потом семантика)
+            combined = _clean_memory_items(list(dict.fromkeys(mentioned_facts[:6] + user_facts[:4] + semantic_facts[:4])))
             return format_memory_context(
-                profile_facts=combined[:5],
+                profile_facts=combined[:8],
                 topic_facts=[],
                 recent_facts=[],
             )
         except Exception as e:
             self._log("get_facts_error", error=str(e))
             return ""
+
 
     async def save_transcript(self, chat_id: int, transcript: str, participants: list[str]) -> None:
         compact = _compact_transcript(transcript)
