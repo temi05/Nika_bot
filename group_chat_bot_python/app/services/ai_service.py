@@ -1016,18 +1016,21 @@ class AIService:
 
     async def _tool_send_reaction(self, chat_id: int, args: dict[str, Any]) -> str:
         emoji = str(args.get("emoji") or "").strip()
-        msg_id = args.get("message_id")
+        msg_id = args.get("message_id") or self._current_source_message_id.get(chat_id)
         
         if not emoji:
             return "Реакция не поставлена: не указан эмодзи."
+        if not msg_id:
+            return "Реакция не поставлена: не удалось определить ID сообщения."
             
         try:
             from aiogram.types import ReactionTypeEmoji
             await self.bot.set_message_reaction(
                 chat_id=chat_id,
-                message_id=msg_id,
+                message_id=int(msg_id),
                 reaction=[ReactionTypeEmoji(emoji=emoji)]
             )
+
             return f"Реакция {emoji} успешно поставлена."
         except Exception as exc:
             self._log("reaction_error", error=str(exc))
