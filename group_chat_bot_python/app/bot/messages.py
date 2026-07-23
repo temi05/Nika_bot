@@ -210,18 +210,34 @@ def build_messages_router(bot: Bot, settings: Settings, db: SupabaseDB, ai: AISe
         if message.new_chat_members:
             me = await bot.get_me()
             inviter = get_sender_data(message)
+            inviter_is_admin = await _user_is_admin(bot, message.chat.id, inviter.user_id)
+
             for member in message.new_chat_members:
                 if member.is_bot:
                     if member.id != me.id:
-                        try:
-                            await bot.ban_chat_member(message.chat.id, member.id)
-                        except Exception:
-                            pass
-                        await message.answer(
-                            f"🚨 Обнаружен бот. Пригласил: <b>{escape_html(inviter.display_name)}</b>",
-                            parse_mode="HTML",
-                        )
+                        if inviter_is_admin:
+                            await message.answer(
+                                f"🤖 Администратор <b>{escape_html(inviter.display_name)}</b> добавил бота <b>{escape_html(member.full_name or 'Bot')}</b>.",
+                                parse_mode="HTML",
+                            )
+                        else:
+                            try:
+                                await bot.ban_chat_member(message.chat.id, member.id)
+                            except Exception:
+                                pass
+                            await message.answer(
+                                f"🚨 Обнаружен сторонний бот. Пригласил: <b>{escape_html(inviter.display_name)}</b>. Бот заблокирован.",
+                                parse_mode="HTML",
+                            )
                     continue
+
+                if inviter_is_admin and inviter.user_id != member.id:
+                    await message.answer(
+                        f"👋 Добро пожаловать, <b>{escape_html(member.full_name or 'участник')}</b>! (Пригласил админ <b>{escape_html(inviter.display_name)}</b>)",
+                        parse_mode="HTML",
+                    )
+                    continue
+
 
                 try:
                     await bot.restrict_chat_member(
