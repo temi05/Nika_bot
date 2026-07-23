@@ -442,7 +442,8 @@ class AIService:
         messages.append({"role": "user", "content": self._build_current_user_content(context_text, images)})
 
         try:
-            use_tools = len(plain_user_text.strip()) >= 5 and not images
+            use_tools = not images
+
             for round_index in range(3):
                 request_kwargs: dict[str, Any] = {
                     "model": self.settings.ai_model,
