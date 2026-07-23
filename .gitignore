@@ -47,3 +47,7 @@ Thumbs.db
 # RAG Data
 lightrag_data/
 lightrag_render_service/lightrag_data/
+group_chat_bot_python/data/
+chroma_memory_backup/
+*.zip
+
