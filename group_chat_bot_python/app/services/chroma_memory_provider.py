@@ -223,9 +223,22 @@ class ChromaMemoryProvider(BaseMemoryProvider):
             if confidence < self.settings.memory_fact_min_confidence:
                 continue
 
-            # Добавляем в ChromaDB
-            doc_id = f"fact_{chat_id}_{hash(fact) & 0xFFFFFFFF}"
+            # Умный поиск дубликатов по смыслу перед записью
             entity_name = (item.get("entities") or [participants[0] if participants else ""])[0]
+            doc_id = f"fact_{chat_id}_{hash(fact) & 0xFFFFFFFF}"
+            
+            try:
+                existing = self._collection.query(
+                    query_texts=[fact],
+                    n_results=1,
+                    where={"chat_id": str(chat_id)}
+                )
+                if existing and existing.get("distances") and existing["distances"][0]:
+                    dist = existing["distances"][0][0]
+                    if dist < 0.15 and existing.get("ids") and existing["ids"][0]:
+                        doc_id = existing["ids"][0][0] # Перезаписываем существующий аналогичный факт
+            except Exception:
+                pass
 
             self._collection.upsert(
                 documents=[fact],
@@ -239,6 +252,7 @@ class ChromaMemoryProvider(BaseMemoryProvider):
                 ],
                 ids=[doc_id],
             )
+
             stored += 1
 
         if stored > 0:
