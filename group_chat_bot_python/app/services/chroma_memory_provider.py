@@ -45,6 +45,10 @@ class LightweightEmbeddingFunction:
             return self.embed_documents(input)
         return self.embed_documents([str(input)])
 
+    def __call__(self, input: list[str]) -> list[list[float]]:
+        return self.embed_documents(input)
+
+
 def _clean_legacy_fact(text: str) -> str:
     if not text:
         return ""
