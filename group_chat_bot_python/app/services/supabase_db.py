@@ -32,6 +32,7 @@ class SupabaseDB:
         self.reaction_cooldowns: dict[str, float] = {}
         self.command_cooldowns: dict[int, dict[str, float]] = {}
         self.active_chats: dict[int, float] = {}
+        self.pending_verifications: dict[int, VerificationChallenge] = {}
         self.last_birthday_check: dict[int, str] = {}
         self.congratulated_birthdays: set[str] = set()
         self.poll_authors: dict[str, dict[str, Any]] = {}
