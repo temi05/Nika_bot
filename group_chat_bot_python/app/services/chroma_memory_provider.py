@@ -121,9 +121,9 @@ class ChromaMemoryProvider(BaseMemoryProvider):
         self._migrated_from_supabase = False
         self._init_chroma()
 
-    def _log(self, event: str, **kwargs: Any) -> None:
+    def _log(self, action: str, **kwargs: Any) -> None:
         details = " ".join(f"{key}={value!r}" for key, value in kwargs.items())
-        print(f"[CHROMA_MEMORY:{event}] {details}".strip())
+        print(f"[CHROMA_MEMORY:{action}] {details}".strip())
 
     def _init_chroma(self) -> None:
         try:
