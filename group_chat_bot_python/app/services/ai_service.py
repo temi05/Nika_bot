@@ -238,9 +238,27 @@ class AIService:
                     return await self._read_image_response(response)
                 except Exception as retry_exc:
                     self._log("image_retry_error", error=str(retry_exc))
+        return await self._generate_pollinations_image(clean_prompt)
+
+    async def _generate_pollinations_image(self, prompt: str) -> bytes | None:
+        clean_prompt = prompt.strip()
+        if not clean_prompt:
+            return None
+        try:
+            import urllib.parse
+            encoded = urllib.parse.quote(clean_prompt[:1500])
+            url = f"https://image.pollinations.ai/prompt/{encoded}?width=1024&height=1024&nologo=true&seed={random.randint(1, 999999)}"
+            self._log("pollinations_image_request", prompt=clean_prompt[:60])
+            async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+                resp = await client.get(url)
+                if resp.status_code == 200 and len(resp.content) > 1000:
+                    return resp.content
+        except Exception as exc:
+            self._log("pollinations_image_error", error=str(exc))
         return None
 
     async def _generate_polza_media(self, prompt: str, reference_images: list[tuple[bytes, str]]) -> bytes | None:
+
         clean_prompt = prompt.strip()
         if not clean_prompt or not self.settings.polza_api_key:
             return None
@@ -298,7 +316,8 @@ class AIService:
                     return await self._generate_polza_media(clean_prompt, [])
                 except Exception as retry_exc:
                     self._log("polza_media_retry_error", error=str(retry_exc))
-        return None
+        return await self._generate_pollinations_image(clean_prompt)
+
 
     async def _read_polza_media_result(self, client: httpx.AsyncClient, payload: dict[str, Any]) -> bytes | None:
         image_url = self._extract_image_url(payload.get("data"))
