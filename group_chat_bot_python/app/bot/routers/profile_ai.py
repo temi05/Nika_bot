@@ -110,7 +110,7 @@ def build_profile_ai_router(db: SupabaseDB, ai: AIService, bot_name: str) -> Rou
             compat = get_nika_compatibility(day, month)
             zodiac_info = f" ({sign} | ⚡ Совместимость с Никой: <b>{compat}</b>)"
             
-        cookies = target_user.cookies
+        cookies = getattr(target_user, "reputation", 0)
         
         card_text = (
             f"👤 <b>Персональная карточка: {escape_html(target_sender.display_name)}</b>\n"
