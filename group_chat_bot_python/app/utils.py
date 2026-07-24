@@ -150,6 +150,38 @@ def birthday_age_text(value: str | None, today: datetime | None = None) -> str:
     return f" ({today.year - year} лет)"
 
 
+def get_zodiac_sign(day: int, month: int) -> str:
+    if (month == 3 and day >= 21) or (month == 4 and day <= 19):
+        return "Овен ♈"
+    elif (month == 4 and day >= 20) or (month == 5 and day <= 20):
+        return "Телец ♉"
+    elif (month == 5 and day >= 21) or (month == 6 and day <= 20):
+        return "Близнецы ♊"
+    elif (month == 6 and day >= 21) or (month == 7 and day <= 22):
+        return "Рак ♋"
+    elif (month == 7 and day >= 23) or (month == 8 and day <= 22):
+        return "Лев ♌"
+    elif (month == 8 and day >= 23) or (month == 9 and day <= 22):
+        return "Дева ♍"
+    elif (month == 9 and day >= 23) or (month == 10 and day <= 22):
+        return "Весы ♎"
+    elif (month == 10 and day >= 23) or (month == 11 and day <= 21):
+        return "Скорпион ♏"
+    elif (month == 11 and day >= 22) or (month == 12 and day <= 21):
+        return "Стрелец ♐"
+    elif (month == 12 and day >= 22) or (month == 1 and day <= 19):
+        return "Козерог ♑"
+    elif (month == 1 and day >= 20) or (month == 2 and day <= 18):
+        return "Водолей ♒"
+    else:
+        return "Рыбы ♓"
+
+
+def get_nika_compatibility(day: int, month: int) -> str:
+    score = (day * 7 + month * 13) % 36 + 65
+    return f"{score}%"
+
+
 def human_timedelta(hours: int, minutes: int) -> str:
     return f"{hours} ч. {minutes} мин."
 

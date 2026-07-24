@@ -84,5 +84,15 @@ class PersonaService:
         else:
             state["stage"] = "fresh"
 
+    def format_stage_title(self, stage: str) -> str:
+        stages = {
+            "fresh": "Новичок 🌿 (присматриваюсь)",
+            "familiar": "Знакомый 🤝 (общаемся)",
+            "regular": "Свой участник 😎 (постоянный)",
+            "inner_circle": "Близкий круг 🔥 (максимальное доверие)",
+            "volatile": "Вспыльчивый / Нарушитель ⚡ (особый контроль)",
+        }
+        return stages.get(stage, "Новичок 🌿")
+
     def _clamp(self, value: float, lower: float = 0.0, upper: float = 1.0) -> float:
         return max(lower, min(upper, value))

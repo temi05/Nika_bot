@@ -78,6 +78,12 @@ class BaseMemoryProvider:
     async def get_relevant_facts(self, chat_id: int, user_message: str, user_name: str, user_id: int | None = None) -> str:
         raise NotImplementedError
 
+    def get_user_facts(self, chat_id: int, user_name: str, limit: int = 10) -> list[str]:
+        return []
+
+    def add_chat_event(self, chat_id: int, event_text: str, entity_name: str = "") -> bool:
+        return False
+
     async def health(self) -> dict:
         return {"healthy": True}
 

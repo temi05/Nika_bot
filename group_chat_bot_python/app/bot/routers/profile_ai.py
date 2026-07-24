@@ -12,7 +12,7 @@ from app.services.ai_service import AIService
 from app.services.supabase_db import SupabaseDB
 from app.bot.admin import is_admin
 from app.bot.routers.jail_helpers import deny_if_jailed
-from app.utils import build_progress_bar, escape_html, get_sender_data, parse_birthday_parts
+from app.utils import build_progress_bar, escape_html, get_sender_data, parse_birthday_parts, get_zodiac_sign, get_nika_compatibility
 
 NIKA_REFERENCE_ASSET_KEY = "nika_reference"
 
@@ -61,6 +61,71 @@ def build_profile_ai_router(db: SupabaseDB, ai: AIService, bot_name: str) -> Rou
             f"<b>Заметки ИИ про {escape_html(target.display_name)}</b>\n\n<i>{escape_html(notes)}</i>",
             parse_mode="HTML",
         )
+
+    @router.message(Command("card", "карточка"))
+    async def user_card_command(message: Message, command: CommandObject) -> None:
+        sender_data = get_sender_data(message)
+        target_sender = sender_data
+        
+        if message.reply_to_message:
+            target_sender = get_sender_data(message.reply_to_message)
+        elif command.args:
+            found = db.search_user(message.chat.id, command.args)
+            if found:
+                target_sender.user_id = found.user_id
+                target_sender.display_name = found.display_name
+                target_sender.username = found.username
+
+        target_user = db.get_or_create_user(message.chat.id, target_sender)
+        
+        # Получаем данные о личностной химии и отношениях
+        persona_state = ai.persona.get_state(message.chat.id, target_sender.user_id)
+        stage_title = ai.persona.format_stage_title(persona_state.get("stage", "fresh"))
+        
+        warmth = int(float(persona_state.get("warmth", 0.6)) * 100)
+        respect = int(float(persona_state.get("respect", 0.5)) * 100)
+        attachment = int(float(persona_state.get("attachment", 0.2)) * 100)
+        troll = int(float(persona_state.get("troll", 0.4)) * 100)
+        
+        # Получаем факты из векторной базы
+        user_facts: list[str] = []
+        if hasattr(ai.memory, "get_user_facts"):
+            user_facts = ai.memory.get_user_facts(message.chat.id, target_sender.display_name, limit=6)
+        
+        facts_formatted = ""
+        if user_facts:
+            facts_formatted = "\n".join(f"• {escape_html(f)}" for f in user_facts)
+        else:
+            facts_formatted = "<i>Фактов пока не зафиксировано.</i>"
+            
+        bio_text = escape_html(target_user.bio or "Не указано")
+        birthday_raw = target_user.birthday or ""
+        birthday_text = escape_html(birthday_raw or "Не указано")
+        
+        zodiac_info = ""
+        b_parts = parse_birthday_parts(birthday_raw)
+        if b_parts:
+            day, month, _ = b_parts
+            sign = get_zodiac_sign(day, month)
+            compat = get_nika_compatibility(day, month)
+            zodiac_info = f" ({sign} | ⚡ Совместимость с Никой: <b>{compat}</b>)"
+            
+        cookies = target_user.cookies
+        
+        card_text = (
+            f"👤 <b>Персональная карточка: {escape_html(target_sender.display_name)}</b>\n"
+            f"────────────────────────\n"
+            f"🎭 <b>Отношения с Никой:</b> {stage_title}\n"
+            f"❤️ <b>Динамика связи:</b> Симпатия <b>{warmth}%</b> | Уважение <b>{respect}%</b> | Привязанность <b>{attachment}%</b> | Троллинг <b>{troll}%</b>\n\n"
+            f"📌 <b>Известный профиль:</b>\n"
+            f"• <b>О себе:</b> {bio_text}\n"
+            f"• <b>День рождения:</b> {birthday_text}{zodiac_info}\n"
+            f"• <b>Печеньки:</b> <b>{cookies}</b> 🍪\n\n"
+            f"🧠 <b>Сохранённые воспоминания Ники:</b>\n"
+            f"{facts_formatted}"
+        )
+        
+        await message.answer(card_text, parse_mode="HTML")
 
     @router.message(Command("remember", "запомни"))
     async def remember_command(message: Message, command: CommandObject) -> None:
@@ -1042,6 +1107,78 @@ def build_profile_ai_router(db: SupabaseDB, ai: AIService, bot_name: str) -> Rou
 
         file = await message.bot.get_file(doc.file_id)
         file_bytes = await message.bot.download_file(file.file_path)
+
+    @router.message(Command("clean_memory", "очистить_память"))
+    async def clean_memory_command(message: Message) -> None:
+        """Очищает память от бытового мусора и устаревших повседневных реплик"""
+        sender = get_sender_data(message)
+        if not await is_admin(message.bot, message.chat.id, sender.user_id):
+            await message.answer("❌ Эта команда доступна только администраторам.")
+            return
+
+        ephemeral_queries = [
+            "заснул", "хочет спать", "пошел кушать", "отрубилась", "легла", "проспала",
+            "ем пельмени", "ем чипсы", "выпил чаю", "застрял в пробке",
+            "играет прямо сейчас", "сидит в телефоне", "пошел спать", "устал"
+        ]
+        
+        total_deleted = 0
+        if hasattr(ai.memory, "delete_fact_by_query"):
+            for q in ephemeral_queries:
+                total_deleted += ai.memory.delete_fact_by_query(message.chat.id, q)
+
+        await message.answer(
+            f"🧹 <b>Авто-очистка памяти завершена!</b>\nУдалено <b>{total_deleted}</b> бытовых/мусорных фраз из векторной базы Ники.",
+            parse_mode="HTML"
+        )
+
+    @router.message(Command("lore", "лор", "события"))
+    async def chat_lore_command(message: Message) -> None:
+        """Отображение Ленты Событий и Легенд чата"""
+        facts = await ai.memory.get_relevant_facts(message.chat.id, "событие дуэль казино праздник спор арт", "события")
+        if not facts:
+            await message.answer("📜 <b>Лента Событий пока пуста.</b> Ждём первых ярких дуэлей, артов и споров!", parse_mode="HTML")
+            return
+        
+        await message.answer(
+            f"📜 <b>Легенды и Лента Событий чата:</b>\n\n{facts}",
+            parse_mode="HTML"
+        )
+
+    @router.message(Command("add_lore", "добавить_лор"))
+    async def add_lore_command(message: Message, command: CommandObject) -> None:
+        """Ручное добавление важного события или мема в Ленту Событий чата"""
+        lore_text = (command.args or "").strip()
+        if not lore_text:
+            await message.answer("📜 Использование: <code>/add_lore текст важного события или легенды чата</code>", parse_mode="HTML")
+            return
+        
+        sender = get_sender_data(message)
+        event_entry = f"Легенда чата от {sender.display_name}: {lore_text}"
+        
+        if hasattr(ai.memory, "add_chat_event"):
+            ai.memory.add_chat_event(message.chat.id, event_entry, sender.display_name)
+        
+        await message.answer(
+            f"📜 <b>Зафиксировано в истории чата!</b>\n<i>«{escape_html(lore_text)}»</i>",
+            parse_mode="HTML"
+        )
+
+    @router.message(Command("forget_me", "забудь_меня"))
+    async def forget_me_command(message: Message) -> None:
+        """Сбрасывает все факты о пользователе из памяти Ники"""
+        sender = get_sender_data(message)
+        deleted = 0
+        if hasattr(ai.memory, "delete_fact_by_query"):
+            deleted = ai.memory.delete_fact_by_query(message.chat.id, sender.display_name)
+        
+        ai.persona.observe_user_message(message.chat.id, sender.user_id, "", reply_to_bot=False, mentioned=False)
+        
+        await message.answer(
+            f"🧹 <b>Готово, {escape_html(sender.display_name)}!</b>\n"
+            f"Я затерла <b>{deleted}</b> воспоминаний о тебе из своей базы. Начинаем общение с чистого листа!",
+            parse_mode="HTML"
+        )
 
         if hasattr(ai.memory, "restore_from_zip_bytes"):
             success = await ai.memory.restore_from_zip_bytes(file_bytes.read())

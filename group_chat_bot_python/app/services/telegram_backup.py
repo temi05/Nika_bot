@@ -56,6 +56,26 @@ class TelegramBackupService:
                 self._log("upload_error", error=str(e))
                 return False
 
+    async def send_fact_card(self, fact_text: str, entity_name: str = "", total_facts: int = 0) -> None:
+        """Отправляет наглядное уведомление о новом воспоминании в бэкап-чат"""
+        if not self.backup_chat_id:
+            return
+        try:
+            from app.utils import escape_html
+            text = (
+                f"🧠 <b>Новое воспоминание Ники!</b>\n\n"
+                f"👤 <b>Субъект:</b> {escape_html(entity_name or 'Участник')}\n"
+                f"📝 <b>Факт:</b> <i>{escape_html(fact_text)}</i>\n"
+                f"📊 <b>Всего фактов в базе:</b> {total_facts}"
+            )
+            await self.bot.send_message(
+                chat_id=self.backup_chat_id,
+                text=text,
+                parse_mode="HTML",
+            )
+        except Exception as e:
+            self._log("send_fact_card_error", error=str(e))
+
     async def restore_from_zip_bytes(self, zip_bytes: bytes) -> bool:
         """Восстанавливает базу из полученных байтов ZIP (например по команде /restore_memory)"""
         async with self._lock:

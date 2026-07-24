@@ -212,11 +212,11 @@ def format_memory_context(
     sections: list[str] = []
 
     if profile_facts:
-        sections.append("Профиль и отношения собеседника:\n" + "\n".join(f"- {item}" for item in profile_facts[:5]))
+        sections.append("📋 Профиль и предпочтения собеседника:\n" + "\n".join(f"- {item}" for item in profile_facts[:5]))
     if topic_facts:
-        sections.append("Факты по теме разговора:\n" + "\n".join(f"- {item}" for item in topic_facts[:6]))
+        sections.append("🔍 Факты по теме разговора:\n" + "\n".join(f"- {item}" for item in topic_facts[:5]))
     if recent_facts:
-        sections.append("Недавние события в чате:\n" + "\n".join(f"- {item}" for item in recent_facts[:4]))
+        sections.append("📜 Лента ярких событий чата:\n" + "\n".join(f"- {item}" for item in recent_facts[:4]))
 
     return "\n\n".join(sections).strip()
 
@@ -231,14 +231,25 @@ def _stage_note(stage: str) -> str:
     }.get(stage, "Подстраивайся по реальной накопленной динамике.")
 
 
-def _mood_note(mood: int) -> str:
+def _mood_note(mood: int, current_hour: int | None = None) -> str:
+    import datetime
+    if current_hour is None:
+        try:
+            current_hour = datetime.datetime.now().hour
+        except Exception:
+            current_hour = 12
+
+    night_vibe = ""
+    if 0 <= current_hour < 7:
+        night_vibe = " 🌙 [НОЧНОЙ ВАЙБ]: Сейчас ночь (00:00–07:00). Общайся уютнее, спокойнее и душевнее, сбавь резкий сарказм."
+
     if mood >= 80:
-        return "Ты в отличном настроении: больше харизмы, драйва, игривости и позитива."
+        return f"Ты в отличном настроении: больше харизмы, драйва, игривости и позитива.{night_vibe}"
     if mood >= 55:
-        return "Ты в рабочем настроении: уверенная, собранная, реагируешь по ситуации."
+        return f"Ты в идеальном балансе: уверенная, остроумная киберпанк-девчонка, реагируешь живым умом.{night_vibe}"
     if mood >= 35:
-        return "Настроение так себе: отвечай колко, по делу, можешь немного ворчать."
-    return "Ты раздражена: коротко, плотно, без украшений. Можешь больно кусаться в ответ на глупости."
+        return f"Настроение так себе: отвечай колко, по делу, подкалывай за глупости.{night_vibe}"
+    return f"Ты раздражена: коротко, плотно, без сюсюканья. Можешь кусаться в ответ на спам.{night_vibe}"
 
 
 def _relation_note(*, troll: float, warmth: float, chaos: float, attachment: float, respect: float) -> str:

@@ -57,7 +57,9 @@ def _clean_legacy_fact(text: str) -> str:
     ephemeral = [
         "заснул", "хочет спать", "хочет пасочку", "покрасить яички", 
         "пошел кушать", "отрубилась", "легла", "потянувся", "проспала",
-        "недопонимание", "эмоция:", "состояние:", "состояние "
+        "недопонимание", "эмоция:", "состояние:", "состояние ",
+        "ем пельмени", "ем чипсы", "выпил чаю", "застрял в пробке",
+        "играет прямо сейчас", "сидит в телефоне", "пошел спать", "устал"
     ]
     if any(k in cleaned.lower() for k in ephemeral):
         return ""
@@ -233,13 +235,17 @@ class ChromaMemoryProvider(BaseMemoryProvider):
             mentioned_facts: list[str] = []
 
             all_data = self._collection.get(where={"chat_id": str(chat_id)})
+            event_facts: list[str] = []
             if all_data and all_data.get("documents"):
                 docs = all_data["documents"]
                 metas = all_data["metadatas"]
 
-                # 1. Факты об отправителе
+                # 1. Факты об отправителе и важные события чата
                 for doc, meta in zip(docs, metas):
-                    if meta.get("entity_name") == user_name or user_name.casefold() in doc.casefold():
+                    src = str(meta.get("source") or "")
+                    if src in {"event_timeline", "event"} or "событие" in src.lower():
+                        event_facts.append(doc)
+                    elif meta.get("entity_name") == user_name or user_name.casefold() in doc.casefold():
                         user_facts.append(doc)
 
                 # 2. Точный поиск фактов об упомянутых участниках/сущностях в сообщении
@@ -268,16 +274,47 @@ class ChromaMemoryProvider(BaseMemoryProvider):
                 if results and results.get("documents") and results["documents"][0]:
                     semantic_facts = results["documents"][0]
 
-            # Объединяем факты (упомянутые лица сначала, потом отправитель, потом семантика)
-            combined = _clean_memory_items(list(dict.fromkeys(mentioned_facts[:6] + user_facts[:4] + semantic_facts[:4])))
+            profile_combined = _clean_memory_items(list(dict.fromkeys(user_facts[:4] + mentioned_facts[:4])))
+            topic_combined = _clean_memory_items(list(dict.fromkeys(semantic_facts[:4])))
+            events_combined = _clean_memory_items(list(dict.fromkeys(event_facts[:4])))
+
             return format_memory_context(
-                profile_facts=combined[:8],
-                topic_facts=[],
-                recent_facts=[],
+                profile_facts=profile_combined,
+                topic_facts=topic_combined,
+                recent_facts=events_combined,
             )
         except Exception as e:
             self._log("get_facts_error", error=str(e))
             return ""
+
+    def add_chat_event(self, chat_id: int, event_text: str, entity_name: str = "") -> bool:
+        """Сохраняет ключевое событие из жизни чата (дуэль, казино, спор, важный факт)"""
+        if not self._collection or not event_text.strip():
+            return False
+        try:
+            clean_event = event_text.strip()
+            doc_id = f"event_{chat_id}_{hash(clean_event) & 0xFFFFFFFF}"
+            self._collection.upsert(
+                documents=[clean_event],
+                metadatas=[{
+                    "chat_id": str(chat_id),
+                    "entity_name": entity_name,
+                    "source": "event_timeline",
+                    "confidence": 0.95,
+                }],
+                ids=[doc_id],
+            )
+            self._log("chat_event_stored", chat_id=chat_id, event=clean_event[:60])
+            if self.backup_service:
+                try:
+                    loop = asyncio.get_running_loop()
+                    loop.create_task(self.backup_service.upload_backup("💾 Авто-бэкап (новое событие чата)"))
+                except RuntimeError:
+                    pass
+            return True
+        except Exception as e:
+            self._log("add_chat_event_error", error=str(e))
+            return False
 
 
     async def save_transcript(self, chat_id: int, transcript: str, participants: list[str]) -> None:
@@ -457,6 +494,24 @@ class ChromaMemoryProvider(BaseMemoryProvider):
             except RuntimeError:
                 pass
         return count
+
+    def get_user_facts(self, chat_id: int, user_name: str, limit: int = 10) -> list[str]:
+        """Возвращает факты, относящиеся к конкретному участнику"""
+        if not self._collection or not user_name.strip():
+            return []
+        try:
+            results = self._collection.get(where={"chat_id": str(chat_id)})
+            facts: list[str] = []
+            if results and results.get("documents"):
+                clean_name = user_name.strip().casefold()
+                for doc, meta in zip(results["documents"], results["metadatas"]):
+                    entity = str(meta.get("entity_name") or "").casefold()
+                    if entity == clean_name or clean_name in doc.casefold():
+                        facts.append(doc)
+            return _clean_memory_items(list(dict.fromkeys(facts)))[:limit]
+        except Exception as e:
+            self._log("get_user_facts_error", error=str(e))
+            return []
 
     def get_all_facts_paged(self, chat_id: int, page: int = 1, page_size: int = 5, query: str = "") -> dict[str, Any]:
         """Возвращает пагинированный список фактов с опциональной фильтрацией по участнику или тексту"""
