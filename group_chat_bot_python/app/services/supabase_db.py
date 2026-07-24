@@ -32,8 +32,8 @@ class SupabaseDB:
         self.reaction_cooldowns: dict[str, float] = {}
         self.command_cooldowns: dict[int, dict[str, float]] = {}
         self.active_chats: dict[int, float] = {}
-        self.pending_verifications: dict[int, VerificationChallenge] = {}
         self.last_birthday_check: dict[int, str] = {}
+        self.congratulated_birthdays: set[str] = set()
         self.poll_authors: dict[str, dict[str, Any]] = {}
         self._rich_message_logs_supported: bool | None = None
         self._knowledge_entities_supported: bool | None = None
@@ -684,6 +684,27 @@ class SupabaseDB:
 
     def get_birthdays_today(self, chat_id: int) -> list[ChatUser]:
         return [user for user in self.get_all_users(chat_id) if birthday_is_today(user.birthday)]
+
+    def is_bday_congratulated(self, chat_id: int, user_id: int, year: int) -> bool:
+        key = f"{chat_id}:{user_id}:{year}"
+        if key in self.congratulated_birthdays:
+            return True
+        user = self.get_user_by_id(user_id)
+        if user and user.ai_notes and f"bday_congratulated_{year}" in user.ai_notes:
+            self.congratulated_birthdays.add(key)
+            return True
+        return False
+
+    def mark_bday_congratulated(self, chat_id: int, user_id: int, year: int) -> None:
+        key = f"{chat_id}:{user_id}:{year}"
+        self.congratulated_birthdays.add(key)
+        user = self.get_user_by_id(user_id)
+        if user:
+            flag = f"bday_congratulated_{year}"
+            current_notes = user.ai_notes or ""
+            if flag not in current_notes:
+                new_notes = f"{current_notes}\n{flag}".strip()
+                self.update_user(user.id, {"ai_notes": new_notes})
 
     def apply_warn(self, user: ChatUser) -> ChatUser | None:
         return self.update_user(

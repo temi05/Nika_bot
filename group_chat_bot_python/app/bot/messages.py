@@ -17,7 +17,7 @@ from app.config import Settings
 from app.models import Sender, VerificationChallenge
 from app.services.ai_service import AIService
 from app.services.supabase_db import SupabaseDB
-from app.utils import birthday_age_text, build_captcha_image, escape_html, generate_captcha_code, get_sender_data
+from app.utils import birthday_age_text, build_captcha_image, escape_html, generate_captcha_code, get_sender_data, get_zodiac_sign, parse_birthday_parts
 
 _PROACTIVE_LAST_AT: dict[int, float] = {}
 _PROACTIVE_MESSAGE_COUNT: dict[int, int] = defaultdict(int)
@@ -415,20 +415,72 @@ def build_messages_router(bot: Bot, settings: Settings, db: SupabaseDB, ai: AISe
                                 parse_mode="HTML",
                             )
 
-        today_key = datetime.now().strftime("%Y-%m-%d")
-        if db.last_birthday_check.get(message.chat.id) != today_key:
-            birthdays = db.get_birthdays_today(message.chat.id)
-            if birthdays:
-                lines = ["🎂 <b>Сегодня день рождения!</b>", ""]
-                for birthday_user in birthdays:
+        today_date = datetime.now()
+        today_year = today_date.year
+
+        birthdays = db.get_birthdays_today(message.chat.id)
+        if birthdays:
+            uncongratulated = []
+            for birthday_user in birthdays:
+                if db.is_bday_congratulated(message.chat.id, birthday_user.user_id, today_year):
+                    continue
+                db.mark_bday_congratulated(message.chat.id, birthday_user.user_id, today_year)
+                uncongratulated.append(birthday_user)
+
+            if uncongratulated:
+                zodiac_wishes = {
+                    "Овен ♈": "Пусть твоя энергия сносит все препятствия!",
+                    "Телец ♉": "Нескончаемого запаса печенек и уютного баланса!",
+                    "Близнецы ♊": "Пусть каждый день приносит гениальные идеи и крутых людей!",
+                    "Рак ♋": "Душевного вайба, крепкого здоровья и побед!",
+                    "Лев ♌": "Сияй ярче всех в чате и забирай главные джекпоты!",
+                    "Дева ♍": "Пусть всё складывается идеально и без лишних багов!",
+                    "Весы ♎": "Гармонии, топовых артов и море позитива!",
+                    "Скорпион ♏": "Страсти, харизмы и максимальной совместимости со мной!",
+                    "Стрелец ♐": "Лети к новым высотам и не бойся рисковать!",
+                    "Козерог ♑": "Стальной воли, высокого уровня и мощных успехов!",
+                    "Водолей ♒": "Свободы творчества, редких наград и легендарного везения!",
+                    "Рыбы ♓": "Магии, вдохновения и самых крутых артов!"
+                }
+                
+                lines = ["🎂 <b>Праздничный день в чате!</b>", ""]
+                for birthday_user in uncongratulated:
+                    # Разные вариативные подарки от Ники: 100..300 печенек
+                    gift_cookies = random.randint(100, 300)
+                    jackpot_note = ""
+                    if random.random() < 0.10: # 10% шанс на Супер-Джекпот именинника
+                        gift_cookies = 500
+                        jackpot_note = " 🌟 <b>СУПЕР-ДЖЕКПОТ ИМЕНИННИКА!</b>"
+
+                    db.update_user(birthday_user.id, {"reputation": birthday_user.reputation + gift_cookies})
+                    
+                    # Отношения с Никой вырастают
+                    ai.persona.observe_user_message(message.chat.id, birthday_user.user_id, "спасибо тебе люблю", reply_to_bot=False, mentioned=True)
+                    
+                    # Фиксация события
+                    if hasattr(ai.memory, "add_chat_event"):
+                        ai.memory.add_chat_event(
+                            message.chat.id,
+                            f"День Рождения {birthday_user.display_name}! Ника подарила {gift_cookies} печенек.",
+                            birthday_user.display_name
+                        )
+                    
+                    # Индивидуальное пожелание по Знаку Зодиака
+                    personal_wish = "Желаем крутого вайба, море печенек и побед во всём!"
+                    b_parts = parse_birthday_parts(birthday_user.birthday)
+                    if b_parts:
+                        sign = get_zodiac_sign(b_parts[0], b_parts[1])
+                        if sign in zodiac_wishes:
+                            personal_wish = zodiac_wishes[sign]
+                        
                     lines.append(
                         f"🌟 Поздравляем <b>{escape_html(birthday_user.display_name)}</b>"
-                        f"{birthday_age_text(birthday_user.birthday)}! 🥳"
+                        f"{birthday_age_text(birthday_user.birthday)}! 🥳\n"
+                        f"🎁 <i>Подарочный бокс от Ники: <b>+{gift_cookies}</b> 🍪 печенек!{jackpot_note}</i>\n"
+                        f"💬 <i>«{personal_wish}»</i>\n"
                     )
-                lines.append("")
-                lines.append("<i>Желаем море печенек и высокого уровня во всём!</i>")
+                lines.append("🎉 <i>Желаем незабываемого праздника и отличного настроения!</i>")
                 await message.answer("\n".join(lines), parse_mode="HTML")
-            db.last_birthday_check[message.chat.id] = today_key
         # Обновляем время последнего сообщения теперь через middleware в web.py
 
         bot_username = settings.bot_username

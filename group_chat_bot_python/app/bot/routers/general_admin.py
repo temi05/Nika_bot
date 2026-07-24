@@ -102,17 +102,26 @@ def build_general_admin_router(db: SupabaseDB, bot_name: str, ai: AIService) -> 
             "• Бросить монетку или спросить совет можно прямо в диалоге с ИИ Ники!"
         ),
         "profile": (
-            "👤 <b>Персонализация</b>\n\n"
+            "👤 <b>Персонализация и Память</b>\n\n"
+            "• <code>/card</code> — Персональная карточка участника (отношения, зодиак, память)\n"
             "• <code>/bio [текст]</code> — Расскажи о себе\n"
-            "• <code>/mybirthday [дата]</code> — Установи день рождения\n"
-            "• <code>/remember [факт]</code> — Явно сохранить важный факт"
+            "• <code>/mybirthday [дата]</code> — Установи день рождения (DD.MM)\n"
+            "• <code>/remember [факт]</code> — Сохранить важный факт в память Ники\n"
+            "• <code>/lore</code> — Легенды и Лента Событий чата\n"
+            "• <code>/add_lore [текст]</code> — Зафиксировать новую легенду чата\n"
+            "• <code>/forget_me</code> — Стереть воспоминания о себе (чистый лист)\n"
+            "• <code>/notes</code> — Заметки ИИ про участника"
         ),
         "admin": (
-            "🛡 <b>Администрирование</b>\n\n"
+            "🛡 <b>Администрирование и Память</b>\n\n"
+            "• <code>/clean_memory</code> — Очистить базу от бытового мусора\n"
+            "• <code>/backup_memory</code> — Ручной бэкап векторной памяти в Telegram\n"
+            "• <code>/restore_memory</code> — Восстановить базу из zip-архива\n"
+            "• <code>/nika_brain [запрос]</code> — Поиск векторов в мозге Ники\n"
+            "• <code>/all_facts</code> — Меню всех сохранённых фактов\n"
             "• <code>/cookie_rain</code> — Массовая раздача бонусов\n"
             "• <code>/whisper [текст]</code> — Сообщение от имени бота\n"
             "• <code>/judge</code> — Посадить или выпустить игрока\n"
-            "• <code>/feedbacks</code> — Управление обращениями\n"
             "• <code>/ban</code> | <code>/mute</code> — Модерация"
         ),
         "support": (
