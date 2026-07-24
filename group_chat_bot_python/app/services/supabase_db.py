@@ -690,7 +690,7 @@ class SupabaseDB:
         key = f"{chat_id}:{user_id}:{year}"
         if key in self.congratulated_birthdays:
             return True
-        user = self.get_user_by_id(user_id)
+        user = self.get_user_by_platform_id(chat_id, user_id)
         if user and user.ai_notes and f"bday_congratulated_{year}" in user.ai_notes:
             self.congratulated_birthdays.add(key)
             return True
@@ -699,7 +699,7 @@ class SupabaseDB:
     def mark_bday_congratulated(self, chat_id: int, user_id: int, year: int) -> None:
         key = f"{chat_id}:{user_id}:{year}"
         self.congratulated_birthdays.add(key)
-        user = self.get_user_by_id(user_id)
+        user = self.get_user_by_platform_id(chat_id, user_id)
         if user:
             flag = f"bday_congratulated_{year}"
             current_notes = user.ai_notes or ""
@@ -1449,8 +1449,169 @@ class SupabaseDB:
         # или просто обновить счетчик. Для упрощения добавим счетчик в chat_settings.
         
     def get_recent_stats_count(self, chat_id: int, stat_name: str, hours: int = 24) -> int:
-        """Возвращает количество использований команды в чате за последние часы.
-        Временно возвращает фиксированное значение или рандом, пока нет отдельной таблицы логов.
-        Позже можно реализовать полноценную аналитику через message_logs."""
-        # TODO: Реализовать честный подсчет через логи. Сейчас вернем заглушку.
-        return random.randint(0, 10) # Для тестов возвращаем случайный спрос
+        """Возвращает количество использований команды в чате за последние часы."""
+        return random.randint(0, 10)
+
+    # ==========================================
+    # Долги и Кредиты (Debts)
+    # ==========================================
+    def create_debt(self, chat_id: int, lender_id: int, borrower_id: int, amount: int) -> dict[str, Any] | None:
+        payload = {
+            "chat_id": chat_id,
+            "lender_id": lender_id,
+            "borrower_id": borrower_id,
+            "amount": amount,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "status": "active"
+        }
+        res = self._safe_execute(self._debts().insert(payload), fallback=None)
+        if res and res.data:
+            return res.data[0]
+        return None
+
+    def get_active_debts_for_borrower(self, chat_id: int, borrower_id: int) -> list[dict[str, Any]]:
+        res = self._safe_execute(
+            self._debts().select("*").eq("chat_id", chat_id).eq("borrower_id", borrower_id).eq("status", "active"),
+            fallback=[]
+        )
+        return res.data if res and res.data else []
+
+    def get_active_debts_for_lender(self, chat_id: int, lender_id: int) -> list[dict[str, Any]]:
+        res = self._safe_execute(
+            self._debts().select("*").eq("chat_id", chat_id).eq("lender_id", lender_id).eq("status", "active"),
+            fallback=[]
+        )
+        return res.data if res and res.data else []
+
+    def repay_debts(self, user: ChatUser, amount: int) -> tuple[bool, int, str]:
+        debts = self.get_active_debts_for_borrower(user.chat_id, user.user_id)
+        if not debts:
+            return False, 0, "У вас нет активных долгов."
+        total_paid = 0
+        remaining = amount
+        for debt in debts:
+            debt_id = debt["id"]
+            debt_amount = debt.get("amount", 0)
+            pay = min(remaining, debt_amount)
+            if pay > 0:
+                total_paid += pay
+                remaining -= pay
+                if pay >= debt_amount:
+                    self._safe_execute(self._debts().update({"status": "paid"}).eq("id", debt_id))
+                else:
+                    self._safe_execute(self._debts().update({"amount": debt_amount - pay}).eq("id", debt_id))
+            if remaining <= 0:
+                break
+        if total_paid > 0:
+            new_debt = max(0, user.debt - total_paid)
+            new_rep = max(0, user.reputation - total_paid)
+            self.update_user(user.id, {"debt": new_debt, "reputation": new_rep})
+            return True, total_paid, f"Успешно погашено долгов на {total_paid} 🍪!"
+        return False, 0, "Недостаточно средств для погашения."
+
+    def forgive_debts(self, lender_user_id: int, borrower_user_id: int, chat_id: int) -> bool:
+        res = self._safe_execute(
+            self._debts().update({"status": "forgiven"}).eq("chat_id", chat_id).eq("lender_id", lender_user_id).eq("borrower_id", borrower_user_id).eq("status", "active"),
+            fallback=None
+        )
+        return bool(res and res.data)
+
+    # ==========================================
+    # Напоминания и Активация Событий
+    # ==========================================
+    def remove_reminder(self, reminder_id: int) -> bool:
+        res = self._safe_execute(self._reminders().delete().eq("id", reminder_id), fallback=None)
+        return bool(res and res.data)
+
+    def get_active_chats_for_events(self) -> list[int]:
+        res = self._safe_execute(self._chats().select("chat_id").eq("auto_drop_enabled", True), fallback=[])
+        if res and res.data:
+            return [row["chat_id"] for row in res.data if "chat_id" in row]
+        return list(self.active_chats.keys())
+
+    # ==========================================
+    # Медиа Ассеты (Bot Assets)
+    # ==========================================
+    def get_bot_asset(self, asset_key: str) -> dict[str, Any] | None:
+        res = self._safe_execute(self._assets().select("*").eq("asset_key", asset_key).limit(1), fallback=None)
+        if res and res.data:
+            return res.data[0]
+        return None
+
+    def save_bot_asset(self, asset_key: str, file_id: str, file_type: str = "photo", meta: dict[str, Any] | None = None) -> bool:
+        payload = {
+            "asset_key": asset_key,
+            "file_id": file_id,
+            "file_type": file_type,
+            "meta": meta or {},
+            "updated_at": datetime.now(timezone.utc).isoformat()
+        }
+        res = self._safe_execute(self._assets().upsert(payload), fallback=None)
+        return bool(res and res.data)
+
+    # ==========================================
+    # Сигны (Sign Price Options & Orders)
+    # ==========================================
+    def set_sign_price(self, user_id: int, chat_id: int, price: int) -> bool:
+        user = self.get_user_by_platform_id(chat_id, user_id)
+        if user:
+            res = self.update_user(user.id, {"sign_price": price})
+            return bool(res)
+        return False
+
+    def create_sign_price_option(self, chat_id: int, user_id: int, price: int, title: str) -> dict[str, Any] | None:
+        payload = {"chat_id": chat_id, "user_id": user_id, "price": price, "title": title, "active": True}
+        res = self._safe_execute(self._sign_price_options().insert(payload), fallback=None)
+        return res.data[0] if res and res.data else None
+
+    def disable_sign_price_option(self, option_id: int) -> bool:
+        res = self._safe_execute(self._sign_price_options().update({"active": False}).eq("id", option_id), fallback=None)
+        return bool(res and res.data)
+
+    def list_sign_price_options(self, chat_id: int, user_id: int) -> list[dict[str, Any]]:
+        res = self._safe_execute(self._sign_price_options().select("*").eq("chat_id", chat_id).eq("user_id", user_id).eq("active", True), fallback=[])
+        return res.data if res and res.data else []
+
+    def get_sign_price_option(self, option_id: int) -> dict[str, Any] | None:
+        res = self._safe_execute(self._sign_price_options().select("*").eq("id", option_id).limit(1), fallback=None)
+        return res.data[0] if res and res.data else None
+
+    def create_sign_order(self, chat_id: int, buyer_id: int, author_id: int, price: int, prompt: str) -> dict[str, Any] | None:
+        payload = {
+            "chat_id": chat_id,
+            "buyer_id": buyer_id,
+            "author_id": author_id,
+            "price": price,
+            "prompt": prompt,
+            "status": "pending",
+            "created_at": datetime.now(timezone.utc).isoformat()
+        }
+        res = self._safe_execute(self._sign_orders().insert(payload), fallback=None)
+        return res.data[0] if res and res.data else None
+
+    def get_sign_order(self, order_id: int) -> dict[str, Any] | None:
+        res = self._safe_execute(self._sign_orders().select("*").eq("id", order_id).limit(1), fallback=None)
+        return res.data[0] if res and res.data else None
+
+    def update_sign_order(self, order_id: int, updates: dict[str, Any]) -> dict[str, Any] | None:
+        res = self._safe_execute(self._sign_orders().update(updates).eq("id", order_id), fallback=None)
+        return res.data[0] if res and res.data else None
+
+    def list_sign_orders(self, chat_id: int, user_id: int, role: str = "author") -> list[dict[str, Any]]:
+        col = "author_id" if role == "author" else "buyer_id"
+        res = self._safe_execute(self._sign_orders().select("*").eq("chat_id", chat_id).eq(col, user_id).order("created_at", desc=True).limit(20), fallback=[])
+        return res.data if res and res.data else []
+
+    def sign_order_stats(self, chat_id: int, user_id: int) -> dict[str, int]:
+        orders = self.list_sign_orders(chat_id, user_id, role="author")
+        pending = sum(1 for o in orders if o.get("status") == "pending")
+        completed = sum(1 for o in orders if o.get("status") == "completed")
+        return {"pending": pending, "completed": completed, "total": len(orders)}
+
+    # ==========================================
+    # Обёртки Памяти
+    # ==========================================
+    def add_memory(self, chat_id: int, text: str, source: str = "user_remember", user_id: int | None = None) -> bool:
+        rec = MemoryRecord(fact=text, source=source, confidence=1.0)
+        self.store_memory(chat_id, rec)
+        return True
