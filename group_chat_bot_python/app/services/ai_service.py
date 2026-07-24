@@ -1194,6 +1194,8 @@ class AIService:
         bot_name = self.settings.bot_name or "Ника"
         cleaned = re.sub(rf"^(?:{bot_name}\s*:\s*)+", "", cleaned, flags=re.IGNORECASE).strip()
         cleaned = re.sub(r"^\s*нейроника\s*:\s*", "", cleaned, flags=re.IGNORECASE).strip()
+        # Автоматически вырезаем любые текстовые отыгровки в звёздочках (*поправляет ушки*, *закатывает глаза*)
+        cleaned = re.sub(r"\*[^*]+\*", "", cleaned).strip()
         cleaned = re.sub(r"\s{2,}", " ", cleaned)
 
         cleaned = self._enforce_personality_mode(cleaned)

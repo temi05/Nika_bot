@@ -41,6 +41,12 @@
   - [x] Авто-выгрузка бэкапов в Telegram при изменениях.
 - [x] **Шаг 5: Очистка старой памяти (`/clean_memory`)**:
   - [x] Реализована команда `/clean_memory` (или `/очистить_память`) для мгновенного удаления бытового мусора из базы ChromaDB.
+- [x] **Шаг 6: Выгрузка полной базы знаний в файл `.txt` (`/export_facts`)**:
+  - [x] Команда `/export_facts` (`/export_memory`, `/скачать_факты`) формирует и отправляет аккуратно сгруппированный документ `nika_facts.txt`.
+  - [x] В меню `/all_facts` добавлена инлайн-кнопка **`📥 Скачать всю базу (.txt)`**.
+- [x] **Шаг 7: Управление звёздочками и вызовом РП-инструментов**:
+  - [x] В `_finalize_reply` внедрен regex-фильтр для вырезания звёздочек `*действие*` из текстов ответов.
+  - [x] В `<tool_policy>` промпта ограничена частота вызова `send_rp_action` (только для явных РП-взаимодействий).
 
 ## Заметки
 - Все задачи и концепция зафиксированы в [MEMORY_AND_FEATURES_ANALYSIS.md](file:///c:/Users/Темирлан/.gemini/antigravity/playground/Nika/group_chat_bot_python/MEMORY_AND_FEATURES_ANALYSIS.md) и [DEVELOPMENT_STATE.md](file:///c:/Users/Темирлан/.gemini/antigravity/playground/Nika/DEVELOPMENT_STATE.md).

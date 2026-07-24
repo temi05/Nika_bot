@@ -1312,6 +1312,14 @@ def build_profile_ai_router(db: SupabaseDB, ai: AIService, bot_name: str) -> Rou
             nav_row.append(InlineKeyboardButton(text="Вперёд ▶️", callback_data=f"facts_page_{page + 1}{q_param}"))
         
         keyboard_rows.append(nav_row)
+
+        # Кнопка скачивания всей базы одном файлом .txt
+        keyboard_rows.append([
+            InlineKeyboardButton(
+                text="📥 Скачать всю базу (.txt)",
+                callback_data=f"export_facts_file{q_param}"
+            )
+        ])
         return InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
 
     @router.message(Command("all_facts", "факты_меню"))
@@ -1461,6 +1469,104 @@ def build_profile_ai_router(db: SupabaseDB, ai: AIService, bot_name: str) -> Rou
 
         reply_markup = _build_facts_keyboard(callback.message.chat.id, paged_data)
         await callback.message.edit_text("\n\n".join(lines), reply_markup=reply_markup, parse_mode="HTML")
+
+    def _generate_facts_export_text(chat_id: int, query: str = "") -> str:
+        if not hasattr(ai.memory, "get_all_facts_paged"):
+            return "Память не инициализирована или используется Supabase вместо ChromaDB."
+        
+        all_data = ai.memory.get_all_facts_paged(chat_id, page=1, page_size=100000, query=query)
+        facts = all_data.get("facts", [])
+        total = len(facts)
+        
+        now_str = time.strftime("%d.%m.%Y %H:%M:%S")
+        lines = [
+            "=" * 65,
+            "🧠 NIKA AI MEMORY EXPORT — БАЗА ЗНАНИЙ И ФАКТОВ НИКИ",
+            f"Чат ID: {chat_id}",
+            f"Дата экспорта: {now_str}",
+            f"Всего сохранённых записей: {total}",
+            f"Фильтр поиска: '{query}'" if query else "Фильтр: Нет (Все записи)",
+            "=" * 65,
+            ""
+        ]
+
+        if not facts:
+            lines.append("Память бота пуста.")
+            return "\n".join(lines)
+
+        grouped: dict[str, list[dict]] = {}
+        events: list[dict] = []
+
+        for item in facts:
+            source = item.get("source", "fact")
+            entity = item.get("entity_name") or "Общие факты"
+            if source == "event_timeline":
+                events.append(item)
+            else:
+                grouped.setdefault(entity, []).append(item)
+
+        if grouped:
+            lines.append("📌 --- ФАКТЫ ПО УЧАСТНИКАМ И ОБЪЕКТАМ ---")
+            lines.append("")
+            for entity_name, entity_facts in sorted(grouped.items()):
+                tag = f"@{entity_name}" if not entity_name.startswith("@") and entity_name != "Общие факты" else entity_name
+                lines.append(f"👤 [{tag}] — всего фактов: {len(entity_facts)}")
+                for idx, f_item in enumerate(entity_facts, 1):
+                    lines.append(f"   {idx}. {f_item['text']}")
+                lines.append("")
+
+        if events:
+            lines.append("📜 --- ЛЕНТА ЯРКИХ СОБЫТИЙ ЧАТА (LORE) ---")
+            lines.append("")
+            for idx, ev_item in enumerate(events, 1):
+                lines.append(f"   {idx}. {ev_item['text']}")
+            lines.append("")
+
+        lines.extend([
+            "=" * 65,
+            "Сгенерировано автоматически NikaVibeBot",
+            "=" * 65,
+        ])
+        return "\n".join(lines)
+
+    @router.message(Command("export_facts", "export_memory", "скачать_факты"))
+    async def export_facts_command(message: Message, command: CommandObject) -> None:
+        sender = get_sender_data(message)
+        if not await is_admin(message.bot, message.chat.id, sender.user_id):
+            await message.answer("❌ Экспорт базы знаний доступен только администраторам.")
+            return
+
+        query = (command.args or "").strip()
+        export_text = _generate_facts_export_text(message.chat.id, query=query)
+        
+        file_bytes = export_text.encode("utf-8")
+        filename = f"nika_facts_{message.chat.id}.txt"
+        file = BufferedInputFile(file_bytes, filename=filename)
+
+        caption = f"📁 <b>Выгрузка всей базы знаний Ники</b>\nЗаписей в файле: <b>{export_text.count('. ')}</b>"
+        await message.answer_document(document=file, caption=caption, parse_mode="HTML")
+
+    @router.callback_query(F.data.startswith("export_facts_file"))
+    async def export_facts_callback(callback: CallbackQuery) -> None:
+        sender_id = callback.from_user.id
+        if not await is_admin(callback.bot, callback.message.chat.id, sender_id):
+            await callback.answer("❌ Скачивать базу могут только администраторы.", show_alert=True)
+            return
+
+        payload = callback.data.replace("export_facts_file", "")
+        query = payload.lstrip(":") if payload.startswith(":") else ""
+
+        export_text = _generate_facts_export_text(callback.message.chat.id, query=query)
+        file_bytes = export_text.encode("utf-8")
+        filename = f"nika_facts_{callback.message.chat.id}.txt"
+        file = BufferedInputFile(file_bytes, filename=filename)
+
+        await callback.message.answer_document(
+            document=file,
+            caption="📁 <b>Полная выгрузка базы знаний Ники в файле .txt</b>",
+            parse_mode="HTML"
+        )
+        await callback.answer("✅ Файл базы данных отправлен!")
 
     return router
 

@@ -154,6 +154,8 @@ def create_app() -> FastAPI:
             BotCommand(command="signai", description="✍️ ИИ-сигна с Никой"),
             BotCommand(command="remember", description="🧠 Запомнить факт в память"),
             BotCommand(command="forget_me", description="🧹 Стереть факты о себе"),
+            BotCommand(command="all_facts", description="📚 Все сохранённые факты"),
+            BotCommand(command="export_facts", description="📥 Скачать базу знаний (.txt)"),
             BotCommand(command="shop", description="🛒 Магазин печенек"),
             BotCommand(command="debts", description="📒 Долги и должники"),
             BotCommand(command="jail", description="🚔 Статус тюрьмы"),

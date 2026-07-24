@@ -119,6 +119,7 @@ def build_general_admin_router(db: SupabaseDB, bot_name: str, ai: AIService) -> 
             "• <code>/restore_memory</code> — Восстановить базу из zip-архива\n"
             "• <code>/nika_brain [запрос]</code> — Поиск векторов в мозге Ники\n"
             "• <code>/all_facts</code> — Меню всех сохранённых фактов\n"
+            "• <code>/export_facts</code> — Скачать всю базу знаний файлом .txt\n"
             "• <code>/cookie_rain</code> — Массовая раздача бонусов\n"
             "• <code>/whisper [текст]</code> — Сообщение от имени бота\n"
             "• <code>/judge</code> — Посадить или выпустить игрока\n"
