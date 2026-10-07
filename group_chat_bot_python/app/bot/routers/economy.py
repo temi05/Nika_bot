@@ -253,6 +253,7 @@ def build_economy_router(db: SupabaseDB, ai: AIService) -> Router:
             "amount": amount,
             "lender_id": sender.user_id,
             "borrower_id": target_data.user_id,
+            "created_at": time.time(),
         }
 
     @router.message(Command("ask_loan"))
@@ -300,6 +301,7 @@ def build_economy_router(db: SupabaseDB, ai: AIService) -> Router:
             "amount": amount,
             "borrower_id": sender_data.user_id,
             "lender_id": target_data.user_id,
+            "created_at": time.time(),
         }
 
     @router.message(Command("repay"))

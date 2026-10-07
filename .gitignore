@@ -51,3 +51,7 @@ group_chat_bot_python/data/
 chroma_memory_backup/
 *.zip
 
+# Temp & IDE
+.codex-temp-index*
+анализ/
+

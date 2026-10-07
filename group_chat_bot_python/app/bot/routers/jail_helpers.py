@@ -9,15 +9,16 @@ from datetime import datetime, timezone, timedelta
 from aiogram.types import Message
 
 from app.utils import escape_html
-from app.bot.routers import game_sessions
+
+
 
 
 def parse_iso_dt(value: str | None) -> datetime | None:
-    if not value:
+    if not value or not isinstance(value, str):
         return None
     try:
         return datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
+    except (ValueError, TypeError):
         return None
 
 
@@ -64,7 +65,12 @@ def maybe_jail_for_overdue_debt(db, user) -> None:
         return
     active_debts = db.get_active_debts_for_borrower(user.chat_id, user.user_id)
     now = datetime.now(timezone.utc)
-    has_overdue = any((parse_iso_dt(debt.get("due_at")) or now) < now for debt in active_debts)
+    has_overdue = False
+    for debt in active_debts:
+        due_dt = parse_iso_dt(debt.get("due_at"))
+        if due_dt and due_dt < now:
+            has_overdue = True
+            break
     if has_overdue:
         jail_user(db, user, 180, "просроченный долг")
 

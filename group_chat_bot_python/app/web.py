@@ -19,7 +19,7 @@ from app.bot.routers.economy import build_economy_router
 from app.bot.routers.error import build_error_router
 from app.bot.routers.games import build_games_router
 from app.bot.routers.profile_ai import build_profile_ai_router
-from app.bot.routers.chat_settings import build_chat_settings_router
+from app.bot.routers.chat_settings import build_chat_settings_router, get_chat_settings_cached
 from app.bot.routers.memes import build_memes_router
 from app.config import get_settings
 from app.models import Sender
@@ -97,149 +97,8 @@ def create_app() -> FastAPI:
         except asyncio.CancelledError:
             pass
 
-    async def auto_events_loop() -> None:
-        try:
-            while True:
-                await asyncio.sleep(1800)
-                try:
-                    active_chats = db.get_active_chats_for_events(hours=12)
-                    for chat_id in active_chats:
-                        await try_trigger_random_event(bot, db, chat_id, ai_service)
-                except Exception as e:
-                    print(f"[auto_events_loop_error] {e}")
-        except asyncio.CancelledError:
-            pass
-
-    @asynccontextmanager
-    async def lifespan(_: FastAPI):
-        nonlocal reminder_task, auto_event_task, backup_task
-        me = await bot.get_me()
-        settings.bot_username = me.username
-        try:
-            await configure_webhook()
-        except Exception:
-            pass
-        reminder_task = asyncio.create_task(reminders_loop())
-        auto_event_task = asyncio.create_task(auto_events_loop())
-        backup_task = asyncio.create_task(backup_loop())
-        yield
-        if backup_task:
-            backup_task.cancel()
-        if auto_event_task:
-            auto_event_task.cancel()
-        if reminder_task:
-            reminder_task.cancel()
-        await bot.session.close()
-
-    async def configure_webhook() -> None:
-        base_url = settings.render_external_url.rstrip("/")
-        if not base_url.startswith("http"):
-            return
-        webhook_url = f"{base_url}/bot{settings.telegram_bot_token}"
-        await bot.set_webhook(
-            webhook_url,
-            secret_token=settings.webhook_secret_token,
-            allowed_updates=["message", "message_reaction", "poll_answer", "callback_query", "chat_member"],
-            drop_pending_updates=False,
-        )
-        
-        commands = [
-            BotCommand(command="help", description="✨ Главное меню и помощь"),
-            BotCommand(command="card", description="👤 Персональная карточка участника"),
-            BotCommand(command="me", description="📊 Мой профиль и баланс"),
-            BotCommand(command="lore", description="📜 Легенды и Лента событий чата"),
-            BotCommand(command="daily", description="🍪 Ежедневный бонус"),
-            BotCommand(command="top", description="🏆 Рейтинг участников"),
-            BotCommand(command="aiimage", description="🎨 Сгенерировать ИИ-картинку"),
-            BotCommand(command="signai", description="✍️ ИИ-сигна с Никой"),
-            BotCommand(command="remember", description="🧠 Запомнить факт в память"),
-            BotCommand(command="forget_me", description="🧹 Стереть факты о себе"),
-            BotCommand(command="all_facts", description="📚 Все сохранённые факты"),
-            BotCommand(command="export_facts", description="📥 Скачать базу знаний (.txt)"),
-            BotCommand(command="shop", description="🛒 Магазин печенек"),
-            BotCommand(command="debts", description="📒 Долги и должники"),
-            BotCommand(command="jail", description="🚔 Статус тюрьмы"),
-        ]
-        try:
-            await bot.set_my_commands(commands, scope=BotCommandScopeDefault())
-        except Exception as e:
-            print(f"[set_my_commands error] {e}")
-
-    @asynccontextmanager
-    async def lifespan(_: FastAPI):
-        nonlocal reminder_task, auto_event_task
-        me = await bot.get_me()
-        settings.bot_username = me.username
-        try:
-            await configure_webhook()
-        except Exception:
-            pass
-        reminder_task = asyncio.create_task(reminders_loop())
-        auto_event_task = asyncio.create_task(auto_events_loop())
-        yield
-        if auto_event_task:
-            auto_event_task.cancel()
-            try:
-                await auto_event_task
-            except Exception:
-                pass
-        if reminder_task:
-            reminder_task.cancel()
-            try:
-                await reminder_task
-            except Exception:
-                pass
-        await bot.session.close()
-
-    app = FastAPI(lifespan=lifespan)
-    app.state.bot = bot
-    app.state.dispatcher = dispatcher
-    app.state.db = db
-    app.state.memory = memory
-    app.state.settings = settings
-
     next_auto_drop: dict[int, float] = {}
     next_auto_quiz: dict[int, float] = {}
-
-    async def auto_events_loop() -> None:
-        try:
-            while True:
-                await asyncio.sleep(60)
-                now = asyncio.get_running_loop().time()
-
-                # Очистка устаревших сессий авто-дропов и авто-викторин (старше 30 минут)
-                now_ts = time.time()
-                for key in list(game_sessions.AUTO_DROP_SESSIONS):
-                    session = game_sessions.AUTO_DROP_SESSIONS.get(key)
-                    if session and now_ts - int(session.get("created_at", 0)) > 30 * 60:
-                        game_sessions.AUTO_DROP_SESSIONS.pop(key, None)
-                for key in list(game_sessions.AUTO_QUIZ_SESSIONS):
-                    session = game_sessions.AUTO_QUIZ_SESSIONS.get(key)
-                    if session and now_ts - int(session.get("created_at", 0)) > 30 * 60:
-                        game_sessions.AUTO_QUIZ_SESSIONS.pop(key, None)
-                active_chat_ids = db.get_active_chat_ids(minutes=10, limit=30)
-                for chat_id in list(next_auto_drop):
-                    if chat_id not in active_chat_ids:
-                        next_auto_drop.pop(chat_id, None)
-                        next_auto_quiz.pop(chat_id, None)
-                for chat_id in active_chat_ids:
-                    try:
-                        next_auto_drop.setdefault(chat_id, now + 35 * 60 + random.randint(0, 10 * 60))
-                        next_auto_quiz.setdefault(chat_id, now + 45 * 60 + random.randint(0, 15 * 60))
-
-                        chat_settings = db.get_chat_settings(chat_id)
-                        if now >= next_auto_drop[chat_id]:
-                            if chat_settings.auto_drop_enabled:
-                                await send_auto_drop(chat_id)
-                            next_auto_drop[chat_id] = now + 35 * 60 + random.randint(0, 15 * 60)
-                        if now >= next_auto_quiz[chat_id]:
-                            if chat_settings.auto_quiz_enabled:
-                                await send_auto_quiz(chat_id)
-                            next_auto_quiz[chat_id] = now + 45 * 60 + random.randint(0, 20 * 60)
-                    except Exception as exc:
-                        print(f"[auto_events:error] chat_id={chat_id} error={exc}")
-        except asyncio.CancelledError:
-            pass
 
     async def send_auto_drop(chat_id: int) -> None:
         reward = random.randint(10, 28)
@@ -283,6 +142,133 @@ def create_app() -> FastAPI:
             "created_at": created_at,
             "wrong_users": set(),
         }
+
+    async def auto_events_loop() -> None:
+        try:
+            while True:
+                await asyncio.sleep(60)
+                now = asyncio.get_running_loop().time()
+
+                # Очистка устаревших сессий авто-дропов, авто-викторин, займов и залогов (старше 30 минут)
+                now_ts = time.time()
+                for key in list(game_sessions.AUTO_DROP_SESSIONS):
+                    session = game_sessions.AUTO_DROP_SESSIONS.get(key)
+                    if session and now_ts - int(session.get("created_at", 0)) > 30 * 60:
+                        game_sessions.AUTO_DROP_SESSIONS.pop(key, None)
+                for key in list(game_sessions.AUTO_QUIZ_SESSIONS):
+                    session = game_sessions.AUTO_QUIZ_SESSIONS.get(key)
+                    if session and now_ts - int(session.get("created_at", 0)) > 30 * 60:
+                        game_sessions.AUTO_QUIZ_SESSIONS.pop(key, None)
+                for key in list(game_sessions.LOAN_SESSIONS):
+                    session = game_sessions.LOAN_SESSIONS.get(key)
+                    if session and now_ts - int(session.get("created_at", 0)) > 30 * 60:
+                        game_sessions.LOAN_SESSIONS.pop(key, None)
+                for key in list(game_sessions.BAIL_SESSIONS):
+                    session = game_sessions.BAIL_SESSIONS.get(key)
+                    if session and now_ts - int(session.get("created_at", 0)) > 30 * 60:
+                        game_sessions.BAIL_SESSIONS.pop(key, None)
+
+                active_chat_ids = db.get_active_chat_ids(minutes=10, limit=30)
+                for chat_id in list(next_auto_drop):
+                    if chat_id not in active_chat_ids:
+                        next_auto_drop.pop(chat_id, None)
+                        next_auto_quiz.pop(chat_id, None)
+                for chat_id in active_chat_ids:
+                    try:
+                        next_auto_drop.setdefault(chat_id, now + 35 * 60 + random.randint(0, 10 * 60))
+                        next_auto_quiz.setdefault(chat_id, now + 45 * 60 + random.randint(0, 15 * 60))
+
+                        is_drop_due = now >= next_auto_drop[chat_id]
+                        is_quiz_due = now >= next_auto_quiz[chat_id]
+
+                        if is_drop_due or is_quiz_due:
+                            chat_settings = get_chat_settings_cached(db, chat_id)
+                            if is_drop_due:
+                                if chat_settings.get("auto_drop_enabled", True):
+                                    await send_auto_drop(chat_id)
+                                next_auto_drop[chat_id] = now + 35 * 60 + random.randint(0, 15 * 60)
+                            if is_quiz_due:
+                                if chat_settings.get("auto_quiz_enabled", True):
+                                    await send_auto_quiz(chat_id)
+                                next_auto_quiz[chat_id] = now + 45 * 60 + random.randint(0, 20 * 60)
+                    except Exception as exc:
+                        print(f"[auto_events:error] chat_id={chat_id} error={exc}")
+        except asyncio.CancelledError:
+            pass
+
+    async def configure_webhook() -> None:
+        base_url = settings.render_external_url.rstrip("/")
+        if not base_url.startswith("http"):
+            return
+        webhook_url = f"{base_url}/bot{settings.telegram_bot_token}"
+        await bot.set_webhook(
+            webhook_url,
+            secret_token=settings.webhook_secret_token,
+            allowed_updates=["message", "message_reaction", "poll_answer", "callback_query", "chat_member"],
+            drop_pending_updates=False,
+        )
+        
+        commands = [
+            BotCommand(command="help", description="✨ Главное меню и помощь"),
+            BotCommand(command="card", description="👤 Персональная карточка участника"),
+            BotCommand(command="me", description="📊 Мой профиль и баланс"),
+            BotCommand(command="lore", description="📜 Легенды и Лента событий чата"),
+            BotCommand(command="daily", description="🍪 Ежедневный бонус"),
+            BotCommand(command="top", description="🏆 Рейтинг участников"),
+            BotCommand(command="aiimage", description="🎨 Сгенерировать ИИ-картинку"),
+            BotCommand(command="signai", description="✍️ ИИ-сигна с Никой"),
+            BotCommand(command="remember", description="🧠 Запомнить факт в память"),
+            BotCommand(command="forget_me", description="🧹 Стереть факты о себе"),
+            BotCommand(command="all_facts", description="📚 Все сохранённые факты"),
+            BotCommand(command="export_facts", description="📥 Скачать базу знаний (.txt)"),
+            BotCommand(command="shop", description="🛒 Магазин печенек"),
+            BotCommand(command="debts", description="📒 Долги и должники"),
+            BotCommand(command="jail", description="🚔 Статус тюрьмы"),
+        ]
+        try:
+            await bot.set_my_commands(commands, scope=BotCommandScopeDefault())
+        except Exception as e:
+            print(f"[set_my_commands error] {e}")
+
+    @asynccontextmanager
+    async def lifespan(_: FastAPI):
+        nonlocal reminder_task, auto_event_task, backup_task
+        me = await bot.get_me()
+        settings.bot_username = me.username
+        try:
+            await configure_webhook()
+        except Exception:
+            pass
+        reminder_task = asyncio.create_task(reminders_loop())
+        auto_event_task = asyncio.create_task(auto_events_loop())
+        backup_task = asyncio.create_task(backup_loop())
+        yield
+        if backup_task:
+            backup_task.cancel()
+            try:
+                await backup_task
+            except Exception:
+                pass
+        if auto_event_task:
+            auto_event_task.cancel()
+            try:
+                await auto_event_task
+            except Exception:
+                pass
+        if reminder_task:
+            reminder_task.cancel()
+            try:
+                await reminder_task
+            except Exception:
+                pass
+        await bot.session.close()
+
+    app = FastAPI(lifespan=lifespan)
+    app.state.bot = bot
+    app.state.dispatcher = dispatcher
+    app.state.db = db
+    app.state.memory = memory
+    app.state.settings = settings
 
     @app.get("/")
     async def root() -> dict:

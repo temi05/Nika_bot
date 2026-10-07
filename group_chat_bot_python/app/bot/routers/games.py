@@ -1,7 +1,4 @@
-import asyncio
 import random
-import time
-from datetime import datetime, timezone, timedelta
 
 from aiogram import Router, F
 from aiogram.filters import Command, CommandObject
@@ -9,22 +6,7 @@ from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKe
 
 from app.services.ai_service import AIService
 from app.services.supabase_db import SupabaseDB
-from app.bot.routers.jail_helpers import (
-    deny_if_jailed,
-)
 from app.utils import escape_html, get_sender_data
-
-
-def _max_game_bet(user) -> int:
-    if user.reputation <= 0:
-        return 0
-    # Базовый лимит 35% от баланса
-    balance_cap = max(1, int(user.reputation * 0.35))
-    # Абсолютный максимум 15 000 печенек (лимит снижен для борьбы с инфляцией)
-    return min(user.reputation, 15000, balance_cap)
-
-
-
 
 
 def build_games_router(db: SupabaseDB, ai: AIService, bot_name: str) -> Router:

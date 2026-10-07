@@ -43,6 +43,7 @@ class SupabaseDB:
         self._user_cache: dict[str, tuple[ChatUser, float]] = {} # key -> (user, expires_at)
         self._chat_settings_cache: dict[int, tuple[ChatSettings, float]] = {}
         self._cache_ttl = 300 # 5 минут
+        self._recent_stat_events: dict[str, list[float]] = {}
 
     def _users(self):
         return self.client.table("users")
@@ -76,6 +77,9 @@ class SupabaseDB:
 
     def _sign_price_options(self):
         return self.client.table("sign_price_options")
+
+    def _assets(self):
+        return self.client.table("bot_assets")
 
     def _bot_assets(self):
         return self.client.table("bot_assets")
@@ -265,11 +269,11 @@ class SupabaseDB:
         return 50 * level * level + 50 * level
 
     def reset_expired_warns(self, user: ChatUser) -> ChatUser:
-        if not user.warns or not user.last_warn_at:
+        if not user.warns or not user.last_warn_at or not isinstance(user.last_warn_at, str):
             return user
         try:
             last_warn = datetime.fromisoformat(user.last_warn_at.replace("Z", "+00:00"))
-        except ValueError:
+        except (ValueError, TypeError):
             return user
         if datetime.now(timezone.utc) - last_warn < timedelta(days=self.settings.warn_decay_days):
             return user
@@ -1437,31 +1441,73 @@ class SupabaseDB:
             return int(res.data[0].get(column) or 0)
         return 0
 
-    def increment_stat(self, db_id: int, column: str) -> None:
-        """Увеличивает счетчик статистики на 1 и добавляет лог для динамических цен."""
+    def record_stat_usage(self, chat_id: int, stat_name: str) -> None:
+        """Регистрирует вызов команды/события в чате для отслеживания динамических цен."""
+        key = f"{chat_id}_{stat_name}"
+        if key not in self._recent_stat_events:
+            self._recent_stat_events[key] = []
+        self._recent_stat_events[key].append(time.time())
+
+    def increment_stat(self, db_id: int, column: str, chat_id: int | None = None) -> None:
+        """Увеличивает счетчик статистики на 1 и регистрирует вызов для динамических цен."""
         self._safe_execute(
             self.client.rpc("increment_user_stat", {"p_user_id": db_id, "p_column": column}),
             fallback=None,
             context=f"increment_stat {column}"
         )
-        # Сохраняем событие в лог активности (используем таблицу message_logs или создаем временную логику)
-        # В идеале здесь нужен insert в специальную таблицу, но пока можно использовать существующую
-        # или просто обновить счетчик. Для упрощения добавим счетчик в chat_settings.
-        
+        if chat_id:
+            self.record_stat_usage(chat_id, column)
+
     def get_recent_stats_count(self, chat_id: int, stat_name: str, hours: int = 24) -> int:
-        """Возвращает количество использований команды в чате за последние часы."""
-        return random.randint(0, 10)
+        """Возвращает реальное количество использований команды в чате за последние hours часов."""
+        key = f"{chat_id}_{stat_name}"
+        now = time.time()
+        cutoff = now - (hours * 3600)
+        events = self._recent_stat_events.get(key, [])
+        valid_events = [t for t in events if t >= cutoff]
+        self._recent_stat_events[key] = valid_events
+        return len(valid_events)
 
     # ==========================================
     # Долги и Кредиты (Debts)
     # ==========================================
-    def create_debt(self, chat_id: int, lender_id: int, borrower_id: int, amount: int) -> dict[str, Any] | None:
+    def create_debt(
+        self,
+        chat_or_lender: Any,
+        lender_or_borrower: Any,
+        borrower_or_amount: Any,
+        amount: int | None = None,
+    ) -> dict[str, Any] | None:
+        if hasattr(chat_or_lender, "user_id") and hasattr(lender_or_borrower, "user_id"):
+            lender = chat_or_lender
+            borrower = lender_or_borrower
+            amt = int(borrower_or_amount)
+            chat_id = getattr(lender, "chat_id", None) or getattr(borrower, "chat_id", 0)
+            lender_id = lender.user_id
+            lender_name = getattr(lender, "display_name", "")
+            borrower_id = borrower.user_id
+            borrower_name = getattr(borrower, "display_name", "")
+        else:
+            chat_id = int(chat_or_lender)
+            lender_id = int(lender_or_borrower)
+            borrower_id = int(borrower_or_amount)
+            amt = int(amount or 0)
+            lender_name = ""
+            borrower_name = ""
+
+        now = datetime.now(timezone.utc)
+        due_at = (now + timedelta(hours=48)).isoformat()
         payload = {
             "chat_id": chat_id,
             "lender_id": lender_id,
+            "lender_name": lender_name,
             "borrower_id": borrower_id,
-            "amount": amount,
-            "created_at": datetime.now(timezone.utc).isoformat(),
+            "borrower_name": borrower_name,
+            "amount": amt,
+            "paid_amount": 0,
+            "forgiven_amount": 0,
+            "created_at": now.isoformat(),
+            "due_at": due_at,
             "status": "active"
         }
         res = self._safe_execute(self._debts().insert(payload), fallback=None)
@@ -1538,13 +1584,24 @@ class SupabaseDB:
             return res.data[0]
         return None
 
-    def save_bot_asset(self, asset_key: str, file_id: str, file_type: str = "photo", meta: dict[str, Any] | None = None) -> bool:
+    def save_bot_asset(
+        self,
+        asset_key: str,
+        payload_base64_or_file_id: str,
+        mime_type_or_file_type: str = "image/png",
+        updated_by: int | None = None,
+        *,
+        meta: dict[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> bool:
+        if "updated_by" in kwargs and updated_by is None:
+            updated_by = kwargs["updated_by"]
         payload = {
             "asset_key": asset_key,
-            "file_id": file_id,
-            "file_type": file_type,
-            "meta": meta or {},
-            "updated_at": datetime.now(timezone.utc).isoformat()
+            "payload_base64": payload_base64_or_file_id,
+            "mime_type": mime_type_or_file_type,
+            "updated_by": updated_by,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
         }
         res = self._safe_execute(self._assets().upsert(payload), fallback=None)
         return bool(res and res.data)
@@ -1552,61 +1609,209 @@ class SupabaseDB:
     # ==========================================
     # Сигны (Sign Price Options & Orders)
     # ==========================================
-    def set_sign_price(self, user_id: int, chat_id: int, price: int) -> bool:
-        user = self.get_user_by_platform_id(chat_id, user_id)
-        if user:
-            res = self.update_user(user.id, {"sign_price": price})
+    def set_sign_price(self, user_or_id: Any, chat_id_or_price: Any, price: int | None = None) -> bool:
+        if hasattr(user_or_id, "user_id"):
+            u_id = user_or_id.id
+            amount = int(chat_id_or_price)
+            res = self.update_user(u_id, {"sign_price": amount})
             return bool(res)
-        return False
+        else:
+            user_id = int(user_or_id)
+            chat_id = int(chat_id_or_price)
+            amount = int(price or 0)
+            user = self.get_user_by_platform_id(chat_id, user_id)
+            if user:
+                res = self.update_user(user.id, {"sign_price": amount})
+                return bool(res)
+            return False
 
-    def create_sign_price_option(self, chat_id: int, user_id: int, price: int, title: str) -> dict[str, Any] | None:
-        payload = {"chat_id": chat_id, "user_id": user_id, "price": price, "title": title, "active": True}
+    def create_sign_price_option(
+        self,
+        *args: Any,
+        **kwargs: Any,
+    ) -> dict[str, Any] | None:
+        if len(args) >= 1 and hasattr(args[0], "user_id"):
+            user = args[0]
+            chat_id = getattr(user, "chat_id", 0)
+            user_id = user.user_id
+            title = str(args[1]) if len(args) > 1 else str(kwargs.get("title", ""))
+            price = int(args[2]) if len(args) > 2 else int(kwargs.get("price", kwargs.get("amount", 0)))
+            desc = str(args[3]) if len(args) > 3 else str(kwargs.get("description", ""))
+        elif len(args) >= 4:
+            chat_id = int(args[0])
+            user_id = int(args[1])
+            title = str(args[2])
+            price = int(args[3])
+            desc = str(args[4]) if len(args) > 4 else str(kwargs.get("description", ""))
+        else:
+            chat_id = int(kwargs.get("chat_id", 0))
+            user_id = int(kwargs.get("user_id", 0))
+            title = str(kwargs.get("title", ""))
+            price = int(kwargs.get("price", 0))
+            desc = str(kwargs.get("description", ""))
+
+        payload = {
+            "chat_id": chat_id,
+            "user_id": user_id,
+            "title": title,
+            "price": price,
+            "description": desc,
+            "is_active": True,
+        }
         res = self._safe_execute(self._sign_price_options().insert(payload), fallback=None)
         return res.data[0] if res and res.data else None
 
-    def disable_sign_price_option(self, option_id: int) -> bool:
-        res = self._safe_execute(self._sign_price_options().update({"active": False}).eq("id", option_id), fallback=None)
-        return bool(res and res.data)
+    def disable_sign_price_option(self, *args, **kwargs) -> bool:
+        if len(args) == 3:
+            chat_id, user_id, option_id = args
+            res = self._safe_execute(
+                self._sign_price_options().update({"is_active": False}).eq("id", option_id).eq("chat_id", chat_id).eq("user_id", user_id),
+                fallback=None
+            )
+            return bool(res and res.data)
+        elif len(args) == 1:
+            option_id = args[0]
+            res = self._safe_execute(
+                self._sign_price_options().update({"is_active": False}).eq("id", option_id),
+                fallback=None
+            )
+            return bool(res and res.data)
+        return False
 
     def list_sign_price_options(self, chat_id: int, user_id: int) -> list[dict[str, Any]]:
-        res = self._safe_execute(self._sign_price_options().select("*").eq("chat_id", chat_id).eq("user_id", user_id).eq("active", True), fallback=[])
+        res = self._safe_execute(
+            self._sign_price_options().select("*").eq("chat_id", chat_id).eq("user_id", user_id).eq("is_active", True).order("price", desc=False),
+            fallback=[]
+        )
         return res.data if res and res.data else []
 
-    def get_sign_price_option(self, option_id: int) -> dict[str, Any] | None:
-        res = self._safe_execute(self._sign_price_options().select("*").eq("id", option_id).limit(1), fallback=None)
-        return res.data[0] if res and res.data else None
+    def get_sign_price_option(self, *args, **kwargs) -> dict[str, Any] | None:
+        if len(args) == 3:
+            chat_id, user_id, option_id = args
+            res = self._safe_execute(
+                self._sign_price_options().select("*").eq("chat_id", chat_id).eq("user_id", user_id).eq("id", option_id).limit(1),
+                fallback=None
+            )
+            return res.data[0] if res and res.data else None
+        elif len(args) == 1:
+            option_id = args[0]
+            res = self._safe_execute(
+                self._sign_price_options().select("*").eq("id", option_id).limit(1),
+                fallback=None
+            )
+            return res.data[0] if res and res.data else None
+        option_id = kwargs.get("option_id")
+        if option_id is not None:
+            res = self._safe_execute(
+                self._sign_price_options().select("*").eq("id", option_id).limit(1),
+                fallback=None
+            )
+            return res.data[0] if res and res.data else None
+        return None
 
-    def create_sign_order(self, chat_id: int, buyer_id: int, author_id: int, price: int, prompt: str) -> dict[str, Any] | None:
+    def create_sign_order(
+        self,
+        buyer_or_chat_id: Any,
+        target_or_buyer_id: Any,
+        price: int,
+        text: str,
+        *,
+        author_id: int | None = None,
+        chat_id: int | None = None,
+        option_id: int | None = None,
+        option_title: str | None = None,
+        prompt: str | None = None,
+    ) -> dict[str, Any] | None:
+        if hasattr(buyer_or_chat_id, "user_id") and hasattr(target_or_buyer_id, "user_id"):
+            c_id = chat_id or getattr(buyer_or_chat_id, "chat_id", 0)
+            b_id = buyer_or_chat_id.user_id
+            b_name = getattr(buyer_or_chat_id, "display_name", "")
+            a_id = target_or_buyer_id.user_id
+            a_name = getattr(target_or_buyer_id, "display_name", "")
+            order_text = text or prompt or ""
+        else:
+            c_id = int(buyer_or_chat_id)
+            b_id = int(target_or_buyer_id)
+            b_name = ""
+            a_id = int(author_id or 0)
+            a_name = ""
+            order_text = text or prompt or ""
+
         payload = {
-            "chat_id": chat_id,
-            "buyer_id": buyer_id,
-            "author_id": author_id,
+            "chat_id": c_id,
+            "buyer_id": b_id,
+            "buyer_name": b_name,
+            "author_id": a_id,
+            "author_name": a_name,
             "price": price,
-            "prompt": prompt,
+            "text": order_text,
+            "option_id": option_id,
+            "option_title": option_title,
             "status": "pending",
-            "created_at": datetime.now(timezone.utc).isoformat()
+            "created_at": datetime.now(timezone.utc).isoformat(),
         }
         res = self._safe_execute(self._sign_orders().insert(payload), fallback=None)
         return res.data[0] if res and res.data else None
 
-    def get_sign_order(self, order_id: int) -> dict[str, Any] | None:
-        res = self._safe_execute(self._sign_orders().select("*").eq("id", order_id).limit(1), fallback=None)
-        return res.data[0] if res and res.data else None
+    def get_sign_order(self, *args, **kwargs) -> dict[str, Any] | None:
+        if len(args) == 2:
+            chat_id, order_id = args
+            res = self._safe_execute(
+                self._sign_orders().select("*").eq("chat_id", chat_id).eq("id", order_id).limit(1),
+                fallback=None
+            )
+            return res.data[0] if res and res.data else None
+        elif len(args) == 1:
+            order_id = args[0]
+            res = self._safe_execute(
+                self._sign_orders().select("*").eq("id", order_id).limit(1),
+                fallback=None
+            )
+            return res.data[0] if res and res.data else None
+        order_id = kwargs.get("order_id")
+        if order_id is not None:
+            res = self._safe_execute(
+                self._sign_orders().select("*").eq("id", order_id).limit(1),
+                fallback=None
+            )
+            return res.data[0] if res and res.data else None
+        return None
 
     def update_sign_order(self, order_id: int, updates: dict[str, Any]) -> dict[str, Any] | None:
         res = self._safe_execute(self._sign_orders().update(updates).eq("id", order_id), fallback=None)
         return res.data[0] if res and res.data else None
 
-    def list_sign_orders(self, chat_id: int, user_id: int, role: str = "author") -> list[dict[str, Any]]:
+    def list_sign_orders(self, chat_id: int, user_id: int, role: str = "author", limit: int = 20) -> list[dict[str, Any]]:
         col = "author_id" if role == "author" else "buyer_id"
-        res = self._safe_execute(self._sign_orders().select("*").eq("chat_id", chat_id).eq(col, user_id).order("created_at", desc=True).limit(20), fallback=[])
+        res = self._safe_execute(
+            self._sign_orders().select("*").eq("chat_id", chat_id).eq(col, user_id).order("created_at", desc=True).limit(limit),
+            fallback=[]
+        )
         return res.data if res and res.data else []
 
     def sign_order_stats(self, chat_id: int, user_id: int) -> dict[str, int]:
-        orders = self.list_sign_orders(chat_id, user_id, role="author")
-        pending = sum(1 for o in orders if o.get("status") == "pending")
-        completed = sum(1 for o in orders if o.get("status") == "completed")
-        return {"pending": pending, "completed": completed, "total": len(orders)}
+        authored = self.list_sign_orders(chat_id, user_id, role="author", limit=100)
+        bought = self.list_sign_orders(chat_id, user_id, role="buyer", limit=100)
+
+        authored_active = sum(1 for o in authored if o.get("status") in {"pending", "accepted", "delivered"})
+        authored_paid = sum(1 for o in authored if o.get("status") == "paid")
+        earned = sum(int(o.get("price") or 0) for o in authored if o.get("status") == "paid")
+
+        bought_active = sum(1 for o in bought if o.get("status") in {"pending", "accepted", "delivered"})
+        spent = sum(int(o.get("price") or 0) for o in bought if o.get("status") == "paid")
+
+        return {
+            "authored_total": len(authored),
+            "authored_active": authored_active,
+            "authored_paid": authored_paid,
+            "earned": earned,
+            "bought_total": len(bought),
+            "bought_active": bought_active,
+            "spent": spent,
+            "pending": sum(1 for o in authored if o.get("status") == "pending"),
+            "completed": authored_paid,
+            "total": len(authored),
+        }
 
     # ==========================================
     # Обёртки Памяти

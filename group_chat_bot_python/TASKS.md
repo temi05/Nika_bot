@@ -47,9 +47,31 @@
 - [x] **Шаг 7: Управление звёздочками и вызовом РП-инструментов**:
   - [x] В `_finalize_reply` внедрен regex-фильтр для вырезания звёздочек `*действие*` из текстов ответов.
   - [x] В `<tool_policy>` промпта ограничена частота вызова `send_rp_action` (только для явных РП-взаимодействий).
+- [x] **Шаг 8: Полный аудит кода, ликвидация заглушек и восстановление фоновых сервисов (Версия 5.6)**:
+  - [x] Исправлена ошибка разметки Telegram HTML в `/feedback` (`&lt;id&gt;`).
+  - [x] Очищены мертвые импорты и неиспользуемые функции в `games.py` и `jail_helpers.py`.
+  - [x] Полностью удалены мертвые сессии отключенных игр (`CASINO_DOUBLE_SESSIONS`, `TOWER_SESSIONS`, `DUEL_SESSIONS` и т.д.) и заглушка `run_mine()` из `game_sessions.py`.
+  - [x] Очищен `general_admin.py`: удалены брошенные колбэки игр и аварийный блок `tower_callback`.
+  - [x] Очищен `profile_ai.py`: удалены 183 строки дубликатов, удален дубликат клавиатуры `_build_facts_keyboard`, добавлены недостающие импорты `asyncio`, `re`, `Any` (устранены падения `/aiimage`, `/signai` и факт-редактирования).
+  - [x] Рефакторинг `web.py`: устранены дубликаты `auto_events_loop` и `lifespan`, гарантирован запуск 12-часового авто-бэкапа базы в Telegram и корректное завершение задач.
+  - [x] Синтаксическая компиляция 100% модулей пакета `app` (22/22 файлов) без ошибок.
+
+- [x] **Шаг 9: Глубокий аудит сигнатур БД, устранение скрытых рантайм-падений и заглушек (Версия 5.7)**:
+  - [x] Исправлено 10 критических несоответствий сигнатур и падений с `TypeError` в `app/services/supabase_db.py`: `create_debt`, `set_sign_price`, `create_sign_price_option`, `disable_sign_price_option`, `list_sign_price_options`, `get_sign_price_option`, `create_sign_order`, `get_sign_order`, `list_sign_orders`, `sign_order_stats`.
+  - [x] Добавлен метод-алиас `_assets` в `SupabaseDB` (устранено падение с `AttributeError` при сохранении и чтении медиа-ассетов).
+  - [x] Ликвидирована фейковая заглушка со случайными числами `return random.randint(0, 10)` в `get_recent_stats_count`: реализован настоящий sliding 24-hour window трекер `_recent_stat_events` с регистрацией вызовов через `record_stat_usage`.
+  - [x] Защищен метод `reset_expired_warns` и `parse_iso_dt` от падений с `TypeError` при нестроковых значениях даты.
+  - [x] Завершен незаконченный обработчик `restore_memory_command` в `profile_ai.py` (теперь полностью восстанавливает векторную память из прикрепленного zip-архива через `ai.memory.restore_from_zip_bytes`).
+  - [x] Исправлен сломанный regex в `handle_edit_fact_reply`: Telegram API удаляет HTML-теги `<code>` из текста сообщений при цитировании, из-за чего редактирование фактов через ответ на сообщение не работало. Теперь поддерживаются оба формата.
+  - [x] Исправлен баг пагинации в `delete_fact_callback`: при удалении последнего элемента на странице > 1 бот корректно переключается на предыдущую страницу.
+  - [x] Оптимизирован `auto_events_loop` в `web.py`: подключено кэширование настроек через `get_chat_settings_cached` (снижение десятков лишних запросов к Supabase в минуту) и внедрена автоматическая очистка просроченных сессий займов и залогов `LOAN_SESSIONS` и `BAIL_SESSIONS` (устранение утечки памяти).
+  - [x] Защищена команда `/whisper` в `general_admin.py` от падения при отсутствии прав на удаление сообщений.
+  - [x] Защищены команды `/feedbacks` и `/delfeedback` в `feedback.py` от краша при анонимных сообщениях (использование `get_sender_data`).
+  - [x] Проведено 100% покрытие глубокими тестами верификации (22 сценария сигнатур, regex, кэша и очистки сессий).
 
 ## Заметки
 - Все задачи и концепция зафиксированы в [MEMORY_AND_FEATURES_ANALYSIS.md](file:///c:/Users/Темирлан/.gemini/antigravity/playground/Nika/group_chat_bot_python/MEMORY_AND_FEATURES_ANALYSIS.md) и [DEVELOPMENT_STATE.md](file:///c:/Users/Темирлан/.gemini/antigravity/playground/Nika/DEVELOPMENT_STATE.md).
 - Стартовый баланс Ники: Теплота 60%, Троллинг 40%, Уважение 50% (дерзкая, умная, саркастичная киберпанк-девчонка).
+
 
 

@@ -62,7 +62,7 @@ def build_feedback_router(bot: Bot, db: SupabaseDB) -> Router:
                 "<b>Команды:</b>",
                 "• /feedback new &lt;категория&gt; &lt;текст&gt; — создать обращение",
                 "• /feedback list — мои обращения",
-                "• /feedback cancel <id> — отменить обращение",
+                "• /feedback cancel &lt;id&gt; — отменить обращение",
                 "",
                 "<b>Категории:</b>",
             ]
@@ -102,7 +102,8 @@ def build_feedback_router(bot: Bot, db: SupabaseDB) -> Router:
 
     @router.message(Command("feedbacks"))
     async def feedbacks_command(message: Message) -> None:
-        if not await is_admin(bot, message.chat.id, message.from_user.id):
+        sender = get_sender_data(message)
+        if not await is_admin(bot, message.chat.id, sender.user_id):
             await message.answer("Эта команда доступна только админам.")
             return
             
@@ -123,7 +124,8 @@ def build_feedback_router(bot: Bot, db: SupabaseDB) -> Router:
 
     @router.message(Command("delfeedback", "resolvefeedback"))
     async def delfeedback_command(message: Message, command: CommandObject) -> None:
-        if not await is_admin(bot, message.chat.id, message.from_user.id):
+        sender = get_sender_data(message)
+        if not await is_admin(bot, message.chat.id, sender.user_id):
             await message.answer("Эта команда доступна только админам.")
             return
             

@@ -491,6 +491,7 @@ def build_profile_ai_router(db: SupabaseDB, ai: AIService, bot_name: str) -> Rou
                     return
                 
                 db.increment_stat(sender.id, "aiimage_plays")
+                db.record_stat_usage(message.chat.id, "aiimage_plays")
                 await message.answer_photo(
                     BufferedInputFile(image_bytes, filename="nika_ai_image.png"),
                     caption=f"🖼️ Готово. Списано <b>{price}</b> 🍪\nБаланс: <b>{balance}</b> 🍪",
@@ -558,6 +559,7 @@ def build_profile_ai_router(db: SupabaseDB, ai: AIService, bot_name: str) -> Rou
                     return
                 
                 db.increment_stat(sender.id, "signai_plays")
+                db.record_stat_usage(message.chat.id, "signai_plays")
                 await message.answer_photo(
                     BufferedInputFile(image_bytes, filename="nika_ai_sign.png"),
                     caption=(
@@ -1108,6 +1110,22 @@ def build_profile_ai_router(db: SupabaseDB, ai: AIService, bot_name: str) -> Rou
         file = await message.bot.get_file(doc.file_id)
         file_bytes = await message.bot.download_file(file.file_path)
 
+        if hasattr(file_bytes, "getvalue"):
+            raw_data = file_bytes.getvalue()
+        elif hasattr(file_bytes, "read"):
+            raw_data = file_bytes.read()
+        else:
+            raw_data = bytes(file_bytes)
+
+        if hasattr(ai.memory, "restore_from_zip_bytes"):
+            success = await ai.memory.restore_from_zip_bytes(raw_data)
+            if success:
+                await message.answer("✅ <b>Успех!</b> Векторная память успешно восстановлена из бэкапа.", parse_mode="HTML")
+            else:
+                await message.answer("❌ <b>Ошибка!</b> Не удалось распаковать архив или восстановить базу.", parse_mode="HTML")
+        else:
+            await message.answer("ℹ️ Восстановление бэкапов доступно при <code>MEMORY_PROVIDER=chroma</code>.", parse_mode="HTML")
+
     @router.message(Command("clean_memory", "очистить_память"))
     async def clean_memory_command(message: Message) -> None:
         """Очищает память от бытового мусора и устаревших повседневных реплик"""
@@ -1249,29 +1267,6 @@ def build_profile_ai_router(db: SupabaseDB, ai: AIService, bot_name: str) -> Rou
         else:
             await message.answer("ℹ️ Прямое редактирование текста доступно при <code>MEMORY_PROVIDER=chroma</code>.", parse_mode="HTML")
 
-    def _build_facts_keyboard(chat_id: int, paged_data: dict[str, Any]) -> InlineKeyboardMarkup:
-        keyboard_rows = []
-        page = paged_data["page"]
-        pages = paged_data["pages"]
-        facts = paged_data["facts"]
-
-        for idx, fact in enumerate(facts, 1):
-            doc_id = fact["id"]
-            short_id = doc_id[:16]
-            keyboard_rows.append([
-                InlineKeyboardButton(
-                    text=f"❌ Удалить #{idx}",
-                    callback_data=f"del_fact_{page}_{short_id}"
-                )
-            ])
-
-        nav_row = []
-        if page > 1:
-            nav_row.append(InlineKeyboardButton(text="◀️ Назад", callback_data=f"facts_page_{page - 1}"))
-        nav_row.append(InlineKeyboardButton(text=f"Стр {page}/{pages}", callback_data="ignore_facts"))
-        if page < pages:
-            nav_row.append(InlineKeyboardButton(text="Вперёд ▶️", callback_data=f"facts_page_{page + 1}"))
-        
     def _build_facts_keyboard(chat_id: int, paged_data: dict[str, Any]) -> InlineKeyboardMarkup:
         keyboard_rows = []
         page = paged_data["page"]
@@ -1419,7 +1414,7 @@ def build_profile_ai_router(db: SupabaseDB, ai: AIService, bot_name: str) -> Rou
             return
 
         reply_text = message.reply_to_message.text or ""
-        match = re.search(r"\(ID:\s*<code>([^<]+)</code>\)", reply_text)
+        match = re.search(r"\(ID:\s*(?:<code>)?([^<)\s]+)(?:</code>)?\)", reply_text)
         if not match:
             return
 
@@ -1458,6 +1453,9 @@ def build_profile_ai_router(db: SupabaseDB, ai: AIService, bot_name: str) -> Rou
             await callback.answer("❌ Не удалось найти или удалить факт.", show_alert=True)
 
         paged_data = ai.memory.get_all_facts_paged(callback.message.chat.id, page=page, page_size=5)
+        if not paged_data["facts"] and page > 1:
+            page = page - 1
+            paged_data = ai.memory.get_all_facts_paged(callback.message.chat.id, page=page, page_size=5)
         if not paged_data["facts"]:
             await callback.message.edit_text("🧠 В памяти больше нет сохранённых фактов.")
             return
