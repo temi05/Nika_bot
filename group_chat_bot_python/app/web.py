@@ -85,12 +85,16 @@ def create_app() -> FastAPI:
             while True:
                 try:
                     for reminder in db.get_due_reminders():
-                        mention = reminder.user_name or f"ID: {reminder.user_id}"
-                        await bot.send_message(
-                            reminder.chat_id,
-                            f"Напоминание для {mention}:\n\n{reminder.text}",
-                        )
-                        db.remove_reminder(reminder.id)
+                        try:
+                            mention = reminder.user_name or f"ID: {reminder.user_id}"
+                            await bot.send_message(
+                                reminder.chat_id,
+                                f"Напоминание для {mention}:\n\n{reminder.text}",
+                            )
+                        except Exception as send_err:
+                            print(f"[reminder_send_error] id={reminder.id} chat_id={reminder.chat_id} error={send_err}")
+                        finally:
+                            db.remove_reminder(reminder.id)
                 except Exception as e:
                     print(f"[reminders_loop_error] {e}")
                 await asyncio.sleep(10)
@@ -167,6 +171,8 @@ def create_app() -> FastAPI:
                     session = game_sessions.BAIL_SESSIONS.get(key)
                     if session and now_ts - int(session.get("created_at", 0)) > 30 * 60:
                         game_sessions.BAIL_SESSIONS.pop(key, None)
+                if len(game_sessions.AUTO_CLAIMED_EVENTS) > 1000:
+                    game_sessions.AUTO_CLAIMED_EVENTS.clear()
 
                 active_chat_ids = db.get_active_chat_ids(minutes=10, limit=30)
                 for chat_id in list(next_auto_drop):

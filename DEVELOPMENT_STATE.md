@@ -1,8 +1,33 @@
-# Состояние разработки бота NeuroNika (Версия 5.7)
+# Состояние разработки бота NeuroNika (Версия 5.8)
 
 Этот файл создан для сохранения точного статуса разработки и задач, чтобы в новых сессиях и чатах другие ИИ-ассистенты могли продолжить разработку без дублирования усилий.
 
-## Текущий момент остановки (7 октября 2026 года)
+## Текущий момент остановки (16 октября 2026 года)
+- **Проведен комплексный аудит стабильности, устранены критические рантайм-краши, удалены дубликаты кода и мусорные файлы (Версия 5.8)**:
+  1. **Исправлены критические падения и дубликаты в `app/bot/routers/profile_ai.py`**:
+     - **Устранен краш `/card @username` (`AttributeError: property 'display_name' of 'Sender' object has no setter`)**: вместо мутации неизменяемого `@property` `display_name` создается новый экземпляр `Sender(user_id=..., first_name=..., username=..., is_bot=False)`.
+     - **Устранен краш `/forget_me` (`NameError: name 'file_bytes' is not defined`)**: удален случайно скопированный в конец `/forget_me` кусок кода от восстановления zip-бэкапа (`restore_from_zip_bytes(file_bytes.read())`).
+     - **Удалены 183 строки полного дублирования обработчиков** (`_sign_status_label`, `_format_sign_order`, `_sign_order_keyboard`, `/signorders`, `/signstats`, `/signreq`, `/forget`, `/nika_brain`), которые регистрировались дважды.
+     - **Исправлен порядок аргументов `db.add_memory` в `/add_fact`** (`db.add_memory(message.chat.id, text, source="confirmed", user_id=sender.user_id)`).
+     - **Синхронизированы `/forget`, `/forget_me` и `/remember` между Supabase и ChromaDB (+ отправка карточек в бэкап-чат)**.
+     - В начало файла добавлены недостающие импорты `asyncio`, `re`, `Any`, `Sender`.
+  2. **Исправлена система долгов и прощения долгов в `app/services/supabase_db.py` и `app/bot/routers/economy.py`**:
+     - **`repay_debts`**: ранее возвращал `tuple[bool, int, str]` вместо ожидаемого `dict` (что вызывало `AttributeError: 'tuple' object has no attribute 'get'` в `/repay` и `/bail`) и **не начислял возвращенные печеньки кредиторам**. Теперь возвращает словарь `{"success": ..., "paid": ..., "payments": [...], "message": ...}`, обновляет `paid_amount` в таблице `debts` и зачисляет возвращенные печеньки каждому кредитору.
+     - **`forgive_debts`**: ранее имел несовместимую сигнатуру и возвращал `bool` вместо `dict` (`AttributeError` в `/forgive`), а также не уменьшал поле `debt` у должника. Теперь корректно принимает `lender` (`ChatUser`), уменьшает долг заёмщика и возвращает `{"forgiven": total_forgiven, "borrower": borrower}`.
+  3. **Исправлены дубликаты, ошибки Vision и парсинг памяти в `app/services/ai_service.py` и `app/services/prompt_builders.py`**:
+     - **Объединены два конфликтовавших метода `_finalize_reply` в `AIService`**: ранее второй метод перезаписывал первый и терял очистку системных тегов `<msg>` и ролевых отыгровок в звёздочках `*...*`. Теперь работает единый метод со всеми фильтрами.
+     - **Реализован отсутствовавший метод `_retry_text_only_after_vision_error`**: устранено падение с `AttributeError` при сбое распознавания картинки, теперь бот мягко переключается на текстовый ответ.
+     - **Исправлен парсинг участников в `flush_passive_memory`**: вместо `line.split(":", 1)[0]` (который на XML-строках `<msg ...>` возвращал весь XML-тег) извлекаются атрибуты `author` и `user_id`.
+     - **Синхронизация сохранения фактов ИИ**: прямая команда «Ника, запомни...» и инструмент `remember_user_fact` теперь сохраняют факты не только в `ai_notes`, но и в векторную базу ChromaDB и отправляют карточку в бэкап-чат.
+     - **Защита от HTML-инъекций и лимит ставок ИИ-дуэли**: добавлено экранирование `escape_html` в `_tool_flip_coin_decide`, `_tool_send_rp_action`, `_tool_challenge_user_to_duel`; ставка ИИ-дуэли ограничена диапазоном `10..100 🍪`.
+     - **Обновлен `compact_prompt` в `prompt_builders.py`**: добавлены правила против `*звёздочек*`, ИИ-штампов, спама инструментами, а также инъекция настроения (`_mood_note(mood)`) и ночного вайба.
+  4. **Исправления в `app/bot/rp_commands.py` и `app/web.py`**:
+     - Устранено падение `KeyError: 'phrase'` при вызове `/rp шепнуть` без текста фразы, добавлено экранирование `escape_html(action_name)`, удален мертвый словарь `RP_GIF_QUERIES` и лишний импорт `get_settings`.
+     - В `reminders_loop` (`web.py`) отправка каждого напоминания обернута в индивидуальный `try...except...finally`, чтобы ошибка отправки в один чат (например, если бота кикнули) не блокировала очередь всех остальных напоминаний навсегда. Ограничен рост `AUTO_CLAIMED_EVENTS`.
+  5. **Очистка репозитория от мусора**:
+     - Полностью удалена папка `group_chat_bot_python/scratch/` (13 старых одноразовых скриптов миграции), временный индекс `.codex-temp-index-*` и устаревшие байткод-файлы.
+
+---
 - **Проведен глубокий архитектурный аудит сигнатур БД, устранены скрытые рантайм-падения, ликвидированы заглушки и оптимизированы фоновые сервисы (Версия 5.7)**:
   1. **Исправлены несоответствия сигнатур и падения `TypeError` в `app/services/supabase_db.py`**:
      - Приведены к единым контрактам методы: `create_debt`, `set_sign_price`, `create_sign_price_option`, `disable_sign_price_option`, `list_sign_price_options`, `get_sign_price_option`, `create_sign_order`, `get_sign_order`, `list_sign_orders`, `sign_order_stats`.

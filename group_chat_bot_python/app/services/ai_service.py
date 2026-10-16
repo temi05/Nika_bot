@@ -178,9 +178,19 @@ class AIService:
         if len(self.chat_buffers[chat_id]) < (1 if force else 5):
             return
 
-
         transcript = "\n".join(self.chat_buffers[chat_id])
-        participants = list(dict.fromkeys(line.split(":", 1)[0] for line in self.chat_buffers[chat_id]))
+        participants_list: list[str] = []
+        for line in self.chat_buffers[chat_id]:
+            author_m = re.search(r'author="([^"]+)"', line)
+            uid_m = re.search(r'user_id="([^"]+)"', line)
+            if author_m:
+                p_str = author_m.group(1)
+                if uid_m and uid_m.group(1) != "0":
+                    p_str = f"{p_str} (user_id={uid_m.group(1)})"
+                participants_list.append(p_str)
+            else:
+                participants_list.append(line.split(":", 1)[0])
+        participants = list(dict.fromkeys(participants_list))
         self._log("flush_memory_start", chat_id=chat_id, participants=participants, lines=len(self.chat_buffers[chat_id]))
         await self.memory.save_transcript(chat_id, transcript, participants)
         self.chat_buffers[chat_id].clear()
@@ -672,6 +682,11 @@ class AIService:
         if memory_text:
             user = self.db.get_or_create_user(chat_id, sender)
             self.db.append_ai_note(user, memory_text)
+            fact_entry = f"{sender.display_name}: {memory_text}"
+            if hasattr(self.memory, "store_single_fact"):
+                self.memory.store_single_fact(chat_id, fact_entry, sender.display_name)
+            if hasattr(self.memory, "backup_service") and self.memory.backup_service:
+                asyncio.create_task(self.memory.backup_service.send_fact_card(chat_id, sender.display_name, [fact_entry]))
             self._log("direct_memory_saved", chat_id=chat_id, sender=sender.display_name, text=memory_text[:160])
             return f"Окей, отложила в памяти: {memory_text}"
 
@@ -1108,7 +1123,7 @@ class AIService:
         
         response_text = f"🪙 <b>Бросаю монетку...</b>\n"
         if question:
-            response_text += f"Вопрос: <i>«{question}»</i>\n"
+            response_text += f"Вопрос: <i>«{escape_html(question)}»</i>\n"
         response_text += f"Результат: <b>{result}</b>\nРешение: <b>{decision}</b>"
         
         try:
@@ -1185,24 +1200,26 @@ class AIService:
                 cleaned_messages.append(message)
         return cleaned_messages
 
-    def _finalize_reply(self, content: str, *, user_text: str) -> str:
-        cleaned = content.strip()
-        # Вырезаем системные XML-теги <msg...> </msg>, если модель случайно скопировала их формат
-        cleaned = re.sub(r"<msg[^>]*>", "", cleaned, flags=re.IGNORECASE)
-        cleaned = re.sub(r"</msg>", "", cleaned, flags=re.IGNORECASE).strip()
-
-        bot_name = self.settings.bot_name or "Ника"
-        cleaned = re.sub(rf"^(?:{bot_name}\s*:\s*)+", "", cleaned, flags=re.IGNORECASE).strip()
-        cleaned = re.sub(r"^\s*нейроника\s*:\s*", "", cleaned, flags=re.IGNORECASE).strip()
-        # Автоматически вырезаем любые текстовые отыгровки в звёздочках (*поправляет ушки*, *закатывает глаза*)
-        cleaned = re.sub(r"\*[^*]+\*", "", cleaned).strip()
-        cleaned = re.sub(r"\s{2,}", " ", cleaned)
-
-        cleaned = self._enforce_personality_mode(cleaned)
-        cleaned = self._soften_personal_attacks(cleaned)
-        cleaned = self._trim_incomplete_tail(cleaned)
-        return cleaned
-
+    async def _retry_text_only_after_vision_error(
+        self,
+        *,
+        messages: list[dict[str, Any]],
+        user_text: str,
+        error: str,
+    ) -> str:
+        self._log("vision_fallback_to_text", error=error[:180])
+        text_messages = self._strip_images_from_messages(messages)
+        try:
+            raw_text = await self._simple_completion(
+                model=self.settings.ai_model,
+                messages=text_messages,
+                temperature=self.settings.ai_temperature,
+                max_tokens=self.settings.ai_max_tokens,
+            )
+            return self._finalize_reply(raw_text, user_text=user_text)
+        except Exception as fallback_exc:
+            self._log("vision_fallback_failed", error=str(fallback_exc)[:180])
+            return ""
 
     def _tool_user_lookup(self, chat_id: int, sender: Sender, args: dict[str, Any]) -> str:
         action = str(args.get("action") or "").lower()
@@ -1293,6 +1310,11 @@ class AIService:
         if action == "add_note":
             source_msg_id = self._current_source_message_id.get(chat_id)
             self.db.append_ai_note(target, content, source_message_id=source_msg_id)
+            fact_entry = f"{target.display_name}: {content}"
+            if hasattr(self.memory, "store_single_fact"):
+                self.memory.store_single_fact(chat_id, fact_entry, target.display_name)
+            if hasattr(self.memory, "backup_service") and self.memory.backup_service:
+                asyncio.create_task(self.memory.backup_service.send_fact_card(chat_id, target.display_name, [fact_entry]))
             self._remember_triggered_in_chat[chat_id] = True
             return f"Факт о {target.display_name} сохранен в базу."
         return "Неизвестное действие с профилем."
@@ -1598,9 +1620,15 @@ class AIService:
         if self._looks_like_memory_artifact(cleaned):
             return "Чуть не выдала вам базу данных вместо ответа. Давай еще раз."
 
-        bot_name = re.escape(self.settings.bot_name)
+        # Вырезаем системные XML-теги <msg...> </msg>, если модель случайно скопировала их формат
+        cleaned = re.sub(r"<msg[^>]*>", "", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"</msg>", "", cleaned, flags=re.IGNORECASE).strip()
+
+        bot_name = re.escape(self.settings.bot_name or "Ника")
         cleaned = re.sub(rf"^(?:{bot_name}\s*:\s*)+", "", cleaned, flags=re.IGNORECASE).strip()
         cleaned = re.sub(r"^\s*нейроника\s*:\s*", "", cleaned, flags=re.IGNORECASE).strip()
+        # Автоматически вырезаем любые текстовые отыгровки в звёздочках (*поправляет ушки*, *закатывает глаза*)
+        cleaned = re.sub(r"\*[^*]+\*", "", cleaned).strip()
         cleaned = re.sub(r"\s{2,}", " ", cleaned)
 
         if self._is_hostile_user_text(user_text):
@@ -1881,9 +1909,9 @@ class AIService:
         from app.bot.rp_commands import _find_nekos_best_gif
         url = await _find_nekos_best_gif(action)
 
-        caption = f"✨ <b>{self.settings.bot_name}</b> {verb} <b>{target.display_name}</b> {emoji}"
+        caption = f"✨ <b>{escape_html(self.settings.bot_name)}</b> {verb} <b>{escape_html(target.display_name)}</b> {emoji}"
         if custom_text:
-            caption += f"\n\n<i>{custom_text}</i>"
+            caption += f"\n\n<i>{escape_html(custom_text)}</i>"
 
         try:
             if url:
@@ -1906,12 +1934,11 @@ class AIService:
 
     async def _tool_challenge_user_to_duel(self, chat_id: int, sender: Sender, args: dict[str, Any]) -> str:
         target_name = str(args.get("target_name") or "").strip()
-        amount = int(args.get("amount") or 20)
+        raw_amount = int(args.get("amount") or 20)
+        amount = min(max(raw_amount, 10), 100)
 
         if not target_name:
             return "Не указан соперник для дуэли."
-        if amount <= 0:
-            return "Ставка должна быть положительной."
 
         target = self._resolve_target_user(chat_id, sender, target_name)
         if not target:
@@ -1937,24 +1964,26 @@ class AIService:
         bot_dice = dice_emojis[bot_roll]
         user_dice = dice_emojis[user_roll]
 
-        title = f"⚔️ <b>ИИ-Дуэль: {self.settings.bot_name} против {target.display_name}!</b>"
+        safe_bot = escape_html(self.settings.bot_name)
+        safe_target = escape_html(target.display_name)
+        title = f"⚔️ <b>ИИ-Дуэль: {safe_bot} против {safe_target}!</b>"
         bet_info = f"Ставка: <code>{amount} 🍪</code>\n"
 
         lines = [
             title,
             bet_info,
-            f"🤖 <b>{self.settings.bot_name}</b> бросает: {bot_dice} (<code>{bot_roll}</code>)",
-            f"👤 <b>{target.display_name}</b> бросает: {user_dice} (<code>{user_roll}</code>)",
+            f"🤖 <b>{safe_bot}</b> бросает: {bot_dice} (<code>{bot_roll}</code>)",
+            f"👤 <b>{safe_target}</b> бросает: {user_dice} (<code>{user_roll}</code>)",
             ""
         ]
 
         if bot_roll > user_roll:
             self.db.update_user(target_user.id, {"reputation": target_user.reputation - amount})
-            lines.append(f"🏆 <b>Победа Ники!</b>\n└ {target.display_name} теряет <code>{amount} 🍪</code> (осталось: <code>{target_user.reputation - amount}</code>).")
+            lines.append(f"🏆 <b>Победа Ники!</b>\n└ {safe_target} теряет <code>{amount} 🍪</code> (осталось: <code>{target_user.reputation - amount}</code>).")
             result_str = "Я выиграла дуэль!"
         elif user_roll > bot_roll:
             self.db.update_user(target_user.id, {"reputation": target_user.reputation + amount})
-            lines.append(f"🏆 <b>Победа {target.display_name}!</b>\n└ Получает <code>{amount} 🍪</code> (теперь у него: <code>{target_user.reputation + amount}</code>).")
+            lines.append(f"🏆 <b>Победа {safe_target}!</b>\n└ Получает <code>{amount} 🍪</code> (теперь у него: <code>{target_user.reputation + amount}</code>).")
             result_str = "Пользователь выиграл дуэль."
         else:
             lines.append("🤝 <b>Ничья!</b> Все остались при своих.")

@@ -10,7 +10,6 @@ from aiogram.filters import Command, CommandObject
 from aiogram.types import Message
 
 from app.bot.admin import is_admin
-from app.config import get_settings
 from app.services.supabase_db import SupabaseDB
 from app.utils import escape_html, get_sender_data
 
@@ -161,30 +160,7 @@ RP_ACTIONS = {
 }
 
 
-RP_GIF_QUERIES = {
-    "обнять": ["anime hug", "cute hug anime"],
-    "погладить": ["anime head pat", "cute headpat anime"],
-    "поцеловать": ["anime kiss", "cute anime kiss"],
-    "пожать_руку": ["anime handshake", "handshake"],
-    "взять_за_руку": ["anime holding hands", "holding hands anime"],
-    "похлопать": ["anime pat shoulder", "shoulder pat"],
-    "поддержать": ["anime cheer up", "you can do it anime"],
-    "утешить": ["anime comfort hug", "comforting anime"],
-    "порадоваться": ["anime happy celebration", "anime yay"],
-    "поздравить": ["anime congratulations", "anime celebration"],
-    "пощекотать": ["anime tickle", "tickling anime"],
-    "подразнить": ["anime teasing", "smug anime"],
-    "шлепнуть": ["anime slap", "anime bonk"],
-    "укусить": ["anime bite", "cute anime bite"],
-    "кусь": ["anime bite", "cute anime bite"],
-    "убить": ["anime dramatic death", "anime knockout"],
-    "ударить": ["anime punch", "anime bonk"],
-    "покормить": ["anime feeding", "anime food sharing"],
-    "прижать": ["anime cuddle hug", "anime embrace"],
-    "облизать": ["anime lick", "anime silly lick"],
-    "лизнуть": ["anime lick", "anime silly lick"],
-    "шепнуть": ["anime whisper", "whisper anime"],
-}
+
 
 
 def _load_rp_gifs() -> dict[str, str]:
@@ -371,7 +347,7 @@ def build_rp_router(db: SupabaseDB) -> Router:
         # Проверяем существование действия
         if action_name not in RP_ACTIONS:
             await message.answer(
-                f"Неизвестное действие: <code>{action_name}</code>\n"
+                f"Неизвестное действие: <code>{escape_html(action_name)}</code>\n"
                 f"Напиши /rp для списка команд.",
                 parse_mode="HTML",
             )
@@ -401,11 +377,11 @@ def build_rp_router(db: SupabaseDB) -> Router:
             db.add_reputation(sender_user, -cost)
 
         # Формируем результат
-        if action_name == "шепнуть" and extra_phrase:
+        if action_name == "шепнуть":
             result = action["template"].format(
                 sender=escape_html(sender.display_name),
                 target=escape_html(target.display_name),
-                phrase=escape_html(extra_phrase),
+                phrase=escape_html(extra_phrase or "какой-то секретик..."),
             )
         else:
             result = action["template"].format(

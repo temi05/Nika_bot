@@ -1529,38 +1529,98 @@ class SupabaseDB:
         )
         return res.data if res and res.data else []
 
-    def repay_debts(self, user: ChatUser, amount: int) -> tuple[bool, int, str]:
+    def repay_debts(self, user: ChatUser, amount: int) -> dict[str, Any]:
         debts = self.get_active_debts_for_borrower(user.chat_id, user.user_id)
-        if not debts:
-            return False, 0, "У вас нет активных долгов."
+        if not debts or amount <= 0:
+            return {"success": False, "paid": 0, "payments": [], "message": "У вас нет активных долгов."}
         total_paid = 0
-        remaining = amount
+        remaining = min(amount, user.reputation)
+        payments: list[dict[str, Any]] = []
         for debt in debts:
             debt_id = debt["id"]
-            debt_amount = debt.get("amount", 0)
-            pay = min(remaining, debt_amount)
+            full_amount = int(debt.get("amount") or 0)
+            paid_so_far = int(debt.get("paid_amount") or 0)
+            forgiven_so_far = int(debt.get("forgiven_amount") or 0)
+            left = max(0, full_amount - paid_so_far - forgiven_so_far)
+            pay = min(remaining, left)
             if pay > 0:
                 total_paid += pay
                 remaining -= pay
-                if pay >= debt_amount:
-                    self._safe_execute(self._debts().update({"status": "paid"}).eq("id", debt_id))
-                else:
-                    self._safe_execute(self._debts().update({"amount": debt_amount - pay}).eq("id", debt_id))
+                new_paid = paid_so_far + pay
+                new_status = "paid" if (new_paid + forgiven_so_far) >= full_amount else "active"
+                self._safe_execute(
+                    self._debts().update({"paid_amount": new_paid, "status": new_status}).eq("id", debt_id)
+                )
+                lender_id = int(debt.get("lender_id") or 0)
+                lender = self.get_user_by_platform_id(user.chat_id, lender_id) if lender_id else None
+                if lender:
+                    self.update_user(lender.id, {"reputation": lender.reputation + pay})
+                lender_name = str(debt.get("lender_name") or (lender.display_name if lender else lender_id))
+                payments.append({"lender_id": lender_id, "lender_name": lender_name, "amount": pay})
             if remaining <= 0:
                 break
         if total_paid > 0:
             new_debt = max(0, user.debt - total_paid)
             new_rep = max(0, user.reputation - total_paid)
             self.update_user(user.id, {"debt": new_debt, "reputation": new_rep})
-            return True, total_paid, f"Успешно погашено долгов на {total_paid} 🍪!"
-        return False, 0, "Недостаточно средств для погашения."
+            user.debt = new_debt
+            user.reputation = new_rep
+            return {
+                "success": True,
+                "paid": total_paid,
+                "payments": payments,
+                "message": f"Успешно погашено долгов на {total_paid} 🍪!",
+            }
+        return {"success": False, "paid": 0, "payments": [], "message": "Недостаточно средств для погашения."}
 
-    def forgive_debts(self, lender_user_id: int, borrower_user_id: int, chat_id: int) -> bool:
+    def forgive_debts(self, lender: ChatUser | int, borrower_user_id: int, amount_or_chat_id: int) -> dict[str, Any]:
+        if isinstance(lender, ChatUser):
+            chat_id = lender.chat_id
+            lender_user_id = lender.user_id
+            amount_to_forgive = max(0, int(amount_or_chat_id))
+        else:
+            lender_user_id = int(lender)
+            chat_id = int(amount_or_chat_id)
+            amount_to_forgive = 10**9
+
         res = self._safe_execute(
-            self._debts().update({"status": "forgiven"}).eq("chat_id", chat_id).eq("lender_id", lender_user_id).eq("borrower_id", borrower_user_id).eq("status", "active"),
-            fallback=None
+            self._debts()
+            .select("*")
+            .eq("chat_id", chat_id)
+            .eq("lender_id", lender_user_id)
+            .eq("borrower_id", borrower_user_id)
+            .eq("status", "active"),
+            fallback=[],
         )
-        return bool(res and res.data)
+        debts = res.data if res and res.data else []
+        borrower = self.get_user_by_platform_id(chat_id, borrower_user_id)
+        if not debts or amount_to_forgive <= 0:
+            return {"forgiven": 0, "borrower": borrower}
+
+        remaining = amount_to_forgive
+        total_forgiven = 0
+        for debt in debts:
+            debt_id = debt["id"]
+            full_amount = int(debt.get("amount") or 0)
+            paid_so_far = int(debt.get("paid_amount") or 0)
+            forgiven_so_far = int(debt.get("forgiven_amount") or 0)
+            left = max(0, full_amount - paid_so_far - forgiven_so_far)
+            forgive_now = min(remaining, left)
+            if forgive_now > 0:
+                total_forgiven += forgive_now
+                remaining -= forgive_now
+                new_forgiven = forgiven_so_far + forgive_now
+                new_status = "forgiven" if (paid_so_far + new_forgiven) >= full_amount else "active"
+                self._safe_execute(
+                    self._debts().update({"forgiven_amount": new_forgiven, "status": new_status}).eq("id", debt_id)
+                )
+            if remaining <= 0:
+                break
+
+        if total_forgiven > 0 and borrower:
+            new_debt = max(0, borrower.debt - total_forgiven)
+            borrower = self.update_user(borrower.id, {"debt": new_debt}) or borrower
+        return {"forgiven": total_forgiven, "borrower": borrower}
 
     # ==========================================
     # Напоминания и Активация Событий

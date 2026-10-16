@@ -321,6 +321,7 @@ def build_economy_router(db: SupabaseDB, ai: AIService) -> Router:
             await message.answer(f"❌ У тебя недостаточно печенек для погашения долга! Нужно <b>{amount} 🍪</b>, а у тебя {user.reputation} 🍪.")
             return
 
+        original_debt = user.debt
         result = db.repay_debts(user, amount)
         paid = int(result.get("paid") or 0)
         if paid <= 0:
@@ -337,7 +338,7 @@ def build_economy_router(db: SupabaseDB, ai: AIService) -> Router:
             f"💰 <b>Долг погашен!</b>\n\n"
             f"Ты вернул <b>{paid} 🍪</b>.\n"
             f"{chr(10).join(payment_lines)}\n\n"
-            f"Остаток долга: <b>{max(0, user.debt - paid)} 🍪</b>.",
+            f"Остаток долга: <b>{max(0, original_debt - paid)} 🍪</b>.",
             parse_mode="HTML"
         )
 
