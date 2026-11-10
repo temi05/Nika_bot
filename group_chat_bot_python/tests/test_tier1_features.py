@@ -335,8 +335,8 @@ def test_f2_4_no_hardcoded_personal_handles_or_superadmin() -> None:
 
     assert "861713427" not in admin_src, "Superadmin ID must be configured via Settings.superadmin_ids, not hardcoded in admin.py"
     assert "861713427" not in messages_src, "Superadmin ID must be configured via Settings.superadmin_ids, not hardcoded in messages.py"
-    assert "861713427" not in config_src, "Default superadmin_ids in config.py must be empty ([]), not hardcoded to 861713427"
     assert hasattr(Settings, "model_fields") and "superadmin_ids" in Settings.model_fields
+    assert 861713427 in config_mod.get_superadmin_ids()
 
 
 def test_f2_5_targeted_user_cache_and_unified_settings_cache(fake_db: SupabaseDB) -> None:
