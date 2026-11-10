@@ -24,6 +24,15 @@ def _safe_int(value: Any) -> int | None:
         return None
 
 
+class _RepayResult(dict):
+    """Dict result for repay_debts that also supports 3-tuple unpacking (success, message, paid)."""
+
+    def __iter__(self):
+        yield bool(self.get("success", False))
+        yield str(self.get("message", ""))
+        yield int(self.get("paid", 0))
+
+
 class SupabaseDB:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
@@ -32,17 +41,19 @@ class SupabaseDB:
         self.reaction_cooldowns: dict[str, float] = {}
         self.command_cooldowns: dict[int, dict[str, float]] = {}
         self.active_chats: dict[int, float] = {}
-        self.pending_verifications: dict[int, VerificationChallenge] = {}
+        self.pending_verifications: dict[Any, VerificationChallenge] = {}
         self.last_birthday_check: dict[int, str] = {}
         self.congratulated_birthdays: set[str] = set()
         self.poll_authors: dict[str, dict[str, Any]] = {}
+        self.chat_rules: dict[int, str] = {}
         self._rich_message_logs_supported: bool | None = None
         self._knowledge_entities_supported: bool | None = None
-        
+
         # In-memory Cache
-        self._user_cache: dict[str, tuple[ChatUser, float]] = {} # key -> (user, expires_at)
+        self._user_cache: dict[str, tuple[ChatUser, float]] = {}  # key -> (user, expires_at)
         self._chat_settings_cache: dict[int, tuple[ChatSettings, float]] = {}
-        self._cache_ttl = 300 # 5 минут
+        self._bad_words_cache: dict[int, tuple[list[str], float]] = {}
+        self._cache_ttl = 300  # 5 минут
         self._recent_stat_events: dict[str, list[float]] = {}
 
     def _users(self):
@@ -160,7 +171,7 @@ class SupabaseDB:
             user, expires_at = self._user_cache[cache_key]
             if time.time() < expires_at:
                 return user
-        
+
         response = self._safe_execute(
             self._users().select("*").eq("chat_id", chat_id).eq("user_id", sender.user_id).limit(1),
             fallback=None,
@@ -191,7 +202,9 @@ class SupabaseDB:
             context=f"get_or_create_user.insert chat_id={chat_id} user_id={sender.user_id}",
         )
         if created and created.data:
-            return self._user_from_row(created.data[0])
+            user = self._user_from_row(created.data[0])
+            self._user_cache[cache_key] = (user, time.time() + self._cache_ttl)
+            return user
         return self._fallback_user(chat_id, sender)
 
     def get_user_by_platform_id(self, chat_id: int, user_id: int) -> ChatUser | None:
@@ -200,7 +213,7 @@ class SupabaseDB:
             user, expires_at = self._user_cache[cache_key]
             if time.time() < expires_at:
                 return user
-                
+
         response = self._safe_execute(
             self._users().select("*").eq("chat_id", chat_id).eq("user_id", user_id).limit(1),
             fallback=None,
@@ -230,11 +243,10 @@ class SupabaseDB:
                 payload[field] = max(0, int(payload[field]))
         if "level" in payload and payload["level"] is not None:
             payload["level"] = max(1, int(payload["level"]))
-            
-        # Сброс кэша для этого пользователя
-        # Так как db_id не содержит chat_id/user_id, мы просто очищаем весь кэш пользователей 
-        # или ищем совпадение. Для надежности при обновлении по db_id очистим кэш.
-        self._user_cache.clear() 
+
+        # Точечный сброс кэша только для обновляемого пользователя (по db_id)
+        for k in [k for k, (cached_user, _) in self._user_cache.items() if cached_user.id == db_id]:
+            self._user_cache.pop(k, None)
 
         try:
             result = self._safe_execute(
@@ -245,8 +257,6 @@ class SupabaseDB:
             if result is None:
                 return None
         except APIError as exc:
-            # Backward compatibility: some deployments do not yet have `last_warn_at`.
-            # Retry once without that field so runtime does not crash on moderation events.
             if "last_warn_at" in payload and "last_warn_at" in str(exc):
                 payload.pop("last_warn_at", None)
                 result = self._safe_execute(
@@ -263,7 +273,12 @@ class SupabaseDB:
 
         if not result or not result.data:
             return None
-        return self._user_from_row(result.data[0])
+        updated_user = self._user_from_row(result.data[0])
+        self._user_cache[f"{updated_user.chat_id}_{updated_user.user_id}"] = (
+            updated_user,
+            time.time() + self._cache_ttl,
+        )
+        return updated_user
 
     def get_next_level_xp(self, level: int) -> int:
         return 50 * level * level + 50 * level
@@ -491,15 +506,17 @@ class SupabaseDB:
         )
         if created and created.data:
             row = created.data[0]
-            return ChatSettings(
-                chat_id=chat_id, 
+            settings = ChatSettings(
+                chat_id=chat_id,
                 link_filter_enabled=bool(row.get("link_filter_enabled", True)),
                 casino_jackpot=int(row.get("casino_jackpot", 0)),
                 auto_drop_enabled=bool(row.get("auto_drop_enabled", True)),
                 auto_quiz_enabled=bool(row.get("auto_quiz_enabled", True)),
                 ai_enabled=bool(row.get("ai_enabled", True)),
-                proactive_enabled=bool(row.get("proactive_enabled", True))
+                proactive_enabled=bool(row.get("proactive_enabled", True)),
             )
+            self._chat_settings_cache[chat_id] = (settings, time.time() + self._cache_ttl)
+            return settings
 
         # Safe fallback when DB is temporarily unavailable.
         return ChatSettings(chat_id=chat_id, link_filter_enabled=self.settings.link_filter_default)
@@ -514,6 +531,9 @@ class SupabaseDB:
         return bool(result)
 
     def get_bad_words(self, chat_id: int) -> list[str]:
+        cached = self._bad_words_cache.get(chat_id)
+        if cached and time.time() < cached[1]:
+            return list(cached[0])
         response = self._safe_execute(
             self._bad_words().select("word").eq("chat_id", chat_id),
             fallback=None,
@@ -521,9 +541,12 @@ class SupabaseDB:
         )
         if not response:
             return []
-        return [row["word"] for row in response.data or []]
+        words = [row["word"] for row in response.data or []]
+        self._bad_words_cache[chat_id] = (words, time.time() + self._cache_ttl)
+        return list(words)
 
     def add_bad_word(self, chat_id: int, word: str) -> None:
+        self._bad_words_cache.pop(chat_id, None)
         self._safe_execute(
             self._bad_words().insert({"chat_id": chat_id, "word": word.lower()}),
             fallback=None,
@@ -531,6 +554,7 @@ class SupabaseDB:
         )
 
     def remove_bad_word(self, chat_id: int, word: str) -> None:
+        self._bad_words_cache.pop(chat_id, None)
         self._safe_execute(
             self._bad_words().delete().eq("chat_id", chat_id).eq("word", word.lower()),
             fallback=None,
@@ -563,7 +587,7 @@ class SupabaseDB:
         self.store_memory(
             user.chat_id,
             MemoryRecord(
-                fact=f"Заметка о {user.display_name}: {clean_note}",
+                fact=f"{user.display_name}: {clean_note}",
                 source="ai_note",
                 confidence=0.85,
                 meta={"user_id": user.user_id},
@@ -576,6 +600,7 @@ class SupabaseDB:
 
     def set_birthday(self, user: ChatUser, birthday: str) -> ChatUser | None:
         updated = self.update_user(user.id, {"birthday": birthday})
+        self.last_birthday_check.pop(user.chat_id, None)
         self.store_memory(
             user.chat_id,
             MemoryRecord(
@@ -687,7 +712,11 @@ class SupabaseDB:
 
         return None
 
-    def get_birthdays_today(self, chat_id: int) -> list[ChatUser]:
+    def get_birthdays_today(self, chat_id: int, *, force: bool = False) -> list[ChatUser]:
+        today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        if not force and self.last_birthday_check.get(chat_id) == today_str:
+            return []
+        self.last_birthday_check[chat_id] = today_str
         return [user for user in self.get_all_users(chat_id) if birthday_is_today(user.birthday)]
 
     def is_bday_congratulated(self, chat_id: int, user_id: int, year: int) -> bool:
@@ -967,6 +996,19 @@ class SupabaseDB:
             "last_seen_at": datetime.now(timezone.utc).isoformat(),
         }
 
+        chroma_mem = getattr(self, "_chroma_memory", None)
+        if chroma_mem is not None and hasattr(chroma_mem, "store_single_fact"):
+            try:
+                chroma_mem.store_single_fact(
+                    chat_id,
+                    memory.fact,
+                    entity_name or "",
+                    source_message_id=source_message_id,
+                    user_id=entity_user_id,
+                )
+            except Exception as exc:
+                print(f"[DB:chroma_sync_error] error={exc}")
+
         if self._knowledge_entities_supported is not False:
             rich_payload = {
                 **base_payload,
@@ -1010,11 +1052,35 @@ class SupabaseDB:
             return 0
         return len(rows.data)
 
+    def get_memory_owner_by_source_id(self, chat_id: int, source_message_id: int) -> int | None:
+        if not source_message_id:
+            return None
+        author = self.get_message_author(chat_id, source_message_id)
+        if author:
+            return author
+        memories = self._safe_execute(
+            self._knowledge()
+            .select("entity_user_id, meta")
+            .eq("chat_id", chat_id)
+            .eq("source_message_id", source_message_id)
+            .limit(1),
+            fallback=None,
+            context=f"get_memory_owner_by_source_id chat_id={chat_id} source_message_id={source_message_id}",
+        )
+        if memories and memories.data:
+            row = memories.data[0]
+            uid = _safe_int(row.get("entity_user_id"))
+            if uid:
+                return uid
+            meta = row.get("meta") or {}
+            if isinstance(meta, dict):
+                return _safe_int(meta.get("user_id") or meta.get("entity_user_id") or meta.get("author_id"))
+        return None
+
     def delete_memory_by_source_id(self, chat_id: int, source_message_id: int) -> int:
         if not source_message_id:
             return 0
 
-        # Сначала найдем записи памяти, чтобы очистить ai_notes у пользователей
         memories = self._safe_execute(
             self._knowledge()
             .select("fact, entity_user_id, fact_type")
@@ -1024,11 +1090,22 @@ class SupabaseDB:
             context=f"get_memory_before_delete chat_id={chat_id} source_message_id={source_message_id}",
         )
 
+        chroma_mem = getattr(self, "_chroma_memory", None)
         if memories and memories.data:
             for item in memories.data:
                 fact_text = item.get("fact") or ""
                 entity_user_id = item.get("entity_user_id")
                 fact_type = item.get("fact_type") or ""
+
+                if chroma_mem is not None and hasattr(chroma_mem, "delete_fact_by_query") and fact_text:
+                    try:
+                        chroma_mem.delete_fact_by_query(chat_id, fact_text)
+                        if ": " in fact_text:
+                            clean_part = fact_text.split(": ", 1)[1].strip()
+                            if clean_part:
+                                chroma_mem.delete_fact_by_query(chat_id, clean_part)
+                    except Exception as exc:
+                        print(f"[DB:chroma_delete_sync_error] error={exc}")
 
                 if entity_user_id and fact_type == "ai_note" and ": " in fact_text:
                     try:
@@ -1185,7 +1262,7 @@ class SupabaseDB:
         row = {"chat_id": chat_id, "user_id": user_id, **payload, "updated_at": datetime.now(timezone.utc).isoformat()}
         try:
             result = self._safe_execute(
-                self._persona().upsert(row),
+                self._persona().upsert(row, on_conflict="chat_id,user_id"),
                 fallback=None,
                 context=f"upsert_persona_state chat_id={chat_id} user_id={user_id}",
             )
@@ -1200,7 +1277,7 @@ class SupabaseDB:
             legacy_row = dict(row)
             legacy_row.pop("respect", None)
             self._safe_execute(
-                self._persona().upsert(legacy_row),
+                self._persona().upsert(legacy_row, on_conflict="chat_id,user_id"),
                 fallback=None,
                 context=f"upsert_persona_state.legacy chat_id={chat_id} user_id={user_id}",
             )
@@ -1224,6 +1301,18 @@ class SupabaseDB:
             return None
         return self._reminder_from_row(result.data[0])
 
+    def create_reminder(
+        self,
+        chat_id: int,
+        user_id: int,
+        user_name: str,
+        text: str,
+        remind_at: datetime | None = None,
+        trigger_time: datetime | None = None,
+    ) -> Reminder | None:
+        dt = remind_at or trigger_time or datetime.now(timezone.utc)
+        return self.insert_reminder(chat_id, user_id, user_name, text, dt)
+
     def get_due_reminders(self) -> list[Reminder]:
         now = datetime.now(timezone.utc).isoformat()
         response = self._safe_execute(
@@ -1243,13 +1332,53 @@ class SupabaseDB:
         )
 
     def set_verification(self, challenge: VerificationChallenge) -> None:
-        self.pending_verifications[challenge.user_id] = challenge
+        self.pending_verifications[(challenge.chat_id, challenge.user_id)] = challenge
 
-    def get_verification(self, user_id: int) -> VerificationChallenge | None:
-        return self.pending_verifications.get(user_id)
+    def get_verification(self, user_id: int, chat_id: int | None = None) -> VerificationChallenge | None:
+        if chat_id is not None:
+            return self.pending_verifications.get((chat_id, user_id))
+        direct = self.pending_verifications.get(user_id)
+        if direct:
+            return direct
+        for key, challenge in self.pending_verifications.items():
+            if isinstance(key, tuple) and len(key) == 2 and key[1] == user_id:
+                return challenge
+        return None
 
-    def pop_verification(self, user_id: int) -> VerificationChallenge | None:
-        return self.pending_verifications.pop(user_id, None)
+    def pop_verification(self, user_id: int, chat_id: int | None = None) -> VerificationChallenge | None:
+        if chat_id is not None:
+            return self.pending_verifications.pop((chat_id, user_id), None)
+        direct = self.pending_verifications.pop(user_id, None)
+        if direct:
+            return direct
+        for key in list(self.pending_verifications.keys()):
+            if isinstance(key, tuple) and len(key) == 2 and key[1] == user_id:
+                return self.pending_verifications.pop(key, None)
+        return None
+
+    def clear_verification(self, user_id: int, chat_id: int | None = None) -> VerificationChallenge | None:
+        return self.pop_verification(user_id, chat_id=chat_id)
+
+    def get_chat_rules(self, chat_id: int) -> str | None:
+        if chat_id in self.chat_rules:
+            return self.chat_rules[chat_id]
+        asset = self.get_bot_asset(f"chat_rules_{chat_id}")
+        if asset and asset.get("payload_base64"):
+            text = str(asset["payload_base64"])
+            self.chat_rules[chat_id] = text
+            return text
+        return None
+
+    def set_chat_rules(self, chat_id: int, rules_text: str, updated_by: int | None = None) -> bool:
+        clean = (rules_text or "").strip()[:4000]
+        self.chat_rules[chat_id] = clean
+        self.save_bot_asset(
+            f"chat_rules_{chat_id}",
+            clean,
+            mime_type_or_file_type="text/plain",
+            updated_by=updated_by,
+        )
+        return True
 
     # === Feedback (предложения и жалобы) ===
 
@@ -1343,7 +1472,7 @@ class SupabaseDB:
         new_xp = user.xp + amount
         new_level = user.level
         level_up = False
-        
+
         while True:
             next_xp = self.get_next_level_xp(new_level)
             if new_xp >= next_xp:
@@ -1351,7 +1480,7 @@ class SupabaseDB:
                 level_up = True
             else:
                 break
-                
+
         updated = self.update_user(user.id, {"xp": new_xp, "level": new_level})
         return {
             "success": bool(updated),
@@ -1373,16 +1502,14 @@ class SupabaseDB:
 
     def award_achievement(self, db_id: int, code: str) -> dict[str, Any] | None:
         """Присваивает достижение пользователю, если его еще нет."""
-        # Пытаемся вызвать RPC функцию, которая проверит наличие и добавит
         response = self._safe_execute(
             self.client.rpc("award_achievement_by_code", {"p_user_id": db_id, "p_code": code}),
             fallback=None,
             context=f"award_achievement db_id={db_id} code={code}",
         )
         if response and response.data:
-            # Сбрасываем кэш пользователя, так как у него появились новые бейджи
-            self._user_cache.clear()
-            # RPC может вернуть список из одного элемента или просто объект
+            for k in [k for k, (cached_user, _) in self._user_cache.items() if cached_user.id == db_id]:
+                self._user_cache.pop(k, None)
             data = response.data
             if isinstance(data, list) and len(data) > 0:
                 return data[0]
@@ -1392,7 +1519,7 @@ class SupabaseDB:
     def check_and_award_achievements(self, user: ChatUser) -> list[dict[str, Any]]:
         """Проверяет условия и выдает новые ачивки."""
         new_awards = []
-        
+
         # 💰 Богатство
         if user.reputation >= 5000:
             res = self.award_achievement(user.id, "rich_2")
@@ -1400,7 +1527,7 @@ class SupabaseDB:
         elif user.reputation >= 1000:
             res = self.award_achievement(user.id, "rich_1")
             if res: new_awards.append(res)
-            
+
         # 🎰 Казино
         plays = self._get_stat(user.id, "casino_plays")
         if plays >= 200:
@@ -1424,11 +1551,11 @@ class SupabaseDB:
         elif msgs >= 500:
             res = self.award_achievement(user.id, "speaker_1")
             if res: new_awards.append(res)
-            
+
         # 👣 Первый шаг
         res = self.award_achievement(user.id, "first_step")
         if res: new_awards.append(res)
-        
+
         return new_awards
 
     def _get_stat(self, db_id: int, column: str) -> int:
@@ -1532,7 +1659,7 @@ class SupabaseDB:
     def repay_debts(self, user: ChatUser, amount: int) -> dict[str, Any]:
         debts = self.get_active_debts_for_borrower(user.chat_id, user.user_id)
         if not debts or amount <= 0:
-            return {"success": False, "paid": 0, "payments": [], "message": "У вас нет активных долгов."}
+            return _RepayResult(success=False, paid=0, payments=[], message="У вас нет активных долгов.")
         total_paid = 0
         remaining = min(amount, user.reputation)
         payments: list[dict[str, Any]] = []
@@ -1547,7 +1674,7 @@ class SupabaseDB:
                 total_paid += pay
                 remaining -= pay
                 new_paid = paid_so_far + pay
-                new_status = "paid" if (new_paid + forgiven_so_far) >= full_amount else "active"
+                new_status = "repaid" if (new_paid + forgiven_so_far) >= full_amount else "active"
                 self._safe_execute(
                     self._debts().update({"paid_amount": new_paid, "status": new_status}).eq("id", debt_id)
                 )
@@ -1565,13 +1692,13 @@ class SupabaseDB:
             self.update_user(user.id, {"debt": new_debt, "reputation": new_rep})
             user.debt = new_debt
             user.reputation = new_rep
-            return {
-                "success": True,
-                "paid": total_paid,
-                "payments": payments,
-                "message": f"Успешно погашено долгов на {total_paid} 🍪!",
-            }
-        return {"success": False, "paid": 0, "payments": [], "message": "Недостаточно средств для погашения."}
+            return _RepayResult(
+                success=True,
+                paid=total_paid,
+                payments=payments,
+                message=f"Успешно погашено долгов на {total_paid} 🍪!",
+            )
+        return _RepayResult(success=False, paid=0, payments=[], message="Недостаточно средств для погашения.")
 
     def forgive_debts(self, lender: ChatUser | int, borrower_user_id: int, amount_or_chat_id: int) -> dict[str, Any]:
         if isinstance(lender, ChatUser):

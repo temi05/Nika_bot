@@ -8,7 +8,7 @@ from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKe
 
 from app.services.ai_service import AIService
 from app.services.supabase_db import SupabaseDB
-from app.bot.admin import is_admin
+from app.bot.admin import is_admin, make_captcha_gate_middleware
 from app.bot.routers.jail_helpers import (
     bail_cost,
     deny_if_jailed,
@@ -31,6 +31,7 @@ from app.utils import (
 
 def build_economy_router(db: SupabaseDB, ai: AIService) -> Router:
     router = Router(name="economy")
+    router.message.middleware(make_captcha_gate_middleware(db))
     
     @router.message(Command("me"))
     async def me_command(message: Message, command: CommandObject) -> None:
@@ -199,6 +200,8 @@ def build_economy_router(db: SupabaseDB, ai: AIService) -> Router:
             return
         sender = get_sender_data(message)
         user = db.get_or_create_user(message.chat.id, sender)
+        if await deny_if_jailed(db, message, user, "/buy"):
+            return
         ok, result = db.purchase_item(user, int(command.args.strip()))
         await message.answer(("✅ " if ok else "❌ ") + result)
 
@@ -222,6 +225,8 @@ def build_economy_router(db: SupabaseDB, ai: AIService) -> Router:
             return
 
         sender = db.get_or_create_user(message.chat.id, sender_data)
+        if await deny_if_jailed(db, message, sender, "/loan"):
+            return
         target = db.get_or_create_user(message.chat.id, target_data)
         if target.debt + amount > loan_limit(target):
             await message.answer(
@@ -275,6 +280,8 @@ def build_economy_router(db: SupabaseDB, ai: AIService) -> Router:
             return
 
         asker = db.get_or_create_user(message.chat.id, sender_data)
+        if await deny_if_jailed(db, message, asker, "/ask_loan"):
+            return
         if asker.debt + amount > loan_limit(asker):
             await message.answer(
                 f"❌ Сначала погаси часть старых долгов.\n"
@@ -318,7 +325,10 @@ def build_economy_router(db: SupabaseDB, ai: AIService) -> Router:
             amount = min(int(command.args.strip()), user.debt)
             
         if user.reputation < amount:
-            await message.answer(f"❌ У тебя недостаточно печенек для погашения долга! Нужно <b>{amount} 🍪</b>, а у тебя {user.reputation} 🍪.")
+            await message.answer(
+                f"❌ У тебя недостаточно печенек для погашения долга! Нужно <b>{amount} 🍪</b>, а у тебя {user.reputation} 🍪.",
+                parse_mode="HTML",
+            )
             return
 
         original_debt = user.debt
@@ -488,8 +498,16 @@ def build_economy_router(db: SupabaseDB, ai: AIService) -> Router:
 
         sender_data = get_sender_data(message)
         receiver_data = get_sender_data(message.reply_to_message)
-        
+        if sender_data.user_id == receiver_data.user_id:
+            await message.answer("Дарить печеньки самому себе нельзя.")
+            return
+        if receiver_data.is_bot:
+            await message.answer("Ботам печеньки переводить нельзя — лучше угости участников чата!")
+            return
+
         sender = db.get_or_create_user(message.chat.id, sender_data)
+        if await deny_if_jailed(db, message, sender, "/give"):
+            return
         receiver = db.get_or_create_user(message.chat.id, receiver_data)
         
         if sender.reputation < amount:
@@ -503,7 +521,6 @@ def build_economy_router(db: SupabaseDB, ai: AIService) -> Router:
 
         tax = amount - net_amount
 
-        # Генерируем умное сообщение с помощью AI
         gift_message = await ai.generate_cookie_gift_message(
             message.chat.id,
             sender.display_name,
@@ -512,7 +529,7 @@ def build_economy_router(db: SupabaseDB, ai: AIService) -> Router:
         )
         
         tax_info = f"\n\n<i>Комиссия за перевод (15%): {tax} 🍪 ушли в джекпот чата.</i>"
-        await message.answer(gift_message + tax_info, parse_mode="HTML")
+        await message.answer(escape_html(gift_message) + tax_info, parse_mode="HTML")
 
     @router.message(Command("steal"))
     async def steal_command(message: Message) -> None:

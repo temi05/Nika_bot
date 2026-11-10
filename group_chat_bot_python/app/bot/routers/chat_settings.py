@@ -9,29 +9,31 @@ from aiogram import Router, F
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
-from app.bot.admin import is_admin
+from app.bot.admin import is_admin, make_captcha_gate_middleware
 from app.services.supabase_db import SupabaseDB
-from app.utils import get_sender_data
+from app.utils import escape_html, get_sender_data
 
 _settings_cache: dict[int, dict[str, Any]] = {}
 
 
-def _invalidate(chat_id: int) -> None:
+def _invalidate(chat_id: int, db: SupabaseDB | None = None) -> None:
     _settings_cache.pop(chat_id, None)
+    if db is not None:
+        db._chat_settings_cache.pop(chat_id, None)
 
 
 def _get_cached(db: SupabaseDB, chat_id: int) -> dict[str, Any]:
-    if chat_id not in _settings_cache:
-        s = db.get_chat_settings(chat_id)
-        _settings_cache[chat_id] = {
-            "link_filter_enabled": s.link_filter_enabled,
-            "casino_jackpot": s.casino_jackpot,
-            "auto_drop_enabled": s.auto_drop_enabled,
-            "auto_quiz_enabled": s.auto_quiz_enabled,
-            "ai_enabled": s.ai_enabled,
-            "proactive_enabled": s.proactive_enabled,
-        }
-    return _settings_cache[chat_id]
+    s = db.get_chat_settings(chat_id)
+    data = {
+        "link_filter_enabled": s.link_filter_enabled,
+        "casino_jackpot": s.casino_jackpot,
+        "auto_drop_enabled": s.auto_drop_enabled,
+        "auto_quiz_enabled": s.auto_quiz_enabled,
+        "ai_enabled": s.ai_enabled,
+        "proactive_enabled": s.proactive_enabled,
+    }
+    _settings_cache[chat_id] = data
+    return data
 
 
 get_chat_settings_cached = _get_cached
@@ -49,7 +51,7 @@ def _status(value: bool) -> str:
 def _build_settings_text(settings: dict[str, Any], chat_title: str | None) -> str:
     title = "⚙️ <b>Настройки чата</b>"
     if chat_title:
-        title += f" «{chat_title}»"
+        title += f" «{escape_html(chat_title)}»"
     lines = [
         title,
         "",
@@ -101,6 +103,7 @@ def _build_settings_kb(settings: dict[str, Any]) -> InlineKeyboardMarkup:
 
 def build_chat_settings_router(db: SupabaseDB) -> Router:
     router = Router(name="chat_settings")
+    router.message.middleware(make_captcha_gate_middleware(db))
 
     @router.message(Command("chatsettings", "настройки", "settings"))
     async def chatsettings_command(message: Message) -> None:
@@ -131,7 +134,7 @@ def build_chat_settings_router(db: SupabaseDB) -> Router:
         if not db.update_chat_settings(chat_id, **{key: new_val}):
             await query.answer("Не получилось сохранить. Проверь SQL-миграцию chats.", show_alert=True)
             return
-        _invalidate(chat_id)
+        _invalidate(chat_id, db)
         settings = _get_cached(db, chat_id)
         try:
             await query.message.edit_text(
@@ -166,10 +169,10 @@ def build_chat_settings_router(db: SupabaseDB) -> Router:
 
     @router.callback_query(F.data == "cs_refresh")
     async def refresh_settings(query: CallbackQuery) -> None:
-        if not query.message:
+        if not await _require_admin_cb(query):
             return
         chat_id = query.message.chat.id
-        _invalidate(chat_id)
+        _invalidate(chat_id, db)
         settings = _get_cached(db, chat_id)
         try:
             await query.message.edit_text(

@@ -78,7 +78,16 @@ class BaseMemoryProvider:
     async def get_relevant_facts(self, chat_id: int, user_message: str, user_name: str, user_id: int | None = None) -> str:
         raise NotImplementedError
 
-    def get_user_facts(self, chat_id: int, user_name: str, limit: int = 10) -> list[str]:
+    def get_user_facts(
+        self,
+        chat_id: int,
+        user_or_id: str | int = "",
+        user_name_or_limit: str | int = 10,
+        *,
+        user_id: int | None = None,
+        user_name: str = "",
+        limit: int = 10,
+    ) -> list[str]:
         return []
 
     def add_chat_event(self, chat_id: int, event_text: str, entity_name: str = "") -> bool:
@@ -194,6 +203,45 @@ class DatabaseMemoryProvider(BaseMemoryProvider):
         )
         self._log("retrieve", chat_id=chat_id, tokens=tokens, has_context=bool(context))
         return context
+
+    def get_user_facts(
+        self,
+        chat_id: int,
+        user_or_id: str | int = "",
+        user_name_or_limit: str | int = 10,
+        *,
+        user_id: int | None = None,
+        user_name: str = "",
+        limit: int = 10,
+    ) -> list[str]:
+        if isinstance(user_or_id, int):
+            resolved_user_id: int | None = user_or_id
+            if isinstance(user_name_or_limit, str):
+                resolved_user_name = user_name_or_limit
+                resolved_limit = limit
+            else:
+                resolved_user_name = user_name
+                resolved_limit = int(user_name_or_limit)
+        else:
+            resolved_user_id = user_id
+            resolved_user_name = str(user_or_id or user_name).strip()
+            resolved_limit = int(user_name_or_limit) if isinstance(user_name_or_limit, int) else limit
+
+        if resolved_user_id is None and resolved_user_name:
+            found_user = self.db.search_user(chat_id, resolved_user_name)
+            if found_user:
+                resolved_user_id = found_user.user_id
+
+        facts: list[str] = []
+        if resolved_user_id is not None and resolved_user_id > 0:
+            facts.extend(self.db.get_user_facts_by_id(chat_id, resolved_user_id, limit=resolved_limit))
+            facts.extend(self._profile_facts_by_user_id(chat_id, resolved_user_id))
+        if resolved_user_name:
+            facts.extend(self.db.get_all_user_facts(chat_id, resolved_user_name, limit=resolved_limit))
+        return _clean_memory_items(list(dict.fromkeys(facts)))[:resolved_limit]
+
+    async def health(self) -> dict[str, Any]:
+        return {"healthy": True, "provider": "database"}
 
     def _profile_facts_by_user_id(self, chat_id: int, user_id: int) -> list[str]:
         user = self.db.get_user_by_platform_id(chat_id, user_id)
@@ -315,7 +363,11 @@ def build_memory_provider(settings: Settings, db: SupabaseDB, backup_service=Non
     if settings.memory_provider == "chroma" or settings.memory_backup_chat_id:
         try:
             from app.services.chroma_memory_provider import ChromaMemoryProvider
-            return ChromaMemoryProvider(settings, db, backup_service)
+
+            provider = ChromaMemoryProvider(settings, db, backup_service)
+            if provider._collection is not None:
+                return provider
+            print("[MEMORY:chroma_fallback] Chroma collection is None, falling back to DatabaseMemoryProvider")
         except Exception as e:
             print(f"[MEMORY:chroma_fallback] Failed to load ChromaMemoryProvider, falling back to DatabaseMemoryProvider: {e}")
     return DatabaseMemoryProvider(settings, db)

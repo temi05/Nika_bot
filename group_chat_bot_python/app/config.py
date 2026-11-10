@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import os
 from functools import lru_cache
 from pathlib import Path
+from typing import Any
 
 from dotenv import load_dotenv
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -28,10 +30,8 @@ class Settings(BaseSettings):
     polza_api_key: str | None = Field(default=None, validation_alias="POLZA_API_KEY")
     openai_base_url: str = Field(default="https://api.openai.com/v1", alias="OPENAI_BASE_URL")
 
-    ai_model: str = Field(default="google/gemini-3.5-flash-lite", alias="AI_MODEL")
-    ai_fallback_model: str = Field(default="gpt-4o-mini", alias="AI_FALLBACK_MODEL")
-
-
+    ai_model: str = Field(default="deepseek/deepseek-v4.1-flash", alias="AI_MODEL")
+    ai_fallback_model: str = Field(default="google/gemini-2.5-flash", alias="AI_FALLBACK_MODEL")
 
     ai_image_model: str = Field(default="openai/gpt-image-1.5", alias="AI_IMAGE_MODEL")
     ai_temperature: float = Field(default=0.7, alias="AI_TEMPERATURE")
@@ -56,8 +56,8 @@ class Settings(BaseSettings):
     memory_retrieval_limit: int = Field(default=6, alias="MEMORY_RETRIEVAL_LIMIT")
     memory_capture_all_messages: bool = Field(default=False, alias="MEMORY_CAPTURE_ALL_MESSAGES")
 
-    ai_image_price: int = Field(default=7000, alias="AI_IMAGE_PRICE")
-    ai_sign_price: int = Field(default=15000, alias="AI_SIGN_PRICE")
+    ai_image_price: int = Field(default=650, alias="AI_IMAGE_PRICE")
+    ai_sign_price: int = Field(default=450, alias="AI_SIGN_PRICE")
     human_sign_min_price: int = Field(default=3000, alias="HUMAN_SIGN_MIN_PRICE")
     tenor_api_key: str | None = Field(default=None, alias="TENOR_API_KEY")
     tenor_client_key: str = Field(default="neuronika_rp", alias="TENOR_CLIENT_KEY")
@@ -72,6 +72,40 @@ class Settings(BaseSettings):
     warn_decay_days: int = Field(default=7, alias="WARN_DECAY_DAYS")
     daily_xp_min: int = Field(default=50, alias="DAILY_XP_MIN")
     daily_xp_max: int = Field(default=150, alias="DAILY_XP_MAX")
+    superadmin_ids: list[int] | set[int] | int | str = Field(
+        default_factory=list,
+        alias="SUPERADMIN_IDS",
+    )
+
+    @field_validator("superadmin_ids", mode="before")
+    @classmethod
+    def _parse_superadmin_ids(cls, value: Any) -> list[int]:
+        if value is None or value == "":
+            return []
+        if isinstance(value, int):
+            return [value]
+        if isinstance(value, (list, tuple, set)):
+            parsed: list[int] = []
+            for item in value:
+                try:
+                    parsed.append(int(str(item).strip()))
+                except (TypeError, ValueError):
+                    continue
+            return parsed
+        if isinstance(value, str):
+            cleaned = value.strip().strip("[]()")
+            if not cleaned:
+                return []
+            parsed = []
+            for part in cleaned.split(","):
+                part = part.strip()
+                if part:
+                    try:
+                        parsed.append(int(part))
+                    except ValueError:
+                        continue
+            return parsed
+        return []
 
     @property
     def effective_ai_api_key(self) -> str | None:
@@ -91,3 +125,16 @@ class Settings(BaseSettings):
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
     return Settings()
+
+
+def get_superadmin_ids() -> set[int]:
+    try:
+        return set(get_settings().superadmin_ids)
+    except Exception:
+        raw = os.getenv("SUPERADMIN_IDS", "")
+        ids: set[int] = set()
+        for part in raw.strip().strip("[]()").split(","):
+            part = part.strip()
+            if part and part.lstrip("-").isdigit():
+                ids.add(int(part))
+        return ids

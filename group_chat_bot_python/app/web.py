@@ -6,7 +6,7 @@ import time
 from contextlib import asynccontextmanager
 
 from aiogram import Bot, Dispatcher
-from aiogram.types import Update, BotCommand, BotCommandScopeDefault, InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import Update, BotCommand, BotCommandScopeDefault, BotCommandScopeAllChatAdministrators, InlineKeyboardButton, InlineKeyboardMarkup
 from fastapi import FastAPI, HTTPException, Request
 
 from app.bot.admin import build_admin_router
@@ -58,6 +58,17 @@ def create_app() -> FastAPI:
 
     @dispatcher.message.outer_middleware()
     async def activity_middleware(handler, event, data):
+        # Блокируем команды от пользователей, не прошедших капчу в данном чате
+        if getattr(event, "from_user", None) and getattr(event, "chat", None) and not getattr(event, "new_chat_members", None):
+            pending = db.get_verification(event.from_user.id, chat_id=event.chat.id)
+            if pending and pending.chat_id == event.chat.id:
+                txt = (getattr(event, "text", None) or "").strip()
+                if txt != pending.code:
+                    try:
+                        await event.delete()
+                    except Exception:
+                        pass
+                    return None
         # Обновляем время активности при каждом сообщении
         chat_type = getattr(event.chat, "type", "")
         chat_type_value = getattr(chat_type, "value", str(chat_type))
@@ -210,14 +221,19 @@ def create_app() -> FastAPI:
         await bot.set_webhook(
             webhook_url,
             secret_token=settings.webhook_secret_token,
-            allowed_updates=["message", "message_reaction", "poll_answer", "callback_query", "chat_member"],
+            allowed_updates=["message", "edited_message", "message_reaction", "poll_answer", "callback_query", "chat_member"],
             drop_pending_updates=False,
         )
-        
-        commands = [
+
+        user_commands = [
             BotCommand(command="help", description="✨ Главное меню и помощь"),
+            BotCommand(command="summary", description="📝 Краткая сводка последних сообщений"),
+            BotCommand(command="ask", description="💡 Задать прямой вопрос Нике"),
             BotCommand(command="card", description="👤 Персональная карточка участника"),
             BotCommand(command="me", description="📊 Мой профиль и баланс"),
+            BotCommand(command="rules", description="📜 Правила чата"),
+            BotCommand(command="remind", description="⏰ Напоминание в чате"),
+            BotCommand(command="kto", description="🎲 Случайный участник чата"),
             BotCommand(command="lore", description="📜 Легенды и Лента событий чата"),
             BotCommand(command="daily", description="🍪 Ежедневный бонус"),
             BotCommand(command="top", description="🏆 Рейтинг участников"),
@@ -225,14 +241,28 @@ def create_app() -> FastAPI:
             BotCommand(command="signai", description="✍️ ИИ-сигна с Никой"),
             BotCommand(command="remember", description="🧠 Запомнить факт в память"),
             BotCommand(command="forget_me", description="🧹 Стереть факты о себе"),
-            BotCommand(command="all_facts", description="📚 Все сохранённые факты"),
-            BotCommand(command="export_facts", description="📥 Скачать базу знаний (.txt)"),
             BotCommand(command="shop", description="🛒 Магазин печенек"),
             BotCommand(command="debts", description="📒 Долги и должники"),
             BotCommand(command="jail", description="🚔 Статус тюрьмы"),
         ]
+        admin_commands = user_commands + [
+            BotCommand(command="chatsettings", description="⚙️ Панель настроек чата"),
+            BotCommand(command="warn", description="⚠️ Выдать предупреждение"),
+            BotCommand(command="unwarn", description="✅ Снять предупреждение"),
+            BotCommand(command="mute", description="🤐 Выдать мут участнику"),
+            BotCommand(command="unmute", description="🔊 Снять мут с участника"),
+            BotCommand(command="kick", description="👢 Исключить из чата"),
+            BotCommand(command="ban", description="🚫 Забанить участника"),
+            BotCommand(command="unban", description="🔓 Разбанить участника"),
+            BotCommand(command="purge", description="🧹 Очистить сообщения"),
+            BotCommand(command="setrules", description="📜 Установить правила чата"),
+            BotCommand(command="all_facts", description="📚 Все сохранённые факты"),
+            BotCommand(command="export_facts", description="📥 Скачать базу знаний (.txt)"),
+            BotCommand(command="status", description="📡 Технический статус бота"),
+        ]
         try:
-            await bot.set_my_commands(commands, scope=BotCommandScopeDefault())
+            await bot.set_my_commands(user_commands, scope=BotCommandScopeDefault())
+            await bot.set_my_commands(admin_commands, scope=BotCommandScopeAllChatAdministrators())
         except Exception as e:
             print(f"[set_my_commands error] {e}")
 
@@ -305,7 +335,7 @@ def create_app() -> FastAPI:
             payload = await request.json()
             if payload.get("message_reaction"):
                 await handle_message_reaction(payload["message_reaction"], db)
-            
+
             if payload.get("poll_answer"):
                 await handle_poll_answer(payload["poll_answer"], db)
 
@@ -382,5 +412,5 @@ def _reaction_score(reactions: list[dict]) -> int:
         return 0
     emoji = reactions[0].get("emoji")
     if emoji in {"👎", "💩", "🤮"}:
-        return -1
+        return 0
     return 1 if emoji else 0

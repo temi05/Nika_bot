@@ -7,13 +7,14 @@ import re
 import time
 from collections import defaultdict, deque
 from io import BytesIO
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 from aiogram import Bot, Router
 from aiogram.types import BufferedInputFile, ChatPermissions, Message
 from aiogram.utils.chat_action import ChatActionSender
 
-from app.config import Settings
+from app.bot.admin import is_admin
+from app.config import Settings, get_superadmin_ids
 from app.models import Sender, VerificationChallenge
 from app.services.ai_service import AIService
 from app.services.supabase_db import SupabaseDB
@@ -26,6 +27,82 @@ _PROACTIVE_RECENT_TOPICS: dict[int, deque[str]] = defaultdict(lambda: deque(maxl
 _PROACTIVE_COOLDOWN_SECONDS = 6 * 60
 _PROACTIVE_HOT_COOLDOWN_SECONDS = 3 * 60
 _PROACTIVE_MIN_MESSAGES = 3
+
+_BOT_IDENTITY_CACHE: dict[int, tuple[int, str | None]] = {}
+_FLOOD_TIMESTAMPS: dict[tuple[int, int], deque[float]] = defaultdict(lambda: deque(maxlen=12))
+_FLOOD_WINDOW_SECONDS = 5.0
+_FLOOD_MAX_MESSAGES = 6
+_PROMO_LINK_RE = re.compile(r"(?:https?://)?(?:t\.me|telegram\.me|telegram\.dog)/[a-zA-Z0-9_+@-]+", re.IGNORECASE)
+_FIRST_TOKEN_CMD_RE = re.compile(r"^/[a-zA-Zа-яА-ЯёЁ0-9_]+(?:@[a-zA-Z0-9_]+)?(?:\s|$)")
+
+
+async def _get_bot_identity(bot: Bot, settings: Settings) -> tuple[int | None, str | None]:
+    cache_key = id(bot)
+    cached = _BOT_IDENTITY_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+    try:
+        me = await bot.get_me()
+        identity = (me.id, me.username or settings.bot_username)
+        _BOT_IDENTITY_CACHE[cache_key] = identity
+        return identity
+    except Exception as exc:
+        print(f"[BOT:get_me_error] error={exc}")
+        return (getattr(bot, "id", None), settings.bot_username)
+
+
+def _extract_entity_urls(message: Message) -> list[str]:
+    urls: list[str] = []
+    for ent_list in (getattr(message, "entities", None) or [], getattr(message, "caption_entities", None) or []):
+        for ent in ent_list:
+            url = getattr(ent, "url", None)
+            if url:
+                urls.append(str(url))
+    return urls
+
+
+def _contains_promo_link(text: str, entity_urls: list[str]) -> bool:
+    lowered = (text or "").lower()
+    if "t.me/" in lowered or "telegram.me/" in lowered or "telegram.dog/" in lowered:
+        return True
+    if _PROMO_LINK_RE.search(text or ""):
+        return True
+    for url in entity_urls:
+        u_low = url.lower()
+        if "t.me/" in u_low or "telegram.me/" in u_low or "telegram.dog/" in u_low:
+            return True
+    return False
+
+
+def _looks_like_newcomer_scam(text: str, user_level: int) -> bool:
+    if user_level > 2 or not text:
+        return False
+    lowered = text.casefold()
+    scam_markers = (
+        "заработок от",
+        "удаленная работа",
+        "удалённая работа",
+        "пассивный доход",
+        "пиши в лс",
+        "пишите в лс",
+        "крипто арбитраж",
+        "арбитраж крипты",
+        "сигналы крипт",
+        "раскрутка счета",
+        "раскрутка счёта",
+        "usdt",
+    )
+    matches = sum(1 for m in scam_markers if m in lowered)
+    return matches >= 2
+
+
+def _is_flood_violation(chat_id: int, user_id: int) -> bool:
+    now = time.monotonic()
+    q = _FLOOD_TIMESTAMPS[(chat_id, user_id)]
+    while q and now - q[0] > _FLOOD_WINDOW_SECONDS:
+        q.popleft()
+    q.append(now)
+    return len(q) > _FLOOD_MAX_MESSAGES
 
 
 def _track_proactive_activity(chat_id: int, user_id: int, text: str) -> None:
@@ -183,13 +260,14 @@ def _looks_like_memory_signal(text: str) -> bool:
 
 def build_messages_router(bot: Bot, settings: Settings, db: SupabaseDB, ai: AIService) -> Router:
     router = Router(name="messages")
+    _birthday_checked_date: dict[int, str] = {}
 
     async def expire_verification(challenge: VerificationChallenge) -> None:
         await asyncio.sleep(challenge.timeout_seconds)
-        still_pending = db.get_verification(challenge.user_id)
+        still_pending = db.get_verification(challenge.user_id, chat_id=challenge.chat_id)
         if not still_pending or still_pending.code != challenge.code:
             return
-        db.pop_verification(challenge.user_id)
+        db.pop_verification(challenge.user_id, chat_id=challenge.chat_id)
         try:
             await bot.ban_chat_member(
                 challenge.chat_id,
@@ -208,13 +286,13 @@ def build_messages_router(bot: Bot, settings: Settings, db: SupabaseDB, ai: AISe
         sender = get_sender_data(message)
 
         if message.new_chat_members:
-            me = await bot.get_me()
+            bot_id, _ = await _get_bot_identity(bot, settings)
             inviter = get_sender_data(message)
             inviter_is_admin = await _user_is_admin(bot, message.chat.id, inviter.user_id)
 
             for member in message.new_chat_members:
                 if member.is_bot:
-                    if member.id != me.id:
+                    if member.id != bot_id:
                         if inviter_is_admin:
                             await message.answer(
                                 f"🤖 Администратор <b>{escape_html(inviter.display_name)}</b> добавил бота <b>{escape_html(member.full_name or 'Bot')}</b>.",
@@ -237,7 +315,6 @@ def build_messages_router(bot: Bot, settings: Settings, db: SupabaseDB, ai: AISe
                         parse_mode="HTML",
                     )
                     continue
-
 
                 try:
                     await bot.restrict_chat_member(
@@ -284,10 +361,10 @@ def build_messages_router(bot: Bot, settings: Settings, db: SupabaseDB, ai: AISe
         if sender.is_bot:
             return
 
-        pending = db.get_verification(sender.user_id)
+        pending = db.get_verification(sender.user_id, chat_id=message.chat.id)
         if pending:
             if (message.text or "").strip() == pending.code and pending.chat_id == message.chat.id:
-                db.pop_verification(sender.user_id)
+                db.pop_verification(sender.user_id, chat_id=message.chat.id)
                 try:
                     await bot.restrict_chat_member(
                         message.chat.id,
@@ -350,12 +427,77 @@ def build_messages_router(bot: Bot, settings: Settings, db: SupabaseDB, ai: AISe
             reply_to_message_id=message.reply_to_message.message_id if message.reply_to_message else None,
         )
 
-        if text.startswith("/"):
-            return
-
         user = db.get_or_create_user(message.chat.id, sender)
-        db.increment_stat(user.id, "total_messages") # Увеличиваем счетчик сообщений
-        
+        sender_is_admin = await _message_sender_is_admin(bot, message, sender)
+
+        if message.chat.type != "private" and not sender_is_admin:
+            if _is_flood_violation(message.chat.id, sender.user_id):
+                try:
+                    await message.delete()
+                except Exception:
+                    pass
+                try:
+                    await bot.restrict_chat_member(
+                        message.chat.id,
+                        sender.user_id,
+                        permissions=ChatPermissions(can_send_messages=False),
+                        until_date=datetime.now(timezone.utc) + timedelta(minutes=5),
+                    )
+                except Exception:
+                    pass
+                await message.answer(
+                    f"🛑 <b>{escape_html(sender.display_name)}</b>, не флуди! Выдан авто-мут на 5 минут.",
+                    parse_mode="HTML",
+                )
+                return
+
+        entity_urls = _extract_entity_urls(message)
+        if text or entity_urls:
+            settings_row = db.get_chat_settings(message.chat.id)
+            bad_words = db.get_bad_words(message.chat.id)
+            lowered = text.lower()
+            found_bad_word = any(word and _word_in_text(lowered, word) for word in bad_words)
+            promo_link = _contains_promo_link(text, entity_urls)
+            scam_detected = _looks_like_newcomer_scam(text, user.level)
+
+            bad_word_violation = found_bad_word and not sender_is_admin
+            link_violation = (promo_link or scam_detected) and settings_row.link_filter_enabled and not sender_is_admin
+            if bad_word_violation or link_violation:
+                try:
+                    await message.delete()
+                except Exception:
+                    pass
+                updated = db.apply_warn(user)
+                warns_now = updated.warns if updated else user.warns + 1
+                reason = "Ссылки и спам запрещены." if link_violation else "Нарушение правил чата."
+                if warns_now >= settings.warn_limit:
+                    db.clear_warns(updated or user)
+                    try:
+                        await bot.restrict_chat_member(
+                            message.chat.id,
+                            sender.user_id,
+                            permissions=ChatPermissions(can_send_messages=False),
+                            until_date=datetime.now(timezone.utc) + timedelta(hours=1),
+                        )
+                    except Exception:
+                        pass
+                    await message.answer(
+                        f"🔇 <b>{escape_html(sender.display_name)}</b>: {reason} "
+                        f"Предупреждение {warns_now}/{settings.warn_limit} — выдан авто-мут на 1 час.",
+                        parse_mode="HTML",
+                    )
+                else:
+                    await message.answer(
+                        f"{sender.display_name}, {reason} Предупреждение {warns_now}/{settings.warn_limit}."
+                    )
+                return
+
+        if text.startswith("/"):
+            if _FIRST_TOKEN_CMD_RE.match(text):
+                return
+
+        db.increment_stat(user.id, "total_messages")  # Увеличиваем счетчик сообщений
+
         should_grant_xp = _should_grant_xp(message, sender)
         if should_grant_xp:
             updated_user, level_up = db.apply_message_xp(user)
@@ -365,60 +507,29 @@ def build_messages_router(bot: Bot, settings: Settings, db: SupabaseDB, ai: AISe
                     parse_mode="HTML",
                 )
 
-        if text:
-            settings_row = db.get_chat_settings(message.chat.id)
-            bad_words = db.get_bad_words(message.chat.id)
-            lowered = text.lower()
-            found_bad_word = any(word and _word_in_text(lowered, word) for word in bad_words)
-            promo_link = "t.me/" in lowered or "telegram.me/" in lowered
-            directed_at_nika = _message_directed_at_bot_for_moderation(
-                message,
-                text,
-                settings.bot_name,
-                settings.bot_username,
-            )
-
-            sender_is_admin = await _message_sender_is_admin(bot, message, sender)
-            bad_word_violation = found_bad_word and not directed_at_nika
-            link_violation = promo_link and settings_row.link_filter_enabled and not sender_is_admin
-            if bad_word_violation or link_violation:
-                try:
-                    await message.delete()
-                except Exception:
-                    pass
-                updated = db.apply_warn(user)
-                warns_now = updated.warns if updated else user.warns + 1
-                reason = "Ссылки t.me запрещены." if link_violation else "Нарушение правил чата."
-                await message.answer(f"{sender.display_name}, {reason} Предупреждение {warns_now}/{settings.warn_limit}.")
-                return
-
-            if message.reply_to_message:
-                change = _reputation_delta(lowered)
-                if change != 0:
-                    reply_sender = get_sender_data(message.reply_to_message)
-                    if reply_sender.user_id != sender.user_id and db.can_adjust_reputation(sender.user_id, reply_sender.user_id):
-                        receiver = db.get_or_create_user(message.chat.id, reply_sender)
-                        db.update_user(receiver.id, {"reputation": receiver.reputation + change})
-                        total = receiver.reputation + change
-                        if change > 0:
-                            await message.answer(
-                                f"🌟 <b>{escape_html(sender.display_name)}</b> передал печеньку "
-                                f"<b>{escape_html(reply_sender.display_name)}</b>.\n"
-                                f"└ Теперь у него <code>{total} 🍪</code>",
-                                parse_mode="HTML",
-                            )
-                        else:
-                            await message.answer(
-                                f"📉 <b>{escape_html(sender.display_name)}</b> отнял печеньку у "
-                                f"<b>{escape_html(reply_sender.display_name)}</b>.\n"
-                                f"└ Осталось <code>{total} 🍪</code>",
-                                parse_mode="HTML",
-                            )
+        if text and message.reply_to_message:
+            change = _reputation_delta(text)
+            if change > 0:
+                reply_sender = get_sender_data(message.reply_to_message)
+                if reply_sender.user_id != sender.user_id and db.can_adjust_reputation(sender.user_id, reply_sender.user_id):
+                    receiver = db.get_or_create_user(message.chat.id, reply_sender)
+                    db.update_user(receiver.id, {"reputation": receiver.reputation + change})
+                    total = receiver.reputation + change
+                    await message.answer(
+                        f"🌟 <b>{escape_html(sender.display_name)}</b> передал печеньку "
+                        f"<b>{escape_html(reply_sender.display_name)}</b>.\n"
+                        f"└ Теперь у него <code>{total} 🍪</code>",
+                        parse_mode="HTML",
+                    )
 
         today_date = datetime.now()
         today_year = today_date.year
+        today_key = today_date.strftime("%Y-%m-%d")
 
-        birthdays = db.get_birthdays_today(message.chat.id)
+        birthdays = []
+        if _birthday_checked_date.get(message.chat.id) != today_key:
+            _birthday_checked_date[message.chat.id] = today_key
+            birthdays = db.get_birthdays_today(message.chat.id)
         if birthdays:
             uncongratulated = []
             for birthday_user in birthdays:
@@ -442,37 +553,33 @@ def build_messages_router(bot: Bot, settings: Settings, db: SupabaseDB, ai: AISe
                     "Водолей ♒": "Свободы творчества, редких наград и легендарного везения!",
                     "Рыбы ♓": "Магии, вдохновения и самых крутых артов!"
                 }
-                
+
                 lines = ["🎂 <b>Праздничный день в чате!</b>", ""]
                 for birthday_user in uncongratulated:
-                    # Разные вариативные подарки от Ники: 100..300 печенек
                     gift_cookies = random.randint(100, 300)
                     jackpot_note = ""
-                    if random.random() < 0.10: # 10% шанс на Супер-Джекпот именинника
+                    if random.random() < 0.10:
                         gift_cookies = 500
                         jackpot_note = " 🌟 <b>СУПЕР-ДЖЕКПОТ ИМЕНИННИКА!</b>"
 
                     db.update_user(birthday_user.id, {"reputation": birthday_user.reputation + gift_cookies})
-                    
-                    # Отношения с Никой вырастают
+
                     ai.persona.observe_user_message(message.chat.id, birthday_user.user_id, "спасибо тебе люблю", reply_to_bot=False, mentioned=True)
-                    
-                    # Фиксация события
+
                     if hasattr(ai.memory, "add_chat_event"):
                         ai.memory.add_chat_event(
                             message.chat.id,
                             f"День Рождения {birthday_user.display_name}! Ника подарила {gift_cookies} печенек.",
                             birthday_user.display_name
                         )
-                    
-                    # Индивидуальное пожелание по Знаку Зодиака
+
                     personal_wish = "Желаем крутого вайба, море печенек и побед во всём!"
                     b_parts = parse_birthday_parts(birthday_user.birthday)
                     if b_parts:
                         sign = get_zodiac_sign(b_parts[0], b_parts[1])
                         if sign in zodiac_wishes:
                             personal_wish = zodiac_wishes[sign]
-                        
+
                     lines.append(
                         f"🌟 Поздравляем <b>{escape_html(birthday_user.display_name)}</b>"
                         f"{birthday_age_text(birthday_user.birthday)}! 🥳\n"
@@ -481,16 +588,8 @@ def build_messages_router(bot: Bot, settings: Settings, db: SupabaseDB, ai: AISe
                     )
                 lines.append("🎉 <i>Желаем незабываемого праздника и отличного настроения!</i>")
                 await message.answer("\n".join(lines), parse_mode="HTML")
-        # Обновляем время последнего сообщения теперь через middleware в web.py
 
-        bot_username = settings.bot_username
-        bot_id = None
-        try:
-            me = await bot.get_me()
-            bot_id = me.id
-            bot_username = me.username or bot_username
-        except Exception as exc:
-            print(f"[BOT:get_me_error] chat_id={message.chat.id} error={exc}")
+        bot_id, bot_username = await _get_bot_identity(bot, settings)
 
         # Реагируем только на полное имя бота и @username
         is_mentioned = _message_mentions_bot(text, settings.bot_name, bot_username)
@@ -503,11 +602,10 @@ def build_messages_router(bot: Bot, settings: Settings, db: SupabaseDB, ai: AISe
                 reply_username = (message.reply_to_message.from_user.username or "").lower()
                 is_reply_to_bot = reply_username == bot_username.lower()
 
-        # ЛОГИ ДЛЯ ОТЛАДКИ (появятся в Render)
         print(f"🔍 [DEBUG] Msg: '{text[:50]}', mentioned={is_mentioned}, reply_to_bot={is_reply_to_bot}")
-        
+
         if ai_input_text:
-            caller_is_admin = await _message_sender_is_admin(bot, message, sender)
+            caller_is_admin = sender_is_admin
             is_private_chat = message.chat.type == "private"
             chat_settings = db.get_chat_settings(message.chat.id)
             if not is_private_chat and chat_settings.ai_enabled and chat_settings.proactive_enabled:
@@ -515,7 +613,7 @@ def build_messages_router(bot: Bot, settings: Settings, db: SupabaseDB, ai: AISe
             should_reply = is_private_chat or is_reply_to_bot or is_mentioned
             if not is_private_chat and not chat_settings.ai_enabled:
                 should_reply = False
-            
+
             print(f"🔍 [DEBUG] should_reply={should_reply}, is_private={is_private_chat}, ai_enabled={chat_settings.ai_enabled}")
             memory_signal = _looks_like_memory_signal(text)
             should_capture_memory = (
@@ -565,7 +663,7 @@ def build_messages_router(bot: Bot, settings: Settings, db: SupabaseDB, ai: AISe
                         print(f"❌ [AI] Crash in chat {message.chat.id}: {e}")
                         reply = "Ой, что-то пошло не так в моих схемах. Давай попробуем позже."
                 print(f"🤖 [AI] Generation finished. Reply length: {len(reply) if reply else 0}")
-            
+
             if should_reply and reply is None:
                 print("⚠️ [AI] Generation failed (None), using fallback.")
                 reply = "Я что-то задумалась и потеряла нить разговора... Можешь повторить?"
@@ -611,6 +709,61 @@ def build_messages_router(bot: Bot, settings: Settings, db: SupabaseDB, ai: AISe
                         bot_id=bot_id,
                         bot_username=bot_username,
                     )
+                )
+
+    @router.edited_message()
+    async def handle_edited_message(message: Message) -> None:
+        sender = get_sender_data(message)
+        if sender.is_bot:
+            return
+        pending = db.get_verification(sender.user_id, chat_id=message.chat.id)
+        if pending and pending.chat_id == message.chat.id:
+            try:
+                await message.delete()
+            except Exception:
+                pass
+            return
+
+        raw_text = (message.text or message.caption or "").strip()
+        entity_urls = _extract_entity_urls(message)
+        if not raw_text and not entity_urls:
+            return
+        if await _message_sender_is_admin(bot, message, sender):
+            return
+
+        settings_row = db.get_chat_settings(message.chat.id)
+        bad_words = db.get_bad_words(message.chat.id)
+        lowered = raw_text.lower()
+        found_bad_word = any(word and _word_in_text(lowered, word) for word in bad_words)
+        promo_link = _contains_promo_link(raw_text, entity_urls) and settings_row.link_filter_enabled
+        if found_bad_word or promo_link:
+            try:
+                await message.delete()
+            except Exception:
+                pass
+            user = db.get_or_create_user(message.chat.id, sender)
+            updated = db.apply_warn(user)
+            warns_now = updated.warns if updated else user.warns + 1
+            reason = "Ссылки и спам запрещены." if promo_link else "Нарушение правил чата."
+            if warns_now >= settings.warn_limit:
+                db.clear_warns(updated or user)
+                try:
+                    await bot.restrict_chat_member(
+                        message.chat.id,
+                        sender.user_id,
+                        permissions=ChatPermissions(can_send_messages=False),
+                        until_date=datetime.now(timezone.utc) + timedelta(hours=1),
+                    )
+                except Exception:
+                    pass
+                await message.answer(
+                    f"🔇 <b>{escape_html(sender.display_name)}</b>: {reason} "
+                    f"Предупреждение {warns_now}/{settings.warn_limit} — выдан авто-мут на 1 час.",
+                    parse_mode="HTML",
+                )
+            else:
+                await message.answer(
+                    f"{sender.display_name}, {reason} Предупреждение {warns_now}/{settings.warn_limit}."
                 )
 
     return router
@@ -775,50 +928,31 @@ def _reputation_delta(text: str) -> int:
     if not normalized:
         return 0
 
-    # Если есть отрицание перед ключевым словом, отменяем действие
-    negations = {"не", "ни разу", "вовсе не", "совсем не", "никак не"}
-    
     positive_exact = {"+", "+1", "++", "👍", "🤝"}
-    negative_exact = {"-", "-1", "👎"}
-    
+    if normalized in positive_exact:
+        return 1
+
+    words = [w.strip(".,!?:;()[]{}\"'") for w in normalized.split() if w.strip(".,!?:;()[]{}\"'")]
+    if not words or len(words) > 6 or len(normalized) > 45:
+        return 0
+
+    negations = {"не", "нет", "ни"}
     positive_markers = {
-        "спасибо", "спс", "красава", "хорош", "база", "топ", 
-        "сильно", "годно", "респект", "красавчик", "лучший", "умница"
+        "спасибо", "спс", "благодарю", "сяб", "пасиб",
+        "красава", "хорош", "база", "топ", "годно",
+        "респект", "красавчик", "лучший", "умница", "выручил", "помог",
     }
-    negative_markers = {"фу", "кринж", "минус", "плохо", "отстой", "бесит"}
 
-    # Проверка точных совпадений (символы)
-    if normalized in positive_exact: return 1
-    if normalized in negative_exact: return -1
-
-    # Проверка слов с учетом отрицаний
-    words = normalized.split()
-    for i, word in enumerate(words):
-        clean_word = word.strip(".,!?")
-        
-        # Проверяем, нет ли перед словом отрицания
-        has_negation = i > 0 and words[i-1] in negations
-        
+    for i, clean_word in enumerate(words):
+        has_negation = i > 0 and words[i - 1] in negations
         if clean_word in positive_markers:
             return 0 if has_negation else 1
-        if clean_word in negative_markers:
-            return 0 if has_negation else -1
-            
+
     return 0
 
 
 async def _user_is_admin(bot: Bot, chat_id: int, user_id: int) -> bool:
-    if not user_id or user_id <= 0:
-        return False
-    # Superadmin hardcode
-    if user_id == 861713427:
-        return True
-        
-    try:
-        member = await bot.get_chat_member(chat_id, user_id)
-    except Exception:
-        return False
-    return member.status in {"creator", "administrator"}
+    return await is_admin(bot, chat_id, user_id)
 
 
 async def _message_sender_is_admin(bot: Bot, message: Message, sender) -> bool:
@@ -847,8 +981,6 @@ def _should_grant_xp(message: Message, sender) -> bool:
     if sender.is_bot:
         return False
     if message.sender_chat:
-        # Сообщения "от имени канала/анон-админа" не привязываем к XP,
-        # чтобы опыт не улетал в не-человеческие профили.
         return False
 
     has_meaningful_content = bool(
@@ -881,20 +1013,21 @@ def _build_message_log_text(message: Message, raw_text: str) -> str:
 
 
 def _build_ai_input_text(message: Message, raw_text: str) -> str:
-    text = (raw_text or "").strip()
-    media = _describe_message_media(message)
+    text = escape_html((raw_text or "").strip())
+    media = escape_html(_describe_message_media(message))
     sender = get_sender_data(message)
+    safe_author = escape_html(sender.display_name).replace('"', "&quot;")
 
     is_forwarded = getattr(message, "forward_date", None) is not None
     forward_note = ' forwarded="true"' if is_forwarded else ""
 
     if media:
-        return f'<msg id="{message.message_id}" author="{sender.display_name}" user_id="{sender.user_id}" type="{media}"{forward_note}>\n{text}\n</msg>'
+        return f'<msg id="{message.message_id}" author="{safe_author}" user_id="{sender.user_id}" type="{media}"{forward_note}>\n{text}\n</msg>'
 
     if not text:
         return ""
 
-    return f'<msg id="{message.message_id}" author="{sender.display_name}" user_id="{sender.user_id}" type="text"{forward_note}>\n{text}\n</msg>'
+    return f'<msg id="{message.message_id}" author="{safe_author}" user_id="{sender.user_id}" type="text"{forward_note}>\n{text}\n</msg>'
 
 
 def _build_reply_context(reply: Message | None) -> str:
@@ -902,11 +1035,12 @@ def _build_reply_context(reply: Message | None) -> str:
         return ""
 
     reply_sender = get_sender_data(reply)
-    reply_text = (reply.text or reply.caption or "").strip()
-    reply_media = _describe_message_media(reply)
+    safe_author = escape_html(reply_sender.display_name).replace('"', "&quot;")
+    reply_text = escape_html((reply.text or reply.caption or "").strip()[:700])
+    reply_media = escape_html(_describe_message_media(reply))
     media_type = reply_media if reply_media else "text"
 
-    return f'<reply_target id="{reply.message_id}" author="{reply_sender.display_name}" user_id="{reply_sender.user_id}" type="{media_type}">\n{reply_text[:700]}\n</reply_target>'
+    return f'<reply_target id="{reply.message_id}" author="{safe_author}" user_id="{reply_sender.user_id}" type="{media_type}">\n{reply_text}\n</reply_target>'
 
 
 def _describe_message_media(message: Message) -> str:

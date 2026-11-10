@@ -16,12 +16,14 @@ from aiogram import Bot
 from aiogram.types import ChatPermissions
 from openai import AsyncOpenAI
 
+from app.bot.admin import is_admin
 from app.config import Settings
 from app.models import ChatUser, Sender
 from app.services.memory_provider import BaseMemoryProvider
 from app.services.persona_service import PersonaService
 from app.services.prompt_builders import build_character_system_prompt
 from app.services.supabase_db import SupabaseDB
+from app.utils import escape_html
 
 def retry_async(max_attempts=3, delay=1, backoff=2):
     def decorator(func):
@@ -83,6 +85,7 @@ class AIService:
         self._sticker_cache: list[Any] = []
         self._current_source_message_id: dict[int, int | None] = {}
         self._remember_triggered_in_chat: dict[int, bool] = defaultdict(bool)
+        self._unflushed_counts: dict[int, int] = {}
 
     def _log(self, event: str, **kwargs: Any) -> None:
         details = " ".join(f"{key}={value!r}" for key, value in kwargs.items())
@@ -91,6 +94,7 @@ class AIService:
     def remember_message(self, chat_id: int, sender: Sender, text: str) -> None:
         rendered = self._render_chat_buffer_line(sender, text)
         self.chat_buffers[chat_id].append(rendered)
+        self._unflushed_counts[chat_id] = self._unflushed_counts.get(chat_id, 0) + 1
         self._log("remember", chat_id=chat_id, sender=sender.display_name, text=rendered[:160])
 
     def _render_chat_buffer_line(self, sender: Sender, text: str) -> str:
@@ -175,8 +179,12 @@ class AIService:
         return random.choice(messages)
 
     async def flush_passive_memory(self, chat_id: int, *, force: bool = False) -> None:
-        if len(self.chat_buffers[chat_id]) < (1 if force else 5):
+        threshold = 1 if force else 5
+        buffer_snapshot = list(self.chat_buffers[chat_id])
+        unflushed = self._unflushed_counts.get(chat_id, len(buffer_snapshot))
+        if len(buffer_snapshot) < threshold or unflushed < threshold:
             return
+        self._unflushed_counts[chat_id] = 0
 
         transcript = "\n".join(self.chat_buffers[chat_id])
         participants_list: list[str] = []
@@ -193,7 +201,9 @@ class AIService:
         participants = list(dict.fromkeys(participants_list))
         self._log("flush_memory_start", chat_id=chat_id, participants=participants, lines=len(self.chat_buffers[chat_id]))
         await self.memory.save_transcript(chat_id, transcript, participants)
+        recent_tail = list(self.chat_buffers[chat_id])[-10:]
         self.chat_buffers[chat_id].clear()
+        self.chat_buffers[chat_id].extend(recent_tail)
         self._log("flush_memory_done", chat_id=chat_id)
 
     async def generate_image(self, prompt: str, reference_images: list[tuple[bytes, str]] | None = None) -> bytes | None:
@@ -466,13 +476,12 @@ class AIService:
             mentioned=mentioned,
             is_private_chat=is_private_chat,
         )
-        # Combine the whole visible context into one user message to avoid consecutive
-        # user roles, which causes BAD_REQUEST on some LLM providers.
         messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
         messages.append({"role": "user", "content": self._build_current_user_content(context_text, images)})
 
         try:
             use_tools = not images
+            any_tool_called = False
 
             for round_index in range(3):
                 request_kwargs: dict[str, Any] = {
@@ -500,6 +509,7 @@ class AIService:
                 )
 
                 if tool_calls:
+                    any_tool_called = True
                     if not self._tool_calls_have_valid_json(tool_calls):
                         return self._fallback_for_unclear_input(plain_user_text)
 
@@ -541,12 +551,10 @@ class AIService:
 
                 raw_text = self._coerce_model_content(message.content)
                 
-                # Если ИИ вызвал инструмент и не выдал текста - это нормально, не считаем это ошибкой
-                if not raw_text and tool_calls:
+                if not raw_text and (tool_calls or any_tool_called):
                     self._log("only_tool_reply", chat_id=chat_id, tools=len(tool_calls))
-                    # Помечаем, что мы ответили (чтобы кулдаун работал)
                     self._mark_group_reply(chat_id, is_private_chat=is_private_chat)
-                    return "" # Возвращаем пустую строку, обработчик в messages.py должен это понять как "успех без текста"
+                    return ""
 
                 content = self._finalize_reply(raw_text, user_text=user_text)
                 
@@ -680,13 +688,24 @@ class AIService:
     async def _maybe_handle_direct_action(self, chat_id: int, sender: Sender, user_text: str) -> str | None:
         memory_text = self._extract_memory_request(user_text)
         if memory_text:
+            source_msg_id = self._current_source_message_id.get(chat_id)
             user = self.db.get_or_create_user(chat_id, sender)
-            self.db.append_ai_note(user, memory_text)
-            fact_entry = f"{sender.display_name}: {memory_text}"
+            self.db.append_ai_note(user, memory_text, source_message_id=source_msg_id)
+            fact_entry = f"{sender.display_name}: {memory_text.strip()[:300]}"
             if hasattr(self.memory, "store_single_fact"):
-                self.memory.store_single_fact(chat_id, fact_entry, sender.display_name)
+                self.memory.store_single_fact(
+                    chat_id,
+                    fact_entry,
+                    sender.display_name,
+                    source_message_id=source_msg_id,
+                    user_id=sender.user_id,
+                )
             if hasattr(self.memory, "backup_service") and self.memory.backup_service:
-                asyncio.create_task(self.memory.backup_service.send_fact_card(chat_id, sender.display_name, [fact_entry]))
+                collection = getattr(self.memory, "_collection", None)
+                total_facts = collection.count() if collection is not None else 1
+                asyncio.create_task(
+                    self.memory.backup_service.send_fact_card(fact_entry, sender.display_name, total_facts)
+                )
             self._log("direct_memory_saved", chat_id=chat_id, sender=sender.display_name, text=memory_text[:160])
             return f"Окей, отложила в памяти: {memory_text}"
 
@@ -1018,7 +1037,7 @@ class AIService:
         if tool_name == "remember_user_fact":
             args["action"] = "add_note"
             args["content"] = args.pop("fact", "")
-            return self._tool_manage_user_profile(chat_id, sender, args)
+            return self._tool_manage_user_profile(chat_id, sender, args, caller_is_admin=caller_is_admin)
         if tool_name == "send_sticker":
             return await self._tool_send_sticker(chat_id, args)
         if tool_name == "flip_coin_decide":
@@ -1026,9 +1045,9 @@ class AIService:
         if tool_name == "user_lookup":
             return self._tool_user_lookup(chat_id, sender, args)
         if tool_name == "manage_user_profile":
-            return self._tool_manage_user_profile(chat_id, sender, args)
+            return self._tool_manage_user_profile(chat_id, sender, args, caller_is_admin=caller_is_admin)
         if tool_name == "moderate_user":
-            return await self._tool_moderate_user(chat_id, caller_is_admin, args)
+            return await self._tool_moderate_user(chat_id, caller_is_admin, args, sender=sender)
         if tool_name == "create_poll":
             return await self._tool_create_poll(chat_id, args)
         if tool_name == "transfer_reputation":
@@ -1136,7 +1155,6 @@ class AIService:
         emoji_hint = str(args.get("emoji_hint") or "").strip()
         
         try:
-            # Обновляем кэш стикеров, если он пуст
             if not self._sticker_cache:
                 sticker_set = await self.bot.get_sticker_set(self.sticker_pack_name)
                 self._sticker_cache = sticker_set.stickers
@@ -1144,16 +1162,13 @@ class AIService:
             if not self._sticker_cache:
                 return "В стикерпаке нет стикеров."
 
-            # Ищем стикер по эмодзи
             target_sticker = None
             if emoji_hint:
-                # Пытаемся найти точное совпадение или вхождение эмодзи
                 for s in self._sticker_cache:
                     if emoji_hint in (s.emoji or ""):
                         target_sticker = s
                         break
             
-            # Если не нашли по эмодзи, берем случайный
             if not target_sticker:
                 target_sticker = random.choice(self._sticker_cache)
 
@@ -1285,7 +1300,14 @@ class AIService:
             lines.extend(f"- {fact}" for fact in facts[:4])
         return "\n".join(lines)
 
-    def _tool_manage_user_profile(self, chat_id: int, sender: Sender, args: dict[str, Any]) -> str:
+    def _tool_manage_user_profile(
+        self,
+        chat_id: int,
+        sender: Sender,
+        args: dict[str, Any],
+        *,
+        caller_is_admin: bool = False,
+    ) -> str:
         action = str(args.get("action") or "").lower()
         target_name = str(args.get("target_name") or "").strip()
         explicit_uid = args.get("target_user_id")
@@ -1305,26 +1327,47 @@ class AIService:
             return f"Не нашла пользователя '{target_name}' для записи."
 
         if action == "update_bio":
+            if target.user_id != sender.user_id and not caller_is_admin:
+                return "Отклонено: менять био (update_bio) можно только себе. Для заметок о других используй add_note."
             self.db.set_bio(target, content)
             return f"Био для {target.display_name} успешно обновлено."
         if action == "add_note":
             source_msg_id = self._current_source_message_id.get(chat_id)
             self.db.append_ai_note(target, content, source_message_id=source_msg_id)
-            fact_entry = f"{target.display_name}: {content}"
+            fact_entry = f"{target.display_name}: {content.strip()[:300]}"
             if hasattr(self.memory, "store_single_fact"):
-                self.memory.store_single_fact(chat_id, fact_entry, target.display_name)
+                self.memory.store_single_fact(
+                    chat_id,
+                    fact_entry,
+                    target.display_name,
+                    source_message_id=source_msg_id,
+                    user_id=target.user_id,
+                )
             if hasattr(self.memory, "backup_service") and self.memory.backup_service:
-                asyncio.create_task(self.memory.backup_service.send_fact_card(chat_id, target.display_name, [fact_entry]))
+                collection = getattr(self.memory, "_collection", None)
+                total_facts = collection.count() if collection is not None else 1
+                asyncio.create_task(
+                    self.memory.backup_service.send_fact_card(fact_entry, target.display_name, total_facts)
+                )
             self._remember_triggered_in_chat[chat_id] = True
             return f"Факт о {target.display_name} сохранен в базу."
         return "Неизвестное действие с профилем."
 
-    async def _tool_moderate_user(self, chat_id: int, caller_is_admin: bool, args: dict[str, Any]) -> str:
+    async def _tool_moderate_user(
+        self,
+        chat_id: int,
+        caller_is_admin: bool,
+        args: dict[str, Any],
+        sender: Sender | None = None,
+    ) -> str:
         action = str(args.get("action") or "").lower()
         target_name = str(args.get("target_name") or "").strip()
         explicit_uid = args.get("target_user_id")
         reason = str(args.get("reason") or "").strip()
         value = int(args.get("value") or 0)
+
+        if not caller_is_admin:
+            return "Отклонено: выдавать награды, варн или мут через ИИ может только администратор чата."
 
         if not target_name and not explicit_uid:
             return "Не указано, к кому применять действие."
@@ -1341,9 +1384,16 @@ class AIService:
             return f"Не вижу пользователя '{target_name}'."
 
         if action == "reward":
+            if sender is not None and target.user_id == sender.user_id:
+                return "Отклонено: нельзя выдать награду самому себе по собственной просьбе."
+            if not self.db.can_adjust_reputation(0, target.user_id, cooldown_seconds=180):
+                return "Награда недавно уже выдавалась этому участнику, подожди немного."
             amount = min(max(value or 1, 1), 3)
             self.db.update_user(target.id, {"reputation": target.reputation + amount})
             return f"Выдано {amount} печенек для {target.display_name}."
+
+        if action in {"warn", "mute"} and await is_admin(self.bot, chat_id, target.user_id):
+            return f"Отклонено: нельзя применить {action} к администратору чата ({target.display_name})."
 
         if action == "warn":
             updated = self.db.apply_warn(target)
@@ -1418,7 +1468,6 @@ class AIService:
                 is_anonymous=is_anonymous,
                 allows_multiple_answers=allows_multiple_answers,
             )
-            # Регистрируем опрос, чтобы отслеживать голоса
             if sent_msg.poll:
                 self.db.register_poll(
                     poll_id=sent_msg.poll.id,
@@ -1437,27 +1486,40 @@ class AIService:
 
         target_name = str(args.get("target_name") or "").strip()
         amount = int(args.get("amount") or 0)
-        
+
         if amount <= 0:
             return "Ошибка: количество печенек должно быть больше нуля."
-            
+        if amount > 200:
+            return "Отклонено: через голосовой/текстовый перевод ИИ можно отправить максимум 200 🍪 за раз (для крупных сумм используй /give)."
+
+        sender_db = self.db.get_or_create_user(chat_id, sender)
+        from app.bot.routers.jail_helpers import jail_remaining
+        if jail_remaining(self.db, sender_db):
+            return "Отклонено: ты находишься в тюрьме и не можешь переводить печеньки."
+
+        if not hasattr(self, "_daily_ai_transfers"):
+            self._daily_ai_transfers: dict[tuple[int, int, str], int] = {}
+        day_key = (chat_id, sender.user_id, datetime.utcnow().strftime("%Y-%m-%d"))
+        used_today = self._daily_ai_transfers.get(day_key, 0)
+        if used_today + amount > 500:
+            return f"Отклонено: дневной лимит переводов через ИИ (500 🍪) исчерпан. Используй команду /give."
+
         target = self._resolve_target_user(chat_id, sender, target_name)
         if not target:
             return f"Не нашла пользователя '{target_name}'."
-            
+
         if target.user_id == sender.user_id:
             return "Нельзя переводить печеньки самому себе."
-            
-        sender_db = self.db.get_or_create_user(chat_id, sender)
+
         if sender_db.reputation < amount:
             return f"У тебя недостаточно печенек. Баланс: {sender_db.reputation}."
-            
-        # Выполняем транзакцию
-        self.db.update_user(sender_db.id, {"reputation": sender_db.reputation - amount})
-        self.db.update_user(target.id, {"reputation": target.reputation + amount})
-        
-        # Генерируем живой ответ через ИИ
-        ai_msg = await self.generate_cookie_gift_message(chat_id, sender.display_name, target.display_name, amount)
+
+        ok, net_amount = self.db.transfer_cookies(sender_db, target, amount)
+        if not ok:
+            return "Отклонено: не удалось выполнить перевод."
+        self._daily_ai_transfers[day_key] = used_today + amount
+
+        ai_msg = await self.generate_cookie_gift_message(chat_id, sender.display_name, target.display_name, net_amount)
         return f"ТРАНЗАКЦИЯ ВЫПОЛНЕНА: {ai_msg}"
 
     def _sanitize_poll_options(self, options: list[Any]) -> list[str]:
@@ -1501,14 +1563,10 @@ class AIService:
         return False
 
     def _maybe_attach_cookie_reward(self, chat_id: int, sender: Sender, user_text: str, reply: str) -> str:
-        # Проверяем, не выпрашивает ли человек печеньку намеренно
         lowered_req = user_text.lower()
         if "дай печеньку" in lowered_req or "хочу печеньку" in lowered_req:
             return reply
 
-
-        # Грубость к Нике больше не списывает печеньки.
-        # Она влияет только на настроение и тон ответа, без экономического наказания.
         if self._is_hostile_user_text(user_text):
             self.moods[chat_id] = max(0, self.moods[chat_id] - 10)
             return reply
@@ -1532,27 +1590,22 @@ class AIService:
         if len(text) < 3:
             return False
             
-        # Список стоп-слов, которые отменяют награду (отрицание или токсичность)
         negation_markers = {"не ", "ни разу", "вряд ли", "хуже", "плохо", "отстой", "удали", "бесишь", "тупая", "дура"}
         if any(marker in text for marker in negation_markers):
             return False
 
-        # Основные позитивные маркеры
         positive_markers = {
             "спасибо", "спс", "красава", "харош", "хорош", "база",
             "гениально", "смешно", "угар", "топ", "сильно", "вайб",
             "умница", "лучшая", "обожаю", "люблю", "мило", "круто"
         }
         
-        # Проверяем наличие слов (целиком, чтобы не ловить "стоп" в "растоптать")
         words = set(re.findall(r"\b\w+\b", text))
         if any(marker in words for marker in positive_markers):
-            # Если сообщение очень короткое (типа просто "спс"), даем шанс 30%
             if len(text) < 10:
                 return random.random() < 0.3
             return True
             
-        # Эмодзи тоже считаются
         emoji_pattern = r"(^|\s)(\+1|\+\+|👍|🔥|❤️|😂|🤣|🥰|💎|👑)($|\s)"
         return bool(re.search(emoji_pattern, text))
 
@@ -1561,13 +1614,11 @@ class AIService:
         if not normalized:
             return None
 
-        # Поиск по числовому user_id
         if re.fullmatch(r"-?\d+", normalized):
             found = self.db.get_user_by_platform_id(chat_id, int(normalized))
             if found:
                 return found
 
-        # Псевдонимы "себя"
         aliases = {"я", "me", "мой", "мне", "себе", "себя",
                    sender.display_name.lower(), sender.first_name.lower()}
         if sender.username:
@@ -1576,7 +1627,6 @@ class AIService:
         if normalized in aliases:
             return self.db.get_or_create_user(chat_id, sender)
 
-        # Расширенный поиск с fuzzy + транслитерацией
         return self.db.search_user(chat_id, target_name)
 
     def _group_reply_cooldown_active(self, chat_id: int) -> bool:
@@ -1620,14 +1670,13 @@ class AIService:
         if self._looks_like_memory_artifact(cleaned):
             return "Чуть не выдала вам базу данных вместо ответа. Давай еще раз."
 
-        # Вырезаем системные XML-теги <msg...> </msg>, если модель случайно скопировала их формат
+        cleaned = re.sub(r"<think>.*?</think>", "", cleaned, flags=re.IGNORECASE | re.DOTALL).strip()
         cleaned = re.sub(r"<msg[^>]*>", "", cleaned, flags=re.IGNORECASE)
         cleaned = re.sub(r"</msg>", "", cleaned, flags=re.IGNORECASE).strip()
 
         bot_name = re.escape(self.settings.bot_name or "Ника")
         cleaned = re.sub(rf"^(?:{bot_name}\s*:\s*)+", "", cleaned, flags=re.IGNORECASE).strip()
         cleaned = re.sub(r"^\s*нейроника\s*:\s*", "", cleaned, flags=re.IGNORECASE).strip()
-        # Автоматически вырезаем любые текстовые отыгровки в звёздочках (*поправляет ушки*, *закатывает глаза*)
         cleaned = re.sub(r"\*[^*]+\*", "", cleaned).strip()
         cleaned = re.sub(r"\s{2,}", " ", cleaned)
 
@@ -1647,8 +1696,6 @@ class AIService:
         return cleaned
 
     def _enforce_personality_mode(self, content: str) -> str:
-        # Я убрал удаление нормальных теплых слов, чтобы ИИ мог быть добрым.
-        # Оставляем только чистку совсем бредовых "ИИ-галлюцинаций".
         cleaned = content
         ai_hallucinations = ["Я всего лишь языковая модель", "Как искусственный интеллект"]
         for phrase in ai_hallucinations:
@@ -1694,13 +1741,10 @@ class AIService:
         return not bool(re.search(r'(?i)type="text"', normalized))
 
     def _extract_current_plain_text(self, user_text: str) -> str:
-        # Извлекаем текст из тега <msg> (там сам текст сообщения)
         msg_match = re.search(r"(?is)<msg[^>]*>(.*?)</msg>", user_text)
         if msg_match:
             content = msg_match.group(1).strip()
-            # Проверяем, есть ли там только пустые переносы
             if not content:
-                # Если текста нет, но это медиа, вернем тип из атрибута type
                 type_match = re.search(r'(?i)type="([^"]+)"', user_text)
                 if type_match and type_match.group(1) != "text":
                     return f"[{type_match.group(1)}]"
@@ -1747,7 +1791,7 @@ class AIService:
 
     async def _chat_completion(self, **kwargs: Any) -> Any:
         last_exc: Exception | None = None
-        delay = 0.8
+        delay = 0.05
         for attempt in range(1, 4):
             try:
                 return await self.client.chat.completions.create(**kwargs)
@@ -1758,6 +1802,14 @@ class AIService:
                 self._log("completion_retry", attempt=attempt, error=str(exc)[:180])
                 await asyncio.sleep(delay)
                 delay *= 2
+        fallback_model = getattr(self.settings, "ai_fallback_model", None)
+        req_model = kwargs.get("model")
+        if fallback_model and req_model != fallback_model:
+            try:
+                fallback_kwargs = {**kwargs, "model": fallback_model}
+                return await self.client.chat.completions.create(**fallback_kwargs)
+            except Exception as fb_exc:
+                last_exc = fb_exc
         assert last_exc is not None
         raise last_exc
 
@@ -1938,14 +1990,21 @@ class AIService:
         amount = min(max(raw_amount, 10), 100)
 
         if not target_name:
-            return "Не указан соперник для дуэли."
-
-        target = self._resolve_target_user(chat_id, sender, target_name)
+            target_user_obj = self.db.get_or_create_user(chat_id, sender)
+            target = target_user_obj
+        else:
+            target = self._resolve_target_user(chat_id, sender, target_name)
         if not target:
             return f"Пользователь '{target_name}' не найден."
 
         if target.display_name == self.settings.bot_name:
             return "Я не могу играть сама с собой."
+
+        if target.user_id != sender.user_id:
+            return (
+                f"Отклонено: в ИИ-дуэли против Ники ты можешь поставить только свои печеньки "
+                f"(вызови дуэль от своего имени, а не за счёт {target.display_name})."
+            )
 
         target_user = self.db.get_or_create_user(chat_id, Sender(
             user_id=target.user_id,
@@ -1999,3 +2058,94 @@ class AIService:
         except Exception as exc:
             self._log("challenge_duel_error", error=str(exc))
             return f"Не удалось провести дуэль: {exc}"
+
+    async def summarize_chat(self, chat_id: int, count: int = 50) -> str:
+        safe_count = max(10, min(150, count))
+        lines = self.db.get_recent_message_context(chat_id, limit=safe_count)
+        if not lines:
+            lines = list(self.chat_buffers.get(chat_id, ()))[-safe_count:]
+        if not lines:
+            return "Пока пусто — нет сообщений для пересказа в недавней истории чата."
+
+        dialogue = "\n".join(lines[-safe_count:])
+        prompt_messages = [
+            {
+                "role": "system",
+                "content": (
+                    f"Ты — {self.settings.bot_name}, живая и остроумная участница чата. "
+                    "Сделай краткую, понятную и живую сводку (3-6 пунктов с буллитами •) того, что обсуждали "
+                    "в последних сообщениях чата. Указывай имена участников, суть споров, шуток и выводов. "
+                    "Пиши по-русски, без воды и без выдуманных фактов."
+                ),
+            },
+            {
+                "role": "user",
+                "content": f"Последние сообщения чата ({len(lines)} шт.):\n\n{dialogue}",
+            },
+        ]
+        try:
+            raw = await self._simple_completion(
+                model=self.settings.ai_model,
+                messages=prompt_messages,
+                temperature=0.5,
+                max_tokens=450,
+            )
+            cleaned = self._finalize_reply(raw, user_text="summary")
+            return cleaned or "Не удалось собрать сводку — попробуй чуть позже."
+        except Exception as exc:
+            self._log("summary_error", chat_id=chat_id, error=str(exc))
+            return "Не получилось составить сводку чата прямо сейчас. Попробуй через минуту!"
+
+    async def summarize_recent_chat(self, chat_id: int, count: int = 50) -> str:
+        return await self.summarize_chat(chat_id, count=count)
+
+    async def answer_question(
+        self,
+        chat_id: int,
+        sender: Sender,
+        question: str,
+        *,
+        reply_context: str = "",
+    ) -> str:
+        clean_q = (question or "").strip()
+        if not clean_q and reply_context:
+            clean_q = reply_context.strip()
+        elif clean_q and reply_context:
+            clean_q = f"{clean_q}\nКонтекст сообщения: {reply_context.strip()}"
+        if not clean_q:
+            return "Задай вопрос после команды /ask."
+        memory_text = await self.memory.get_relevant_facts(
+            chat_id,
+            clean_q,
+            sender.display_name,
+            user_id=sender.user_id,
+        )
+        prompt_messages = [
+            {
+                "role": "system",
+                "content": (
+                    f"Ты — {self.settings.bot_name}. Пользователь задал тебе прямой вопрос через /ask. "
+                    "Дай точный, полезный и структурированный ответ по делу (2-6 предложений), сохраняя свой живой характер. "
+                    + (f"\nИзвестные факты чата:\n{memory_text}" if memory_text else "")
+                ),
+            },
+            {
+                "role": "user",
+                "content": f"{sender.display_name} спрашивает: {clean_q}",
+            },
+        ]
+        try:
+            raw = await self._simple_completion(
+                model=self.settings.ai_model,
+                messages=prompt_messages,
+                temperature=0.6,
+                max_tokens=400,
+            )
+            cleaned = self._finalize_reply(raw, user_text=clean_q)
+            return cleaned or "Хм, задумалась и не смогла сформулировать ответ. Спроси иначе!"
+        except Exception as exc:
+            self._log("ask_error", chat_id=chat_id, error=str(exc))
+            return "Не удалось обработать вопрос прямо сейчас. Попробуй чуть позже!"
+
+    async def answer_direct_question(self, chat_id: int, sender: Sender, question: str) -> str:
+        return await self.answer_question(chat_id, sender, question)

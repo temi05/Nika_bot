@@ -14,7 +14,7 @@ from aiogram.exceptions import TelegramBadRequest
 
 from app.services.ai_service import AIService
 from app.services.supabase_db import SupabaseDB
-from app.bot.admin import is_admin
+from app.bot.admin import is_admin, make_captcha_gate_middleware
 
 from app.bot.routers.jail_helpers import (
     bail_cost,
@@ -70,6 +70,7 @@ def make_quiz_question() -> dict:
 
 def build_general_admin_router(db: SupabaseDB, bot_name: str, ai: AIService) -> Router:
     router = Router(name="general_admin")
+    router.message.middleware(make_captcha_gate_middleware(db))
 
     HELP_PAGES = {
         "main": (
@@ -94,12 +95,14 @@ def build_general_admin_router(db: SupabaseDB, bot_name: str, ai: AIService) -> 
         ),
         "games": (
             "🎭 <b>Интерактив и Творчество</b>\n\n"
+            "• <code>/summary [N]</code> — ИИ-сводка последних сообщений чата\n"
+            "• <code>/ask [вопрос]</code> — Прямой вопрос Нике\n"
             "• <code>/aiimage [описание]</code> — ИИ-картинка за печеньки\n"
             "• <code>/signai [текст]</code> — ИИ-сигна за печеньки\n"
-            "• <code>/setsignprice</code>, <code>/signreq</code>, <code>/signorders</code> — Сигны от людей\n"
-            "• Авто-события: выпадение печенек и викторины в активных чатах\n"
-            "• <code>/rp [действие]</code> — Ролевые взаимодействия с участниками\n"
-            "• Бросить монетку или спросить совет можно прямо в диалоге с ИИ Ники!"
+            "• <code>/kto [текст]</code> — Случайный участник чата («Кто сегодня...»)\n"
+            "• <code>/remind [10m] [текст]</code> — Таймер-напоминание в чате\n"
+            "• <code>/drop</code>, <code>/quiz</code> — Печенькопад и викторина\n"
+            "• <code>/rp [действие]</code> — Ролевые взаимодействия с участниками"
         ),
         "profile": (
             "👤 <b>Персонализация и Память</b>\n\n"
@@ -110,23 +113,26 @@ def build_general_admin_router(db: SupabaseDB, bot_name: str, ai: AIService) -> 
             "• <code>/lore</code> — Легенды и Лента Событий чата\n"
             "• <code>/add_lore [текст]</code> — Зафиксировать новую легенду чата\n"
             "• <code>/forget_me</code> — Стереть воспоминания о себе (чистый лист)\n"
-            "• <code>/notes</code> — Заметки ИИ про участника"
+            "• <code>/notes</code> — Заметки ИИ про участника\n"
+            "• <code>/rules</code> — Правила чата\n"
+            "• <code>/warns</code> — Проверить свои предупреждения"
         ),
         "admin": (
-            "🛡 <b>Администрирование и Память</b>\n\n"
-            "• <code>/clean_memory</code> — Очистить базу от бытового мусора\n"
-            "• <code>/backup_memory</code> — Ручной бэкап векторной памяти в Telegram\n"
-            "• <code>/restore_memory</code> — Восстановить базу из zip-архива\n"
-            "• <code>/nika_brain [запрос]</code> — Поиск векторов в мозге Ники\n"
-            "• <code>/all_facts</code> — Меню всех сохранённых фактов\n"
-            "• <code>/export_facts</code> — Скачать всю базу знаний файлом .txt\n"
-            "• <code>/cookie_rain</code> — Массовая раздача бонусов\n"
-            "• <code>/whisper [текст]</code> — Сообщение от имени бота\n"
-            "• <code>/judge</code> — Посадить или выпустить игрока\n"
-            "• <code>/ban</code> | <code>/mute</code> — Модерация"
+            "🛡 <b>Администрирование и Модерация</b>\n\n"
+            "• <code>/chatsettings</code> — Панель настроек чата (ИИ, авто-события, ссылки)\n"
+            "• <code>/ban</code>, <code>/unban</code>, <code>/kick</code> — Бан / разбан / кик (с поддержкой срока)\n"
+            "• <code>/mute [10m|2h|1d]</code>, <code>/unmute</code> — Мут / размут\n"
+            "• <code>/warn</code>, <code>/unwarn</code>, <code>/warns</code> — Управление варнами\n"
+            "• <code>/setrules</code>, <code>/rules</code> — Установка и просмотр правил чата\n"
+            "• <code>/purge [N]</code> — Очистка сообщений\n"
+            "• <code>/banword</code>, <code>/unbanword</code>, <code>/listwords</code> — Фильтр стоп-слов\n"
+            "• <code>/all_facts</code>, <code>/export_facts</code>, <code>/clean_memory</code> — Управление базой знаний\n"
+            "• <code>/backup_memory</code>, <code>/restore_memory</code> — Бэкап и восстановление памяти\n"
+            "• <code>/cookie_rain</code>, <code>/whisper</code>, <code>/judge</code> — Спец-команды админов"
         ),
         "support": (
-            "✉️ <b>Обратная связь</b>\n\n"
+            "✉️ <b>Обратная связь и Жалобы</b>\n\n"
+            "• <code>/report [причина]</code> — Жалоба на сообщение нарушителя (реплаем)\n"
             "• <code>/feedback new [кат] [текст]</code> — Написать админам\n"
             "• <code>/feedback list</code> — Твои активные обращения"
         )
@@ -418,117 +424,6 @@ def build_general_admin_router(db: SupabaseDB, bot_name: str, ai: AIService) -> 
         chat_type = getattr(message.chat, "type", "")
         return getattr(chat_type, "value", str(chat_type)) in {"group", "supergroup"}
 
-    @router.callback_query(F.data.startswith("sign_"))
-    async def sign_callback(query: CallbackQuery) -> None:
-        parts = (query.data or "").split("_", 2)
-        if len(parts) != 3 or not parts[2].isdigit():
-            await query.answer("Заказ устарел.", show_alert=True)
-            return
-        action, order_id = parts[1], int(parts[2])
-        order = db.get_sign_order(query.message.chat.id, order_id)
-        if not order:
-            await query.answer("Заказ не найден.", show_alert=True)
-            return
-        status = str(order.get("status"))
-        author_id = int(order.get("author_id") or 0)
-        buyer_id = int(order.get("buyer_id") or 0)
-        price = int(order.get("price") or 0)
-        now = datetime.now(timezone.utc).isoformat()
-
-        if action in {"accept", "decline", "done", "cancel"} and query.from_user.id != author_id:
-            await query.answer("Это может подтвердить только автор сигны.", show_alert=True)
-            return
-        if action == "pay" and query.from_user.id != buyer_id:
-            await query.answer("Оплату подтверждает только покупатель.", show_alert=True)
-            return
-
-        if action == "decline":
-            if status != "pending":
-                await query.answer("Этот заказ уже нельзя отклонить.", show_alert=True)
-                return
-            db.update_sign_order(order_id, {"status": "cancelled", "cancelled_at": now, "cancel_reason": "declined_by_author"})
-            await query.message.edit_text(f"✍️ Заказ сигны #{order_id} отклонён.")
-            await query.answer()
-            return
-
-        if action == "accept":
-            if status != "pending":
-                await query.answer("Заказ уже обработан.", show_alert=True)
-                return
-            buyer = db.get_user_by_platform_id(int(order["chat_id"]), buyer_id)
-            if not buyer or buyer.reputation < price:
-                db.update_sign_order(order_id, {"status": "cancelled", "cancelled_at": now, "cancel_reason": "buyer_has_no_cookies"})
-                await query.message.edit_text(f"✍️ Заказ #{order_id} отменён: у покупателя уже не хватает печенек.")
-                await query.answer()
-                return
-            charged = db.update_user(buyer.id, {"reputation": buyer.reputation - price})
-            if not charged:
-                await query.answer("Не смог списать печеньки у покупателя.", show_alert=True)
-                return
-            updated = db.update_sign_order(order_id, {"status": "accepted", "escrow_amount": price, "accepted_at": now})
-            if not updated:
-                db.update_user(buyer.id, {"reputation": buyer.reputation})
-                await query.answer("Не смог обновить заказ, списание откатил.", show_alert=True)
-                return
-            option_line = f"Тариф: <b>{escape_html(str(order.get('option_title')))}</b>\n" if order.get("option_title") else ""
-            await query.message.edit_text(
-                f"✍️ <b>Заказ #{order_id} принят</b>\n\n"
-                f"Цена <b>{price}</b> 🍪 лежит в эскроу.\n"
-                f"{option_line}"
-                f"Текст: <i>{escape_html(str(order.get('text') or ''))}</i>\n\n"
-                f"Когда сигна готова, автор жмет: <code>/signorders</code> → <b>Готово #{order_id}</b>.",
-                parse_mode="HTML",
-            )
-            await query.answer()
-            return
-
-        if action == "done":
-            if status != "accepted":
-                await query.answer("Готовым можно отметить только заказ в работе.", show_alert=True)
-                return
-            db.update_sign_order(order_id, {"status": "delivered", "delivered_at": now})
-            await query.message.edit_text(
-                f"✍️ <b>Заказ #{order_id} отмечен готовым</b>\n\n"
-                "Покупатель должен подтвердить получение через <code>/signorders мои</code>.",
-                parse_mode="HTML",
-            )
-            await query.answer("Готово отмечено.")
-            return
-
-        if action == "cancel":
-            if status not in {"pending", "accepted"}:
-                await query.answer("Этот заказ уже нельзя отменить.", show_alert=True)
-                return
-            buyer = db.get_user_by_platform_id(int(order["chat_id"]), buyer_id)
-            escrow = int(order.get("escrow_amount") or 0)
-            if buyer and escrow > 0:
-                db.update_user(buyer.id, {"reputation": buyer.reputation + escrow})
-            db.update_sign_order(order_id, {"status": "cancelled", "escrow_amount": 0, "cancelled_at": now, "cancel_reason": "cancelled_by_author"})
-            await query.message.edit_text(f"✍️ Заказ #{order_id} отменён. Эскроу возвращён покупателю.")
-            await query.answer()
-            return
-
-        if action == "pay":
-            if status != "delivered":
-                await query.answer("Оплатить можно только готовый заказ.", show_alert=True)
-                return
-            author = db.get_user_by_platform_id(int(order["chat_id"]), author_id)
-            escrow = int(order.get("escrow_amount") or price)
-            if not author or escrow <= 0:
-                await query.answer("Не смог найти автора или сумму оплаты.", show_alert=True)
-                return
-            paid_author = db.update_user(author.id, {"reputation": author.reputation + escrow})
-            if not paid_author:
-                await query.answer("Не смог начислить печеньки автору.", show_alert=True)
-                return
-            db.update_sign_order(order_id, {"status": "paid", "escrow_amount": 0, "paid_at": now})
-            await query.message.edit_text(
-                f"✍️ <b>Заказ #{order_id} закрыт</b>\n\n"
-                f"{escape_html(author.display_name)} получил(а) <b>{escrow}</b> 🍪.",
-                parse_mode="HTML",
-            )
-            await query.answer("Оплата подтверждена.")
-
     @router.message(Command("drop", "cookie_drop"))
     async def drop_command(message: Message) -> None:
         if not _is_group_chat(message):
@@ -693,6 +588,56 @@ def build_general_admin_router(db: SupabaseDB, bot_name: str, ai: AIService) -> 
             parse_mode="HTML",
         )
         await query.answer(f"+{reward} 🍪")
+
+    @router.message(Command("remind", "напомни"))
+    async def remind_command(message: Message, command: CommandObject) -> None:
+        from app.bot.admin import parse_duration
+        raw = (command.args or "").strip()
+        parts = raw.split(maxsplit=1)
+        if len(parts) < 2:
+            await message.answer(
+                "⏰ <b>Напоминание</b>\n\n"
+                "Использование: <code>/remind 15m проверить духовку</code>\n"
+                "Единицы времени: <code>s/с, m/м, h/ч, d/д</code>.",
+                parse_mode="HTML",
+            )
+            return
+        delta = parse_duration(parts[0])
+        if not delta:
+            await message.answer("❌ Неверный формат времени. Пример: <code>/remind 10m текст</code>", parse_mode="HTML")
+            return
+        text = parts[1].strip()
+        if not text:
+            await message.answer("❌ Укажи текст напоминания.")
+            return
+        sender = get_sender_data(message)
+        remind_at = datetime.now(timezone.utc) + delta
+        reminder = db.create_reminder(
+            chat_id=message.chat.id,
+            user_id=sender.user_id,
+            user_name=sender.display_name,
+            text=text,
+            remind_at=remind_at,
+        )
+        await message.answer(
+            f"⏰ Напоминание #{reminder.id} для <b>{escape_html(sender.display_name)}</b> установлено: "
+            f"<i>«{escape_html(text)}»</i>.",
+            parse_mode="HTML",
+        )
+
+    @router.message(Command("kto", "кто", "whoami_random"))
+    async def kto_command(message: Message, command: CommandObject) -> None:
+        users = db.get_all_users(message.chat.id)
+        if not users:
+            sender = get_sender_data(message)
+            users = [db.get_or_create_user(message.chat.id, sender)]
+        chosen = random.choice(users)
+        question = (command.args or "").strip() or "главный герой этого часа"
+        await message.answer(
+            f"🎲 <b>Кто {escape_html(question)}?</b>\n"
+            f"└ Звёзды указывают на <b>{escape_html(chosen.display_name)}</b>!",
+            parse_mode="HTML",
+        )
 
     return router
 

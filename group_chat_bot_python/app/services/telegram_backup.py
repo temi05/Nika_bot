@@ -56,17 +56,37 @@ class TelegramBackupService:
                 self._log("upload_error", error=str(e))
                 return False
 
-    async def send_fact_card(self, fact_text: str, entity_name: str = "", total_facts: int = 0) -> None:
+    async def send_fact_card(
+        self,
+        fact_text: str | int,
+        entity_name: str = "",
+        total_facts: int | list[str] = 0,
+    ) -> None:
         """Отправляет наглядное уведомление о новом воспоминании в бэкап-чат"""
         if not self.backup_chat_id:
             return
         try:
             from app.utils import escape_html
+
+            if isinstance(total_facts, (list, tuple)):
+                facts_list = [str(item).strip() for item in total_facts if str(item).strip()]
+                resolved_fact = "; ".join(facts_list) if facts_list else str(fact_text)
+                resolved_total = len(facts_list)
+            else:
+                resolved_fact = str(fact_text).strip()
+                try:
+                    resolved_total = int(total_facts)
+                except (TypeError, ValueError):
+                    resolved_total = 0
+
+            if not resolved_fact:
+                return
+
             text = (
                 f"🧠 <b>Новое воспоминание Ники!</b>\n\n"
-                f"👤 <b>Субъект:</b> {escape_html(entity_name or 'Участник')}\n"
-                f"📝 <b>Факт:</b> <i>{escape_html(fact_text)}</i>\n"
-                f"📊 <b>Всего фактов в базе:</b> {total_facts}"
+                f"👤 <b>Субъект:</b> {escape_html(str(entity_name or 'Участник'))}\n"
+                f"📝 <b>Факт:</b> <i>{escape_html(resolved_fact)}</i>\n"
+                f"📊 <b>Всего фактов в базе:</b> {resolved_total}"
             )
             await self.bot.send_message(
                 chat_id=self.backup_chat_id,
@@ -78,18 +98,38 @@ class TelegramBackupService:
 
     async def restore_from_zip_bytes(self, zip_bytes: bytes) -> bool:
         """Восстанавливает базу из полученных байтов ZIP (например по команде /restore_memory)"""
+        import io
+        import zipfile
+
         async with self._lock:
             try:
-                if self.zip_path.exists():
-                    os.remove(self.zip_path)
+                target_root = self.data_dir.resolve()
+                total_uncompressed = 0
+                with zipfile.ZipFile(io.BytesIO(zip_bytes), "r") as zf:
+                    for member in zf.infolist():
+                        member_path = Path(member.filename)
+                        if member_path.is_absolute() or ".." in member_path.parts:
+                            self._log("restore_rejected_unsafe_path", filename=member.filename)
+                            return False
+                        resolved_dest = (target_root / member_path).resolve()
+                        if resolved_dest != target_root and target_root not in resolved_dest.parents:
+                            self._log("restore_rejected_path_traversal", filename=member.filename)
+                            return False
+                        total_uncompressed += member.file_size
+                        if total_uncompressed > 100 * 1024 * 1024:
+                            self._log("restore_rejected_size_limit", size=total_uncompressed)
+                            return False
 
-                with open(self.zip_path, "wb") as f:
-                    f.write(zip_bytes)
+                    if self.zip_path.exists():
+                        os.remove(self.zip_path)
+                    with open(self.zip_path, "wb") as f:
+                        f.write(zip_bytes)
 
-                if self.data_dir.exists():
-                    shutil.rmtree(self.data_dir)
+                    if self.data_dir.exists():
+                        shutil.rmtree(self.data_dir)
+                    self.data_dir.mkdir(parents=True, exist_ok=True)
+                    zf.extractall(self.data_dir)
 
-                shutil.unpack_archive(str(self.zip_path), str(self.data_dir), format="zip")
                 self._log("restore_from_bytes_success", target=str(self.data_dir))
                 return True
             except Exception as e:

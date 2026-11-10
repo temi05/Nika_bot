@@ -4,7 +4,7 @@ from aiogram import Router
 from aiogram.filters import Command, CommandObject
 from aiogram.types import Message
 
-from app.bot.admin import is_admin
+from app.bot.admin import is_admin, make_captcha_gate_middleware
 from app.services.supabase_db import SupabaseDB
 from app.utils import escape_html, get_sender_data
 
@@ -20,6 +20,7 @@ def _strip_meme_prefix(value: str) -> str:
 
 def build_memes_router(db: SupabaseDB) -> Router:
     router = Router(name="memes")
+    router.message.middleware(make_captcha_gate_middleware(db))
 
     @router.message(Command("memeadd", "мемдобавить", "мем"))
     async def meme_add_command(message: Message, command: CommandObject) -> None:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import re
 from pathlib import Path
@@ -14,6 +15,10 @@ from app.services.memory_provider import BaseMemoryProvider, _compact_transcript
 from app.services.prompt_builders import build_memory_extraction_messages, format_memory_context
 from app.services.supabase_db import SupabaseDB
 from app.services.telegram_backup import TelegramBackupService
+
+
+def _md5_short(text: str, length: int = 12) -> str:
+    return hashlib.md5(text.encode("utf-8")).hexdigest()[:length]
 
 
 class LightweightEmbeddingFunction:
@@ -30,7 +35,7 @@ class LightweightEmbeddingFunction:
             tokens = re.findall(r"\w+", text.lower())
             vec = [0.0] * self.dim
             for token in tokens:
-                idx = abs(hash(token)) % self.dim
+                idx = int(hashlib.md5(token.encode("utf-8")).hexdigest()[:8], 16) % self.dim
                 vec[idx] += 1.0
             norm = sum(x * x for x in vec) ** 0.5
             if norm > 0:
@@ -53,9 +58,9 @@ def _clean_legacy_fact(text: str) -> str:
     if not text:
         return ""
     cleaned = text.strip()
-    
+
     ephemeral = [
-        "заснул", "хочет спать", "хочет пасочку", "покрасить яички", 
+        "заснул", "хочет спать", "хочет пасочку", "покрасить яички",
         "пошел кушать", "отрубилась", "легла", "потянувся", "проспала",
         "недопонимание", "эмоция:", "состояние:", "состояние ",
         "ем пельмени", "ем чипсы", "выпил чаю", "застрял в пробке",
@@ -72,24 +77,8 @@ def _clean_legacy_fact(text: str) -> str:
     cleaned = re.sub(r"\s*\|\s*роль:\s*", " имеет роль ", cleaned)
     cleaned = re.sub(r"\s*\|\s*прозвище:\s*", " имеет прозвище ", cleaned)
 
-    name_map = {
-        r"\bДанила\b": "Danil (@Markvannes)",
-        r"\bDanil\b(?!\s*\(@)": "Danil (@Markvannes)",
-        r"\bЧика\b(?!\s*\(@)": "Чика (@SCTemi)",
-        r"\bsanechk_aaa\b(?!\s*\(@)": "sanechk_aaa (@sanechkkk_aaa)",
-        r"\bСанечка\b": "sanechk_aaa (@sanechkkk_aaa)",
-        r"\bЛексон⁴²\b(?!\s*\(@)": "Лексон⁴² (@LeksikN6)",
-        r"\bЛюбимый\b(?!\s*\(@)": "Любимый (@Lubimbi_director)",
-    }
-    for pattern, repl in name_map.items():
-        cleaned = re.sub(pattern, repl, cleaned)
-
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
     return cleaned if len(cleaned) >= 5 else ""
-
-
-
-
 
 
 class ChromaMemoryProvider(BaseMemoryProvider):
@@ -101,6 +90,7 @@ class ChromaMemoryProvider(BaseMemoryProvider):
     ) -> None:
         self.settings = settings
         self.db = db
+        self.db._chroma_memory = self  # type: ignore[attr-defined]
         self.backup_service = backup_service
         self.data_dir = Path(__file__).resolve().parents[2] / "data" / "chroma_db"
         self.data_dir.mkdir(parents=True, exist_ok=True)
@@ -149,7 +139,14 @@ class ChromaMemoryProvider(BaseMemoryProvider):
             self._init_chroma()
         return success
 
-
+    async def health(self) -> dict[str, Any]:
+        if self._collection is None:
+            return {"healthy": False, "provider": "chroma", "count": 0}
+        try:
+            count = self._collection.count()
+            return {"healthy": True, "provider": "chroma", "count": count}
+        except Exception as e:
+            return {"healthy": False, "provider": "chroma", "error": str(e)}
 
     def _migrate_if_needed(self) -> None:
         """Однократный перенос старых фактов из Supabase bot_knowledge в ChromaDB при пустой базе"""
@@ -186,8 +183,6 @@ class ChromaMemoryProvider(BaseMemoryProvider):
                     except Exception:
                         pass
 
-
-
                 chat_id = str(item.get("chat_id") or "0")
                 entity_name = str(item.get("entity_name") or "")
                 source = str(item.get("fact_type") or "fact")
@@ -204,8 +199,6 @@ class ChromaMemoryProvider(BaseMemoryProvider):
                 )
                 ids.append(f"supa_{item.get('id') or idx}")
 
-
-
             if documents:
                 self._collection.add(documents=documents, metadatas=metadatas, ids=ids)
                 self._log("migration_success", imported_count=len(documents))
@@ -213,12 +206,35 @@ class ChromaMemoryProvider(BaseMemoryProvider):
                 if self.backup_service:
                     try:
                         loop = asyncio.get_running_loop()
-                        loop.create_task(self.backup_service.upload_backup("💾 Первичный бэкап с 939 фактами из Supabase"))
+                        loop.create_task(self.backup_service.upload_backup("💾 Первичный бэкап с фактами из Supabase"))
                     except RuntimeError:
                         pass
         except Exception as e:
             self._log("migration_error", error=str(e))
 
+    def _profile_facts_from_db(self, chat_id: int, user_id: int | None) -> list[str]:
+        if not user_id or user_id <= 0:
+            return []
+        try:
+            user = self.db.get_user_by_platform_id(chat_id, user_id)
+        except Exception:
+            user = None
+        if not user:
+            return []
+        facts: list[str] = []
+        name = user.display_name
+        if user.bio:
+            facts.append(f"{name} рассказал о себе: {user.bio}")
+        if user.ai_notes:
+            for raw_line in user.ai_notes.splitlines():
+                note = raw_line.strip(" -\t")
+                if note:
+                    facts.append(f"{name}: {note}")
+        if user.birthday:
+            facts.append(f"{name} день рождения: {user.birthday}")
+        if user.flavor:
+            facts.append(f"{name} стиль общения/вайб: {user.flavor}")
+        return facts[:8]
 
     async def get_relevant_facts(
         self,
@@ -231,7 +247,7 @@ class ChromaMemoryProvider(BaseMemoryProvider):
             return ""
 
         try:
-            user_facts: list[str] = []
+            user_facts: list[str] = self._profile_facts_from_db(chat_id, user_id)
             mentioned_facts: list[str] = []
 
             all_data = self._collection.get(where={"chat_id": str(chat_id)})
@@ -245,7 +261,7 @@ class ChromaMemoryProvider(BaseMemoryProvider):
                     src = str(meta.get("source") or "")
                     if src in {"event_timeline", "event"} or "событие" in src.lower():
                         event_facts.append(doc)
-                    elif meta.get("entity_name") == user_name or user_name.casefold() in doc.casefold():
+                    elif meta.get("entity_name") == user_name or (user_name and user_name.casefold() in doc.casefold()):
                         user_facts.append(doc)
 
                 # 2. Точный поиск фактов об упомянутых участниках/сущностях в сообщении
@@ -257,7 +273,6 @@ class ChromaMemoryProvider(BaseMemoryProvider):
                     doc_lower = doc.casefold()
                     entity_lower = str(meta.get("entity_name") or "").casefold()
                     for word in target_words:
-                        # Снимаем падежные окончания для поиска основы русской формы (например, псинке -> псинк)
                         stem = word[:4] if len(word) >= 5 else word
                         if stem in doc_lower or (entity_lower and stem in entity_lower):
                             mentioned_facts.append(doc)
@@ -274,8 +289,14 @@ class ChromaMemoryProvider(BaseMemoryProvider):
                 if results and results.get("documents") and results["documents"][0]:
                     semantic_facts = results["documents"][0]
 
+            meme_facts: list[str] = []
+            try:
+                meme_facts = self.db.search_meme_knowledge(chat_id, user_message, limit=4)
+            except Exception:
+                pass
+
             profile_combined = _clean_memory_items(list(dict.fromkeys(user_facts[:4] + mentioned_facts[:4])))
-            topic_combined = _clean_memory_items(list(dict.fromkeys(semantic_facts[:4])))
+            topic_combined = _clean_memory_items(list(dict.fromkeys(semantic_facts[:4] + meme_facts[:4])))
             events_combined = _clean_memory_items(list(dict.fromkeys(event_facts[:4])))
 
             return format_memory_context(
@@ -293,7 +314,7 @@ class ChromaMemoryProvider(BaseMemoryProvider):
             return False
         try:
             clean_event = event_text.strip()
-            doc_id = f"event_{chat_id}_{hash(clean_event) & 0xFFFFFFFF}"
+            doc_id = f"event_{chat_id}_{_md5_short(clean_event)}"
             self._collection.upsert(
                 documents=[clean_event],
                 metadatas=[{
@@ -316,7 +337,6 @@ class ChromaMemoryProvider(BaseMemoryProvider):
             self._log("add_chat_event_error", error=str(e))
             return False
 
-
     async def save_transcript(self, chat_id: int, transcript: str, participants: list[str]) -> None:
         compact = _compact_transcript(transcript)
         if not compact or not self._collection:
@@ -338,8 +358,8 @@ class ChromaMemoryProvider(BaseMemoryProvider):
 
             # Умный поиск дубликатов по смыслу перед записью
             entity_name = (item.get("entities") or [participants[0] if participants else ""])[0]
-            doc_id = f"fact_{chat_id}_{hash(fact) & 0xFFFFFFFF}"
-            
+            doc_id = f"fact_{chat_id}_{_md5_short(fact)}"
+
             try:
                 existing = self._collection.query(
                     query_texts=[fact],
@@ -349,7 +369,7 @@ class ChromaMemoryProvider(BaseMemoryProvider):
                 if existing and existing.get("distances") and existing["distances"][0]:
                     dist = existing["distances"][0][0]
                     if dist < 0.15 and existing.get("ids") and existing["ids"][0]:
-                        doc_id = existing["ids"][0][0] # Перезаписываем существующий аналогичный факт
+                        doc_id = existing["ids"][0][0]  # Перезаписываем существующий аналогичный факт
             except Exception:
                 pass
 
@@ -371,7 +391,11 @@ class ChromaMemoryProvider(BaseMemoryProvider):
         if stored > 0:
             self._log("facts_stored", chat_id=chat_id, count=stored)
             if self.backup_service:
-                asyncio.create_task(self.backup_service.upload_backup(f"💾 Авто-бэкап памяти (+{stored} новых фактов)"))
+                try:
+                    loop = asyncio.get_running_loop()
+                    loop.create_task(self.backup_service.upload_backup(f"💾 Авто-бэкап памяти (+{stored} новых фактов)"))
+                except RuntimeError:
+                    pass
 
     async def _extract_memories(self, transcript: str, participants: list[str]) -> dict[str, Any] | None:
         if not self.client:
@@ -397,32 +421,99 @@ class ChromaMemoryProvider(BaseMemoryProvider):
             self._log("extraction_error", error=str(e))
             return None
 
-    def store_single_fact(self, chat_id: int, fact: str, entity_name: str = "") -> bool:
+    def store_single_fact(
+        self,
+        chat_id: int,
+        fact: str,
+        entity_name: str = "",
+        *,
+        source_message_id: int | None = None,
+        user_id: int | None = None,
+    ) -> bool:
         """Сохранение одного конкретного факта вручную (например через remember_user_fact)"""
         if not self._collection or not fact.strip():
             return False
 
         try:
             clean_fact = fact.strip()
-            doc_id = f"fact_{chat_id}_{hash(clean_fact) & 0xFFFFFFFF}"
+            doc_id = f"fact_{chat_id}_{_md5_short(clean_fact)}"
+            meta: dict[str, Any] = {
+                "chat_id": str(chat_id),
+                "entity_name": entity_name,
+                "source": "manual_remember",
+            }
+            if source_message_id is not None:
+                meta["source_message_id"] = int(source_message_id)
+            if user_id is not None:
+                meta["user_id"] = int(user_id)
             self._collection.upsert(
                 documents=[clean_fact],
-                metadatas=[
-                    {
-                        "chat_id": str(chat_id),
-                        "entity_name": entity_name,
-                        "source": "manual_remember",
-                    }
-                ],
+                metadatas=[meta],
                 ids=[doc_id],
             )
             self._log("single_fact_stored", chat_id=chat_id, fact=clean_fact[:60])
             if self.backup_service:
-                asyncio.create_task(self.backup_service.upload_backup("💾 Ручной бэкап памяти (новое воспоминание)"))
+                try:
+                    loop = asyncio.get_running_loop()
+                    loop.create_task(self.backup_service.upload_backup("💾 Ручной бэкап памяти (новое воспоминание)"))
+                except RuntimeError:
+                    pass
             return True
         except Exception as e:
             self._log("store_single_fact_error", error=str(e))
             return False
+
+    def delete_fact_by_source_id(self, chat_id: int, source_message_id: int) -> int:
+        """Удаляет факты в ChromaDB, привязанные к source_message_id (кнопка 'Забыть этот факт')"""
+        if not self._collection or not source_message_id:
+            return 0
+        try:
+            results = self._collection.get(where={"chat_id": str(chat_id)})
+            if not results or not results.get("ids"):
+                return 0
+
+            candidate_texts: set[str] = set()
+            try:
+                rows = self.db._safe_execute(
+                    self.db._knowledge()
+                    .select("fact, entity_name")
+                    .eq("chat_id", chat_id)
+                    .eq("source_message_id", source_message_id),
+                    fallback=None,
+                )
+                if rows and rows.data:
+                    for item in rows.data:
+                        raw_fact = str(item.get("fact") or "").strip()
+                        if raw_fact:
+                            candidate_texts.add(raw_fact.casefold())
+                            if ": " in raw_fact:
+                                note_part = raw_fact.split(": ", 1)[1].strip()
+                                entity = str(item.get("entity_name") or "").strip()
+                                if entity and note_part:
+                                    candidate_texts.add(f"{entity}: {note_part}".casefold())
+            except Exception:
+                pass
+
+            ids_to_delete: list[str] = []
+            for doc_id, doc, meta in zip(results["ids"], results["documents"], results["metadatas"]):
+                meta = meta or {}
+                if str(meta.get("source_message_id") or "") == str(source_message_id):
+                    ids_to_delete.append(doc_id)
+                elif doc and doc.strip().casefold() in candidate_texts:
+                    ids_to_delete.append(doc_id)
+
+            if ids_to_delete:
+                self._collection.delete(ids=ids_to_delete)
+                if self.backup_service:
+                    try:
+                        loop = asyncio.get_running_loop()
+                        loop.create_task(self.backup_service.upload_backup("💾 Авто-бэкап после удаления факта кнопкой"))
+                    except RuntimeError:
+                        pass
+            return len(ids_to_delete)
+        except Exception as e:
+            self._log("delete_fact_by_source_id_error", error=str(e))
+            return 0
 
     def delete_fact_by_query(self, chat_id: int, query: str) -> int:
         """Удаление факта по подстроке"""
@@ -452,9 +543,10 @@ class ChromaMemoryProvider(BaseMemoryProvider):
         """Ручное добавление факта админом"""
         if not self._collection or not fact_text.strip():
             return False
-        doc_id = f"manual_{chat_id}_{hash(fact_text) & 0xFFFFFFFF}"
+        clean_fact = fact_text.strip()
+        doc_id = f"manual_{chat_id}_{_md5_short(clean_fact)}"
         self._collection.upsert(
-            documents=[fact_text.strip()],
+            documents=[clean_fact],
             metadatas=[{
                 "chat_id": str(chat_id),
                 "entity_name": entity_name,
@@ -495,20 +587,53 @@ class ChromaMemoryProvider(BaseMemoryProvider):
                 pass
         return count
 
-    def get_user_facts(self, chat_id: int, user_name: str, limit: int = 10) -> list[str]:
+    def get_user_facts(
+        self,
+        chat_id: int,
+        user_or_id: str | int = "",
+        user_name_or_limit: str | int = 10,
+        *,
+        user_id: int | None = None,
+        user_name: str = "",
+        limit: int = 10,
+    ) -> list[str]:
         """Возвращает факты, относящиеся к конкретному участнику"""
-        if not self._collection or not user_name.strip():
+        if isinstance(user_or_id, int):
+            resolved_user_id: int | None = user_or_id
+            if isinstance(user_name_or_limit, str):
+                resolved_user_name = user_name_or_limit
+                resolved_limit = limit
+            else:
+                resolved_user_name = user_name
+                resolved_limit = int(user_name_or_limit)
+        else:
+            resolved_user_id = user_id
+            resolved_user_name = str(user_or_id or user_name).strip()
+            resolved_limit = int(user_name_or_limit) if isinstance(user_name_or_limit, int) else limit
+
+        if not resolved_user_name and resolved_user_id:
+            try:
+                u = self.db.get_user_by_platform_id(chat_id, resolved_user_id)
+                if u:
+                    resolved_user_name = u.display_name
+            except Exception:
+                pass
+
+        if not self._collection:
             return []
         try:
             results = self._collection.get(where={"chat_id": str(chat_id)})
             facts: list[str] = []
             if results and results.get("documents"):
-                clean_name = user_name.strip().casefold()
+                clean_name = resolved_user_name.strip().casefold()
                 for doc, meta in zip(results["documents"], results["metadatas"]):
+                    meta = meta or {}
                     entity = str(meta.get("entity_name") or "").casefold()
-                    if entity == clean_name or clean_name in doc.casefold():
+                    if resolved_user_id and meta.get("user_id") == resolved_user_id:
                         facts.append(doc)
-            return _clean_memory_items(list(dict.fromkeys(facts)))[:limit]
+                    elif clean_name and (entity == clean_name or clean_name in doc.casefold()):
+                        facts.append(doc)
+            return _clean_memory_items(list(dict.fromkeys(facts)))[:resolved_limit]
         except Exception as e:
             self._log("get_user_facts_error", error=str(e))
             return []
@@ -541,7 +666,6 @@ class ChromaMemoryProvider(BaseMemoryProvider):
             "pages": pages,
             "query": query,
         }
-
 
     def delete_fact_by_id(self, chat_id: int, doc_id: str) -> bool:
         """Удаляет конкретный факт по его первичному ключу ID в ChromaDB"""
