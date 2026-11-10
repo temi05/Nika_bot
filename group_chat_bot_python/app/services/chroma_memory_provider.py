@@ -709,5 +709,35 @@ class ChromaMemoryProvider(BaseMemoryProvider):
             self._log("update_fact_text_by_id_error", error=str(e))
             return False
 
+    def cleanup_chat_memory(self, chat_id: int, *, full_wipe: bool = False) -> int:
+        """Очищает ChromaDB от бытового мусора и дублей (или полностью для чата при full_wipe=True)."""
+        if not self._collection:
+            return 0
+        try:
+            all_data = self._collection.get(where={"chat_id": str(chat_id)})
+            if not all_data or not all_data.get("ids"):
+                return 0
+            ids = list(all_data["ids"])
+            docs = list(all_data.get("documents") or [])
+            if full_wipe:
+                self._collection.delete(ids=ids)
+                return len(ids)
+
+            seen: set[str] = set()
+            to_delete: list[str] = []
+            for doc_id, doc in zip(ids, docs):
+                cleaned = _clean_legacy_fact(str(doc or ""))
+                norm = cleaned.casefold()
+                if not cleaned or len(cleaned) < 8 or norm in seen:
+                    to_delete.append(doc_id)
+                else:
+                    seen.add(norm)
+            if to_delete:
+                self._collection.delete(ids=to_delete)
+            return len(to_delete)
+        except Exception as e:
+            self._log("cleanup_chat_memory_error", error=str(e))
+            return 0
+
 
 

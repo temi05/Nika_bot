@@ -111,10 +111,15 @@ def _resolve_target_and_tail(
 
 
 async def is_admin(bot: Bot, chat_id: int, user_id: int) -> bool:
-    if not user_id or user_id <= 0:
+    if not user_id:
         return False
+    # Анонимный владелец/админ группы пишет от лица самой группы (sender_chat.id == chat_id) или через @GroupAnonymousBot
+    if chat_id < 0 and (user_id == chat_id or user_id == 1087968824):
+        return True
     if user_id in get_superadmin_ids():
         return True
+    if user_id <= 0:
+        return False
     gm = getattr(bot, "get_chat_member", None)
     cache_key = (
         id(bot),
@@ -129,10 +134,20 @@ async def is_admin(bot: Bot, chat_id: int, user_id: int) -> bool:
         return cached[0]
     try:
         member = await bot.get_chat_member(chat_id, user_id)
-        result = member.status in {"creator", "administrator"}
+        status_val = str(getattr(member.status, "value", member.status)).lower()
+        result = status_val in {"creator", "administrator", "owner"}
         _ADMIN_CACHE[cache_key] = (result, now)
         return result
     except Exception:
+        get_admins = getattr(bot, "get_chat_administrators", None)
+        if callable(get_admins):
+            try:
+                admins = await get_admins(chat_id)
+                result = any(getattr(getattr(a, "user", None), "id", None) == user_id for a in (admins or []))
+                _ADMIN_CACHE[cache_key] = (result, now)
+                return result
+            except Exception:
+                pass
         return False
 
 
@@ -456,7 +471,7 @@ def build_admin_router(bot: Bot, db: SupabaseDB) -> Router:
             parse_mode="HTML",
         )
 
-    @router.message(Command("purge", "clear"))
+    @router.message(Command("purge", "clear", "очистить"))
     async def purge_command(message: Message, command: CommandObject) -> None:
         sender = get_sender_data(message)
         if not await is_admin(bot, message.chat.id, sender.user_id):
@@ -465,13 +480,13 @@ def build_admin_router(bot: Bot, db: SupabaseDB) -> Router:
 
         count = 10
         if command.args and command.args.strip().isdigit():
-            count = max(1, min(50, int(command.args.strip())))
+            count = max(1, min(100, int(command.args.strip())))
 
         ids_to_delete: list[int] = [message.message_id]
         if message.reply_to_message:
             start_id = message.reply_to_message.message_id
             end_id = message.message_id
-            span = list(range(start_id, end_id))[-50:]
+            span = list(range(start_id, end_id))[-100:]
             ids_to_delete.extend(span)
         else:
             for offset in range(1, count + 1):
@@ -485,6 +500,12 @@ def build_admin_router(bot: Bot, db: SupabaseDB) -> Router:
                 deleted += 1
             except Exception:
                 continue
+
+        if deleted == 0:
+            await message.answer(
+                "⚠️ Не удалось удалить сообщения. Проверь, выдано ли самому боту право администратора «Удаление сообщений» в настройках группы."
+            )
+            return
 
         await message.answer(f"🧹 Очищено сообщений: <b>{deleted}</b>.", parse_mode="HTML")
 

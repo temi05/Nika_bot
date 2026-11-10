@@ -1034,3 +1034,41 @@ async def test_f5_3_ask_command_and_ai_answer_question(
     assert ask_msg.answer.called
     ask_out = ask_msg.answer.call_args.args[0]
     assert "Асинхронность позволяет не блокировать" in ask_out
+
+
+@pytest.mark.asyncio
+async def test_anonymous_owner_purge_and_full_clean_memory(
+    fake_db: SupabaseDB,
+    ai_service: Any,
+    chroma_memory: ChromaMemoryProvider,
+    mock_bot: MagicMock,
+    message_factory: Any,
+) -> None:
+    """Anonymous group owner (sender_chat.id == chat_id) passes is_admin for /purge, and /clean_memory full wipes clutter and syncs backup."""
+    chat_id = -100999111
+    assert await admin_mod.is_admin(mock_bot, chat_id, chat_id) is True
+    assert await admin_mod.is_admin(mock_bot, chat_id, 1087968824) is True
+
+    dp = Dispatcher()
+    dp.include_router(admin_mod.build_admin_router(mock_bot, fake_db))
+    dp.include_router(profile_ai_mod.build_profile_ai_router(fake_db, ai_service, "НейроНика"))
+
+    anon_msg = message_factory("/purge 3", chat_id=chat_id, user_id=1087968824, username="GroupAnonymousBot", message_id=50)
+    anon_msg.sender_chat = SimpleNamespace(id=chat_id, title="Test Group", username=None)
+    await dp.propagate_event(update_type="message", event=anon_msg, bot=mock_bot)
+    assert anon_msg.answer.called
+    assert "Очищено сообщений" in anon_msg.answer.call_args.args[0]
+
+    from app.models import MemoryRecord
+    chroma_memory.store_single_fact(chat_id, "Alex любит кофе по утрам", "Alex")
+    fake_db.store_memory(chat_id, MemoryRecord(fact="Alex любит кофе по утрам", source="fact", confidence=0.9))
+    assert chroma_memory.get_all_facts_paged(chat_id)["total"] >= 1
+
+    clean_msg = message_factory("/clean_memory full", chat_id=chat_id, user_id=1087968824, username="GroupAnonymousBot", message_id=51)
+    clean_msg.sender_chat = SimpleNamespace(id=chat_id, title="Test Group", username=None)
+    await dp.propagate_event(update_type="message", event=clean_msg, bot=mock_bot)
+
+    assert clean_msg.answer.called
+    clean_out = clean_msg.answer.call_args.args[0]
+    assert "Полный сброс памяти ИИ и уборка БД завершена" in clean_out
+    assert chroma_memory.get_all_facts_paged(chat_id)["total"] == 0

@@ -1052,6 +1052,117 @@ class SupabaseDB:
             return 0
         return len(rows.data)
 
+    def cleanup_database_clutter(self, chat_id: int, *, full_memory_wipe: bool = False) -> dict[str, int]:
+        """Очищает базу Supabase от накопившегося мусора (старые логи сообщений, закрытые долги, напоминания, дубли/мусор в знаниях)."""
+        stats = {
+            "logs_deleted": 0,
+            "reminders_deleted": 0,
+            "debts_deleted": 0,
+            "knowledge_deleted": 0,
+        }
+
+        # 1. Оставляем только последние 100 записей message_logs в этом чате
+        try:
+            recent_logs = self._safe_execute(
+                self._message_logs()
+                .select("message_id")
+                .eq("chat_id", chat_id)
+                .order("message_id", desc=True)
+                .limit(100),
+                fallback=None,
+                context=f"cleanup_logs.select chat_id={chat_id}",
+            )
+            if recent_logs and recent_logs.data and len(recent_logs.data) >= 100:
+                cutoff_mid = min(int(r.get("message_id") or 0) for r in recent_logs.data if r.get("message_id"))
+                if cutoff_mid > 0:
+                    del_logs = self._safe_execute(
+                        self._message_logs()
+                        .delete()
+                        .eq("chat_id", chat_id)
+                        .lt("message_id", cutoff_mid),
+                        fallback=None,
+                        context=f"cleanup_logs.delete chat_id={chat_id}",
+                    )
+                    if del_logs and del_logs.data:
+                        stats["logs_deleted"] = len(del_logs.data)
+        except Exception:
+            pass
+
+        # 2. Удаляем уже отправленные напоминания
+        try:
+            del_rem = self._safe_execute(
+                self._reminders().delete().eq("chat_id", chat_id).eq("sent", True),
+                fallback=None,
+                context=f"cleanup_reminders chat_id={chat_id}",
+            )
+            if del_rem and del_rem.data:
+                stats["reminders_deleted"] = len(del_rem.data)
+        except Exception:
+            pass
+
+        # 3. Удаляем закрытые и прощённые долги
+        try:
+            for st in ("repaid", "forgiven"):
+                del_d = self._safe_execute(
+                    self._debts().delete().eq("chat_id", chat_id).eq("status", st),
+                    fallback=None,
+                    context=f"cleanup_debts chat_id={chat_id} status={st}",
+                )
+                if del_d and del_d.data:
+                    stats["debts_deleted"] += len(del_d.data)
+        except Exception:
+            pass
+
+        # 4. Очистка bot_knowledge (полная при full_memory_wipe или умная фильтрация дублей и бытового мусора)
+        try:
+            from app.services.chroma_memory_provider import _clean_legacy_fact
+
+            if full_memory_wipe:
+                del_k = self._safe_execute(
+                    self._knowledge().delete().eq("chat_id", chat_id),
+                    fallback=None,
+                    context=f"cleanup_knowledge.full chat_id={chat_id}",
+                )
+                if del_k and del_k.data:
+                    stats["knowledge_deleted"] = len(del_k.data)
+                self._safe_execute(
+                    self._users().update({"ai_notes": None}).eq("chat_id", chat_id),
+                    fallback=None,
+                    context=f"cleanup_users_notes chat_id={chat_id}",
+                )
+                self._user_cache.clear()
+            else:
+                rows = self._safe_execute(
+                    self._knowledge().select("id,fact,confidence").eq("chat_id", chat_id),
+                    fallback=None,
+                    context=f"cleanup_knowledge.select chat_id={chat_id}",
+                )
+                if rows and rows.data:
+                    seen_facts: set[str] = set()
+                    ids_to_delete: list[Any] = []
+                    for item in rows.data:
+                        rec_id = item.get("id")
+                        raw_fact = str(item.get("fact") or "").strip()
+                        conf = float(item.get("confidence") or 0.8)
+                        cleaned = _clean_legacy_fact(raw_fact)
+                        norm_key = cleaned.casefold()
+                        if not cleaned or len(cleaned) < 8 or conf < 0.65 or norm_key in seen_facts:
+                            if rec_id is not None:
+                                ids_to_delete.append(rec_id)
+                        else:
+                            seen_facts.add(norm_key)
+                    for rec_id in ids_to_delete:
+                        self._safe_execute(
+                            self._knowledge().delete().eq("id", rec_id),
+                            fallback=None,
+                            context=f"cleanup_knowledge.del_id id={rec_id}",
+                        )
+                    stats["knowledge_deleted"] = len(ids_to_delete)
+        except Exception:
+            pass
+
+        return stats
+
     def get_memory_owner_by_source_id(self, chat_id: int, source_message_id: int) -> int | None:
         if not source_message_id:
             return None

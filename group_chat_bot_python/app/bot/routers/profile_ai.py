@@ -723,28 +723,57 @@ def build_profile_ai_router(db: SupabaseDB, ai: AIService, bot_name: str) -> Rou
         else:
             await message.answer("ℹ️ Восстановление бэкапов доступно при <code>MEMORY_PROVIDER=chroma</code>.", parse_mode="HTML")
 
-    @router.message(Command("clean_memory", "очистить_память"))
-    async def clean_memory_command(message: Message) -> None:
-        """Очищает память от бытового мусора и устаревших повседневных реплик"""
+    @router.message(Command("clean_memory", "очистить_память", "clean_db"))
+    async def clean_memory_command(message: Message, command: CommandObject | None = None) -> None:
+        """Очищает память и БД от бытового мусора, старых логов, закрытых долгов и дублей (либо полностью по флагу full)."""
         sender = get_sender_data(message)
         if not await is_admin(message.bot, message.chat.id, sender.user_id):
             await message.answer("❌ Эта команда доступна только администраторам.")
             return
+
+        raw_arg = ""
+        if command and command.args:
+            raw_arg = command.args.strip().lower()
+        elif message.text:
+            parts = message.text.strip().split(maxsplit=1)
+            if len(parts) > 1:
+                raw_arg = parts[1].strip().lower()
+
+        full_wipe = raw_arg in {"full", "all", "все", "всё", "полностью"}
 
         ephemeral_queries = [
             "заснул", "хочет спать", "пошел кушать", "отрубилась", "легла", "проспала",
             "ем пельмени", "ем чипсы", "выпил чаю", "застрял в пробке",
             "играет прямо сейчас", "сидит в телефоне", "пошел спать", "устал"
         ]
-        
-        total_deleted = 0
-        if hasattr(ai.memory, "delete_fact_by_query"):
-            for q in ephemeral_queries:
-                total_deleted += ai.memory.delete_fact_by_query(message.chat.id, q)
 
+        chroma_deleted = 0
+        if hasattr(ai.memory, "cleanup_chat_memory"):
+            chroma_deleted += ai.memory.cleanup_chat_memory(message.chat.id, full_wipe=full_wipe)
+        if not full_wipe and hasattr(ai.memory, "delete_fact_by_query"):
+            for q in ephemeral_queries:
+                chroma_deleted += ai.memory.delete_fact_by_query(message.chat.id, q)
+
+        db_stats = {"logs_deleted": 0, "reminders_deleted": 0, "debts_deleted": 0, "knowledge_deleted": 0}
+        if hasattr(db, "cleanup_database_clutter"):
+            db_stats = db.cleanup_database_clutter(message.chat.id, full_memory_wipe=full_wipe)
+
+        backup_note = ""
+        if hasattr(ai.memory, "backup_service") and ai.memory.backup_service:
+            caption = "💾 Чистый бэкап после полного сброса памяти (/clean_memory full)" if full_wipe else "💾 Чистый бэкап после авто-очистки (/clean_memory)"
+            ok = await ai.memory.backup_service.upload_backup(caption)
+            backup_note = "\n💾 <b>ТГ-бэкап (.zip):</b> перезаписан чистой базой" if ok else "\n⚠️ <b>ТГ-бэкап (.zip):</b> не удалось обновить"
+
+        mode_title = "Полный сброс памяти ИИ и уборка БД" if full_wipe else "Комплексная очистка памяти и БД"
+        total_facts_deleted = chroma_deleted + db_stats.get("knowledge_deleted", 0)
         await message.answer(
-            f"🧹 <b>Авто-очистка памяти завершена!</b>\nУдалено <b>{total_deleted}</b> бытовых/мусорных фраз из векторной базы Ники.",
-            parse_mode="HTML"
+            f"🧹 <b>{mode_title} завершена!</b>\n"
+            f"• Удалено мусорных/дублирующихся фактов: <b>{total_facts_deleted}</b> (Chroma: {chroma_deleted}, Supabase: {db_stats.get('knowledge_deleted', 0)})\n"
+            f"• Старых логов сообщений (>100): <b>{db_stats.get('logs_deleted', 0)}</b>\n"
+            f"• Закрытых долгов и старых напоминаний: <b>{db_stats.get('debts_deleted', 0) + db_stats.get('reminders_deleted', 0)}</b>"
+            f"{backup_note}\n"
+            "<i>💡 Для полного сброса всех фактов ИИ (с сохранением уровней и печенек) используй:</i> <code>/clean_memory full</code>",
+            parse_mode="HTML",
         )
 
     @router.message(Command("lore", "лор", "события"))
