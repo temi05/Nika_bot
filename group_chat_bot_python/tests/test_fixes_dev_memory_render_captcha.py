@@ -605,3 +605,48 @@ async def test_captcha_timeout_unbans_and_deletes_prompt_even_if_ban_fails(
         mock_bot.delete_message.assert_called_with(chat_id, 8899)
     finally:
         messages_mod.VerificationChallenge = orig_vc  # type: ignore[misc]
+
+
+@pytest.mark.asyncio
+async def test_purge_safety_guard_blocks_missing_or_dangerous_counts(
+    fake_db: SupabaseDB,
+    mock_bot: MagicMock,
+    message_factory: Any,
+) -> None:
+    chat_id = -100777999
+    dev_id = 861713427
+    dp = Dispatcher()
+    dp.include_router(admin_mod.build_admin_router(mock_bot, fake_db))
+
+    mock_bot.delete_message.reset_mock()
+
+    # 1. /purge without arguments (e.g. tapped from slash menu) -> MUST NOT delete anything!
+    msg_bare = message_factory("/purge", chat_id=chat_id, user_id=dev_id, message_id=500)
+    await dp.propagate_event(update_type="message", event=msg_bare, bot=mock_bot)
+    assert not mock_bot.delete_message.called
+    assert "Защита от случайной очистки" in msg_bare.answer.call_args.args[0]
+
+    # 2. /purge without arguments even when replying to an old message (or forum topic root) -> MUST NOT delete!
+    old_msg = message_factory("старое сообщение", chat_id=chat_id, user_id=123, message_id=410)
+    msg_reply_no_count = message_factory(
+        "/purge",
+        chat_id=chat_id,
+        user_id=dev_id,
+        reply_to_message=old_msg,
+        message_id=501,
+    )
+    await dp.propagate_event(update_type="message", event=msg_reply_no_count, bot=mock_bot)
+    assert not mock_bot.delete_message.called
+
+    # 3. /purge all, /purge 0, /purge 500 -> all blocked without deleting anything!
+    for bad_cmd in ("/purge all", "/purge все", "/purge 0", "/purge 500"):
+        bad_msg = message_factory(bad_cmd, chat_id=chat_id, user_id=dev_id, message_id=502)
+        await dp.propagate_event(update_type="message", event=bad_msg, bot=mock_bot)
+        assert not mock_bot.delete_message.called
+        assert bad_msg.answer.called
+
+    # 4. Explicit /purge 3 -> deletes exactly command + 3 previous messages (4 delete_message calls)
+    valid_msg = message_factory("/purge 3", chat_id=chat_id, user_id=dev_id, message_id=510)
+    await dp.propagate_event(update_type="message", event=valid_msg, bot=mock_bot)
+    assert mock_bot.delete_message.call_count == 4
+    assert "Очищено сообщений" in valid_msg.answer.call_args.args[0]

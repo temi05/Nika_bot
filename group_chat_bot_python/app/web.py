@@ -74,7 +74,7 @@ ADMIN_BOT_COMMANDS = USER_BOT_COMMANDS + [
     BotCommand(command="kick", description="👢 Исключить из чата"),
     BotCommand(command="ban", description="🚫 Забанить участника"),
     BotCommand(command="unban", description="🔓 Разбанить участника"),
-    BotCommand(command="purge", description="🧹 Очистить сообщения"),
+    BotCommand(command="purge", description="🧹 Очистить N сообщений (/purge 10)"),
     BotCommand(command="setrules", description="📜 Установить правила чата"),
     BotCommand(command="all_facts", description="📚 Все сохранённые факты"),
     BotCommand(command="export_facts", description="📥 Скачать базу знаний (.txt)"),

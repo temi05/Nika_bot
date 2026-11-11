@@ -125,7 +125,7 @@ def build_general_admin_router(db: SupabaseDB, bot_name: str, ai: AIService) -> 
             "• <code>/mute [10m|2h|1d]</code>, <code>/unmute</code> — Мут / размут\n"
             "• <code>/warn</code>, <code>/unwarn</code>, <code>/warns</code> — Управление варнами\n"
             "• <code>/setrules</code>, <code>/rules</code> — Установка и просмотр правил чата\n"
-            "• <code>/purge [N]</code> — Очистка сообщений\n"
+            "• <code>/purge &lt;1-100&gt;</code> — Очистка указанного числа сообщений\n"
             "• <code>/banword</code>, <code>/unbanword</code>, <code>/listwords</code> — Фильтр стоп-слов\n"
             "• <code>/all_facts</code>, <code>/export_facts</code>, <code>/clean_memory</code> — Управление базой знаний\n"
             "• <code>/backup_memory</code>, <code>/restore_memory</code> — Бэкап и восстановление памяти\n"

@@ -523,15 +523,43 @@ def build_admin_router(bot: Bot, db: SupabaseDB) -> Router:
             await message.answer("⛔ Нет прав.")
             return
 
-        count = 10
-        if command.args and command.args.strip().isdigit():
-            count = max(1, min(100, int(command.args.strip())))
+        raw_arg = (command.args or "").strip()
+        if not raw_arg:
+            await message.answer(
+                "🛡 <b>Защита от случайной очистки чата</b>\n\n"
+                "Команда <code>/purge</code> без числа не срабатывает, чтобы случайно не удалить лишнее.\n"
+                "Укажи точное количество сообщений (от <b>1</b> до <b>100</b>):\n"
+                "• <code>/purge 5</code> — удалить последние 5 сообщений\n"
+                "• Ответом на сообщение: <code>/purge 1</code> — удалить конкретное сообщение",
+                parse_mode="HTML",
+            )
+            return
+
+        if not (raw_arg.isascii() and raw_arg.isdigit()):
+            await message.answer(
+                "❌ Укажи точное число сообщений от <b>1</b> до <b>100</b> (например: <code>/purge 10</code>).\n"
+                "Варианты вроде <code>/purge all</code> заблокированы для защиты чата.",
+                parse_mode="HTML",
+            )
+            return
+
+        count = int(raw_arg)
+        if count < 1 or count > 100:
+            await message.answer(
+                "⚠️ За один раз можно удалить от <b>1</b> до <b>100</b> сообщений (например: <code>/purge 20</code>).\n"
+                "Лимит установлен для защиты от случайной очистки всего чата.",
+                parse_mode="HTML",
+            )
+            return
 
         ids_to_delete: list[int] = [message.message_id]
-        if message.reply_to_message:
-            start_id = message.reply_to_message.message_id
-            end_id = message.message_id
-            span = list(range(start_id, end_id))[-100:]
+        reply_msg = getattr(message, "reply_to_message", None)
+        reply_mid = getattr(reply_msg, "message_id", None) if reply_msg else None
+        thread_id = getattr(message, "message_thread_id", None)
+        is_real_reply = bool(reply_mid and reply_mid != thread_id and reply_mid < message.message_id)
+
+        if is_real_reply and reply_mid is not None:
+            span = list(range(reply_mid, message.message_id))[:count]
             ids_to_delete.extend(span)
         else:
             for offset in range(1, count + 1):
