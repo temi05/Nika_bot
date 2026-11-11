@@ -1,0 +1,24 @@
+name: Keep Render Bot Awake
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    env:
+      TARGET_BASE_URL: ${{ vars.RENDER_EXTERNAL_URL || secrets.RENDER_EXTERNAL_URL }}
+    steps:
+      - name: Ping Render /ping endpoint
+        run: |
+          if [ -z "${TARGET_BASE_URL}" ]; then
+            echo "RENDER_EXTERNAL_URL variable/secret is not configured yet; skipping ping."
+            exit 0
+          fi
+          CLEAN_URL="${TARGET_BASE_URL%/}/ping"
+          echo "Pinging ${CLEAN_URL} ..."
+          curl -fsS --retry 2 --retry-delay 5 --max-time 25 "${CLEAN_URL}"
+          echo ""

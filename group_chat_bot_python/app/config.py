@@ -76,6 +76,12 @@ class Settings(BaseSettings):
         default_factory=lambda: [861713427],
         alias="SUPERADMIN_IDS",
     )
+    developer_usernames: list[str] | set[str] | str = Field(
+        default_factory=list,
+        alias="DEVELOPER_USERNAMES",
+    )
+    keep_alive_enabled: bool = Field(default=True, alias="KEEP_ALIVE_ENABLED")
+    keep_alive_interval_seconds: int = Field(default=600, alias="KEEP_ALIVE_INTERVAL_SECONDS")
 
     @field_validator("superadmin_ids", mode="before")
     @classmethod
@@ -106,6 +112,22 @@ class Settings(BaseSettings):
                         continue
             return parsed or [861713427]
         return [861713427]
+
+    @field_validator("developer_usernames", mode="before")
+    @classmethod
+    def _parse_developer_usernames(cls, value: Any) -> list[str]:
+        if value is None or value == "":
+            return []
+        if isinstance(value, (list, tuple, set)):
+            items = [str(item).strip().lstrip("@").lower() for item in value]
+            return [item for item in items if item]
+        if isinstance(value, str):
+            cleaned = value.strip().strip("[]()")
+            if not cleaned:
+                return []
+            items = [part.strip().lstrip("@").lower() for part in cleaned.split(",")]
+            return [item for item in items if item]
+        return []
 
     @property
     def effective_ai_api_key(self) -> str | None:
@@ -138,3 +160,28 @@ def get_superadmin_ids() -> set[int]:
             if part and part.lstrip("-").isdigit():
                 ids.add(int(part))
         return ids
+
+
+def get_developer_usernames() -> set[str]:
+    try:
+        configured = set(get_settings().developer_usernames)
+    except Exception:
+        configured = set()
+    raw = os.getenv("DEVELOPER_USERNAMES", "")
+    if raw:
+        for part in raw.strip().strip("[]()").split(","):
+            clean = part.strip().lstrip("@").lower()
+            if clean:
+                configured.add(clean)
+    return configured
+
+
+def is_developer_user(user_id: int | None, username: str | None = None) -> bool:
+    if user_id and int(user_id) in get_superadmin_ids():
+        return True
+    if username:
+        clean_username = username.strip().lstrip("@").lower()
+        if clean_username and clean_username in get_developer_usernames():
+            return True
+    return False
+

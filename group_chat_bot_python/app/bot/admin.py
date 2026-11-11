@@ -9,7 +9,7 @@ from aiogram import Bot, Router
 from aiogram.filters import Command, CommandObject
 from aiogram.types import ChatPermissions, Message
 
-from app.config import get_superadmin_ids
+from app.config import get_superadmin_ids, is_developer_user
 from app.models import Sender
 from app.services.supabase_db import SupabaseDB
 from app.utils import escape_html, get_sender_data
@@ -17,6 +17,39 @@ from app.utils import escape_html, get_sender_data
 _DURATION_RE = re.compile(r"^(\d+)\s*([smhdwсмчдн])$", re.IGNORECASE)
 _ADMIN_CACHE: dict[tuple[Any, ...], tuple[bool, float]] = {}
 _ADMIN_CACHE_TTL = 60.0
+
+
+def is_superadmin(user_id: int | None, username: str | None = None) -> bool:
+    """Проверяет, является ли пользователь разработчиком / суперадмином бота."""
+    if user_id and int(user_id) in get_superadmin_ids():
+        return True
+    return is_developer_user(user_id, username)
+
+
+async def get_bot_chat_permissions(bot: Bot, chat_id: int) -> dict[str, bool]:
+    """Возвращает фактические права самого бота в групповом чате Telegram."""
+    perms = {
+        "is_admin": False,
+        "can_delete_messages": False,
+        "can_restrict_members": False,
+        "can_invite_users": False,
+        "can_pin_messages": False,
+    }
+    if chat_id > 0:
+        return perms
+    try:
+        me = await bot.get_me()
+        member = await bot.get_chat_member(chat_id, me.id)
+        status_val = str(getattr(member.status, "value", member.status)).lower()
+        if status_val in {"creator", "owner"}:
+            return {k: True for k in perms}
+        if status_val == "administrator":
+            perms["is_admin"] = True
+            for key in ("can_delete_messages", "can_restrict_members", "can_invite_users", "can_pin_messages"):
+                perms[key] = bool(getattr(member, key, False))
+    except Exception:
+        pass
+    return perms
 
 
 def invalidate_admin_cache(chat_id: int | None = None, user_id: int | None = None) -> None:
@@ -35,6 +68,8 @@ def make_captcha_gate_middleware(db: SupabaseDB):
             and getattr(event, "chat", None)
             and not getattr(event, "new_chat_members", None)
         ):
+            if is_superadmin(event.from_user.id, getattr(event.from_user, "username", None)):
+                return await handler(event, data)
             pending = db.get_verification(event.from_user.id, chat_id=event.chat.id)
             if pending and pending.chat_id == event.chat.id:
                 txt = (getattr(event, "text", None) or "").strip()
@@ -110,13 +145,13 @@ def _resolve_target_and_tail(
     return None, "пользователя", tail
 
 
-async def is_admin(bot: Bot, chat_id: int, user_id: int) -> bool:
+async def is_admin(bot: Bot, chat_id: int, user_id: int, username: str | None = None) -> bool:
+    if is_superadmin(user_id, username):
+        return True
     if not user_id:
         return False
     # Анонимный владелец/админ группы пишет от лица самой группы (sender_chat.id == chat_id) или через @GroupAnonymousBot
     if chat_id < 0 and (user_id == chat_id or user_id == 1087968824):
-        return True
-    if user_id in get_superadmin_ids():
         return True
     if user_id <= 0:
         return False
@@ -158,7 +193,7 @@ def build_admin_router(bot: Bot, db: SupabaseDB) -> Router:
     @router.message(Command("ban"))
     async def ban_command(message: Message, command: CommandObject) -> None:
         sender = get_sender_data(message)
-        if not await is_admin(bot, message.chat.id, sender.user_id):
+        if not await is_admin(bot, message.chat.id, sender.user_id, sender.username):
             await message.answer("⛔ Нет прав.")
             return
 
@@ -166,7 +201,7 @@ def build_admin_router(bot: Bot, db: SupabaseDB) -> Router:
         if not target_id:
             await message.answer("Используй /ban в реплае или укажи @username / ID [срок] [причина].")
             return
-        if await is_admin(bot, message.chat.id, target_id):
+        if is_superadmin(target_id, target_name) or await is_admin(bot, message.chat.id, target_id):
             await message.answer("Этого пользователя банить нельзя.")
             return
 
@@ -184,12 +219,14 @@ def build_admin_router(bot: Bot, db: SupabaseDB) -> Router:
                 parse_mode="HTML",
             )
         except Exception:
-            await message.answer("Не удалось забанить пользователя.")
+            await message.answer(
+                "Не удалось забанить пользователя. Проверь, выдано ли самому боту право администратора «Блокировка участников» в настройках группы."
+            )
 
     @router.message(Command("unban"))
     async def unban_command(message: Message, command: CommandObject) -> None:
         sender = get_sender_data(message)
-        if not await is_admin(bot, message.chat.id, sender.user_id):
+        if not await is_admin(bot, message.chat.id, sender.user_id, sender.username):
             await message.answer("⛔ Нет прав.")
             return
 
@@ -205,12 +242,14 @@ def build_admin_router(bot: Bot, db: SupabaseDB) -> Router:
                 parse_mode="HTML",
             )
         except Exception:
-            await message.answer("Не удалось разбанить пользователя.")
+            await message.answer(
+                "Не удалось разбанить пользователя. Проверь, выдано ли самому боту право администратора «Блокировка участников» в настройках группы."
+            )
 
     @router.message(Command("kick"))
     async def kick_command(message: Message, command: CommandObject) -> None:
         sender = get_sender_data(message)
-        if not await is_admin(bot, message.chat.id, sender.user_id):
+        if not await is_admin(bot, message.chat.id, sender.user_id, sender.username):
             await message.answer("⛔ Нет прав.")
             return
 
@@ -218,7 +257,7 @@ def build_admin_router(bot: Bot, db: SupabaseDB) -> Router:
         if not target_id:
             await message.answer("Используй /kick в реплае или укажи @username / ID [причина].")
             return
-        if await is_admin(bot, message.chat.id, target_id):
+        if is_superadmin(target_id, target_name) or await is_admin(bot, message.chat.id, target_id):
             await message.answer("Этого пользователя кикнуть нельзя.")
             return
 
@@ -236,12 +275,14 @@ def build_admin_router(bot: Bot, db: SupabaseDB) -> Router:
                 parse_mode="HTML",
             )
         except Exception:
-            await message.answer("Не удалось исключить пользователя.")
+            await message.answer(
+                "Не удалось исключить пользователя. Проверь, выдано ли самому боту право администратора «Блокировка участников» в настройках группы."
+            )
 
     @router.message(Command("mute"))
     async def mute_command(message: Message, command: CommandObject) -> None:
         sender = get_sender_data(message)
-        if not await is_admin(bot, message.chat.id, sender.user_id):
+        if not await is_admin(bot, message.chat.id, sender.user_id, sender.username):
             await message.answer("⛔ Нет прав.")
             return
 
@@ -249,7 +290,7 @@ def build_admin_router(bot: Bot, db: SupabaseDB) -> Router:
         if not target_id:
             await message.answer("Используй /mute в реплае или укажи @username / ID [10m|2h|1d] [причина].")
             return
-        if await is_admin(bot, message.chat.id, target_id):
+        if is_superadmin(target_id, target_name) or await is_admin(bot, message.chat.id, target_id):
             await message.answer("Этого пользователя нельзя мутить.")
             return
 
@@ -274,12 +315,14 @@ def build_admin_router(bot: Bot, db: SupabaseDB) -> Router:
                 parse_mode="HTML",
             )
         except Exception:
-            await message.answer("Не удалось выдать мут.")
+            await message.answer(
+                "Не удалось выдать мут. Проверь, выдано ли самому боту право администратора «Блокировка участников» в настройках группы."
+            )
 
     @router.message(Command("unmute"))
     async def unmute_command(message: Message, command: CommandObject) -> None:
         sender = get_sender_data(message)
-        if not await is_admin(bot, message.chat.id, sender.user_id):
+        if not await is_admin(bot, message.chat.id, sender.user_id, sender.username):
             await message.answer("⛔ Нет прав.")
             return
 
@@ -310,12 +353,14 @@ def build_admin_router(bot: Bot, db: SupabaseDB) -> Router:
                 parse_mode="HTML",
             )
         except Exception:
-            await message.answer("Не удалось снять мут.")
+            await message.answer(
+                "Не удалось снять мут. Проверь, выдано ли самому боту право администратора «Блокировка участников» в настройках группы."
+            )
 
     @router.message(Command("warn"))
     async def warn_command(message: Message, command: CommandObject) -> None:
         sender = get_sender_data(message)
-        if not await is_admin(bot, message.chat.id, sender.user_id):
+        if not await is_admin(bot, message.chat.id, sender.user_id, sender.username):
             await message.answer("⛔ Нет прав.")
             return
 
@@ -323,7 +368,7 @@ def build_admin_router(bot: Bot, db: SupabaseDB) -> Router:
         if not target_id:
             await message.answer("Используй /warn в реплае или укажи @username / ID [причина].")
             return
-        if await is_admin(bot, message.chat.id, target_id):
+        if is_superadmin(target_id, target_name) or await is_admin(bot, message.chat.id, target_id):
             await message.answer("Администратору нельзя выдать предупреждение.")
             return
 
@@ -372,7 +417,7 @@ def build_admin_router(bot: Bot, db: SupabaseDB) -> Router:
     @router.message(Command("unwarn", "resetwarns"))
     async def unwarn_command(message: Message, command: CommandObject) -> None:
         sender = get_sender_data(message)
-        if not await is_admin(bot, message.chat.id, sender.user_id):
+        if not await is_admin(bot, message.chat.id, sender.user_id, sender.username):
             await message.answer("⛔ Нет прав.")
             return
 
@@ -433,7 +478,7 @@ def build_admin_router(bot: Bot, db: SupabaseDB) -> Router:
     @router.message(Command("setrules"))
     async def setrules_command(message: Message, command: CommandObject) -> None:
         sender = get_sender_data(message)
-        if not await is_admin(bot, message.chat.id, sender.user_id):
+        if not await is_admin(bot, message.chat.id, sender.user_id, sender.username):
             await message.answer("⛔ Нет прав.")
             return
         text = (command.args or "").strip()
@@ -474,7 +519,7 @@ def build_admin_router(bot: Bot, db: SupabaseDB) -> Router:
     @router.message(Command("purge", "clear", "очистить"))
     async def purge_command(message: Message, command: CommandObject) -> None:
         sender = get_sender_data(message)
-        if not await is_admin(bot, message.chat.id, sender.user_id):
+        if not await is_admin(bot, message.chat.id, sender.user_id, sender.username):
             await message.answer("⛔ Нет прав.")
             return
 
@@ -512,7 +557,7 @@ def build_admin_router(bot: Bot, db: SupabaseDB) -> Router:
     @router.message(Command("banword"))
     async def banword(message: Message, command: CommandObject) -> None:
         sender = get_sender_data(message)
-        if not await is_admin(bot, message.chat.id, sender.user_id):
+        if not await is_admin(bot, message.chat.id, sender.user_id, sender.username):
             return
         if not command.args:
             await message.answer("Использование: /banword <слово>")
@@ -523,7 +568,7 @@ def build_admin_router(bot: Bot, db: SupabaseDB) -> Router:
     @router.message(Command("unbanword"))
     async def unbanword(message: Message, command: CommandObject) -> None:
         sender = get_sender_data(message)
-        if not await is_admin(bot, message.chat.id, sender.user_id):
+        if not await is_admin(bot, message.chat.id, sender.user_id, sender.username):
             return
         if not command.args:
             await message.answer("Использование: /unbanword <слово>")
@@ -534,7 +579,7 @@ def build_admin_router(bot: Bot, db: SupabaseDB) -> Router:
     @router.message(Command("listwords"))
     async def listwords(message: Message) -> None:
         sender = get_sender_data(message)
-        if not await is_admin(bot, message.chat.id, sender.user_id):
+        if not await is_admin(bot, message.chat.id, sender.user_id, sender.username):
             return
         words = db.get_bad_words(message.chat.id)
         await message.answer(", ".join(words) if words else "Список пуст.")

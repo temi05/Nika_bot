@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import difflib
 import hashlib
 import json
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +23,38 @@ def _md5_short(text: str, length: int = 12) -> str:
     return hashlib.md5(text.encode("utf-8")).hexdigest()[:length]
 
 
+def _normalize_fact_text(text: str) -> str:
+    return re.sub(r"\W+", " ", (text or "").casefold()).strip()
+
+
+def _resolve_entity_name(fact: str, item_entities: Any, participants: list[str]) -> str:
+    if isinstance(item_entities, list):
+        for ent in item_entities:
+            clean_ent = str(ent or "").strip()
+            if clean_ent:
+                return clean_ent
+    fact_lower = (fact or "").casefold()
+    for participant in participants:
+        clean_part = str(participant or "").strip()
+        bare_part = clean_part.lstrip("@").casefold()
+        if bare_part and len(bare_part) >= 2 and bare_part in fact_lower:
+            return clean_part
+    return ""
+
+
+def _iter_docs_newest_first(
+    docs: list[str],
+    metas: list[dict[str, Any] | None],
+) -> list[tuple[str, dict[str, Any]]]:
+    indexed: list[tuple[str, int, str, dict[str, Any]]] = []
+    for idx, (doc, meta) in enumerate(zip(docs, metas)):
+        safe_meta = dict(meta or {})
+        updated_at = str(safe_meta.get("updated_at") or "")
+        indexed.append((updated_at, idx, doc, safe_meta))
+    indexed.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    return [(doc, safe_meta) for _, _, doc, safe_meta in indexed]
+
+
 class LightweightEmbeddingFunction:
     """Легковесный математический векторный эмбеддер для экономии RAM на Render (<20 MB)"""
     def __init__(self, dim: int = 128) -> None:
@@ -28,6 +62,9 @@ class LightweightEmbeddingFunction:
 
     def name(self) -> str:
         return "lightweight_embedding_function"
+
+    def is_legacy(self) -> bool:
+        return True
 
     def embed_documents(self, input: list[str]) -> list[list[float]]:
         embeddings = []
@@ -115,6 +152,50 @@ class ChromaMemoryProvider(BaseMemoryProvider):
         details = " ".join(f"{key}={value!r}" for key, value in kwargs.items())
         print(f"[CHROMA_MEMORY:{action}] {details}".strip())
 
+    def _sync_upsert_db(
+        self,
+        chat_id: int,
+        doc_id: str,
+        fact: str,
+        *,
+        entity_name: str = "",
+        source: str = "fact",
+        confidence: float = 0.8,
+        source_message_id: int | None = None,
+        user_id: int | None = None,
+    ) -> None:
+        if not hasattr(self.db, "upsert_chroma_fact_to_knowledge"):
+            return
+        try:
+            self.db.upsert_chroma_fact_to_knowledge(
+                chat_id,
+                doc_id,
+                fact,
+                entity_name=entity_name,
+                source=source,
+                confidence=confidence,
+                source_message_id=source_message_id,
+                user_id=user_id,
+            )
+        except Exception as e:
+            self._log("db_sync_upsert_error", error=str(e))
+
+    def _sync_delete_db(self, chat_id: int, doc_ids: list[str] | str) -> None:
+        if not hasattr(self.db, "delete_knowledge_by_chroma_id"):
+            return
+        try:
+            self.db.delete_knowledge_by_chroma_id(chat_id, doc_ids)
+        except Exception as e:
+            self._log("db_sync_delete_error", error=str(e))
+
+    def _sync_update_db(self, chat_id: int, doc_id: str, new_text: str) -> None:
+        if not hasattr(self.db, "update_knowledge_by_chroma_id"):
+            return
+        try:
+            self.db.update_knowledge_by_chroma_id(chat_id, doc_id, new_text)
+        except Exception as e:
+            self._log("db_sync_update_error", error=str(e))
+
     def _init_chroma(self) -> None:
         try:
             import chromadb
@@ -149,23 +230,21 @@ class ChromaMemoryProvider(BaseMemoryProvider):
             return {"healthy": False, "provider": "chroma", "error": str(e)}
 
     def _migrate_if_needed(self) -> None:
-        """Однократный перенос старых фактов из Supabase bot_knowledge в ChromaDB при пустой базе"""
+        """Восстановление/перенос фактов из Supabase bot_knowledge в ChromaDB при холодном старте"""
         if not self._collection or self._collection.count() > 0 or self._migrated_from_supabase:
             return
 
         try:
             self._log("migration_start", status="fetching_from_supabase")
-            records = self.db._knowledge().select("id,chat_id,fact,entity_name,fact_type,confidence").execute()
-            if not records.data:
+            records = self.db._knowledge().select("*").execute()
+            if not records or not records.data:
                 self._log("migration_empty", reason="no_records_in_supabase")
                 self._migrated_from_supabase = True
                 return
 
-            documents = []
-            metadatas = []
-            ids = []
+            by_id: dict[str, tuple[str, dict[str, Any]]] = {}
 
-            for idx, item in enumerate(records.data):
+            for item in records.data:
                 rec_id = item.get("id")
                 raw_fact = (item.get("fact") or "").strip()
                 fact_text = _clean_legacy_fact(raw_fact)
@@ -183,32 +262,54 @@ class ChromaMemoryProvider(BaseMemoryProvider):
                     except Exception:
                         pass
 
+                raw_meta = item.get("meta") if isinstance(item.get("meta"), dict) else {}
                 chat_id = str(item.get("chat_id") or "0")
-                entity_name = str(item.get("entity_name") or "")
-                source = str(item.get("fact_type") or "fact")
+                entity_name = str(item.get("entity_name") or raw_meta.get("entity_name") or "")
+                source = str(item.get("fact_type") or raw_meta.get("source") or "fact")
                 confidence = float(item.get("confidence") or 0.55)
+                updated_at = str(item.get("last_seen_at") or item.get("created_at") or "")
 
-                documents.append(fact_text)
-                metadatas.append(
-                    {
-                        "chat_id": chat_id,
-                        "entity_name": entity_name,
-                        "source": source,
-                        "confidence": confidence,
-                    }
-                )
-                ids.append(f"supa_{item.get('id') or idx}")
+                stored_cid = str(raw_meta.get("chroma_id") or "").strip()
+                if stored_cid:
+                    doc_id = stored_cid
+                else:
+                    if source in {"event_timeline", "event"}:
+                        prefix = "event"
+                    elif source == "manual_admin":
+                        prefix = "manual"
+                    else:
+                        prefix = "fact"
+                    doc_id = f"{prefix}_{chat_id}_{_md5_short(fact_text)}"
 
-            if documents:
-                self._collection.add(documents=documents, metadatas=metadatas, ids=ids)
-                self._log("migration_success", imported_count=len(documents))
-                self._migrated_from_supabase = True
-                if self.backup_service:
+                meta_dict: dict[str, Any] = {
+                    "chat_id": chat_id,
+                    "entity_name": entity_name,
+                    "source": source,
+                    "confidence": confidence,
+                    "updated_at": updated_at,
+                }
+                src_mid = item.get("source_message_id") or raw_meta.get("source_message_id")
+                if src_mid is not None:
                     try:
-                        loop = asyncio.get_running_loop()
-                        loop.create_task(self.backup_service.upload_backup("💾 Первичный бэкап с фактами из Supabase"))
-                    except RuntimeError:
+                        meta_dict["source_message_id"] = int(src_mid)
+                    except (TypeError, ValueError):
                         pass
+                uid_val = item.get("entity_user_id") or raw_meta.get("user_id") or raw_meta.get("entity_user_id")
+                if uid_val is not None:
+                    try:
+                        meta_dict["user_id"] = int(uid_val)
+                    except (TypeError, ValueError):
+                        pass
+
+                by_id[doc_id] = (fact_text, meta_dict)
+
+            if by_id:
+                ids = list(by_id.keys())
+                documents = [by_id[cid][0] for cid in ids]
+                metadatas = [by_id[cid][1] for cid in ids]
+                self._collection.upsert(documents=documents, metadatas=metadatas, ids=ids)
+                self._log("migration_success", imported_count=len(documents))
+            self._migrated_from_supabase = True
         except Exception as e:
             self._log("migration_error", error=str(e))
 
@@ -247,29 +348,37 @@ class ChromaMemoryProvider(BaseMemoryProvider):
             return ""
 
         try:
-            user_facts: list[str] = self._profile_facts_from_db(chat_id, user_id)
+            db_profile_facts: list[str] = self._profile_facts_from_db(chat_id, user_id)
+            chroma_user_facts: list[str] = []
             mentioned_facts: list[str] = []
 
             all_data = self._collection.get(where={"chat_id": str(chat_id)})
             event_facts: list[str] = []
             if all_data and all_data.get("documents"):
-                docs = all_data["documents"]
-                metas = all_data["metadatas"]
+                ordered_pairs = _iter_docs_newest_first(
+                    all_data["documents"],
+                    all_data.get("metadatas") or [],
+                )
+                clean_uname = (user_name or "").strip().casefold()
 
-                # 1. Факты об отправителе и важные события чата
-                for doc, meta in zip(docs, metas):
+                # 1. Свежие факты об отправителе и важные события чата (сначала самые новые!)
+                for doc, meta in ordered_pairs:
                     src = str(meta.get("source") or "")
                     if src in {"event_timeline", "event"} or "событие" in src.lower():
                         event_facts.append(doc)
-                    elif meta.get("entity_name") == user_name or (user_name and user_name.casefold() in doc.casefold()):
-                        user_facts.append(doc)
+                    elif (
+                        (user_id and meta.get("user_id") == user_id)
+                        or (clean_uname and str(meta.get("entity_name") or "").strip().casefold() == clean_uname)
+                        or (clean_uname and clean_uname in doc.casefold())
+                    ):
+                        chroma_user_facts.append(doc)
 
                 # 2. Точный поиск фактов об упомянутых участниках/сущностях в сообщении
                 raw_words = [w.strip(" .,!?:;\"'()[]{}<>-").casefold() for w in re.findall(r"\b[\w\d_@]+\b", user_message)]
                 stop_words = {"расскажи", "что", "про", "тебя", "меня", "кого", "какое", "знаешь", "есть", "тогда", "скажи", "какой", "какая", "почему", "зачем", "когда", "где", "как", "еще", "ещё"}
                 target_words = [w for w in raw_words if len(w) >= 3 and w not in stop_words]
 
-                for doc, meta in zip(docs, metas):
+                for doc, meta in ordered_pairs:
                     doc_lower = doc.casefold()
                     entity_lower = str(meta.get("entity_name") or "").casefold()
                     for word in target_words:
@@ -295,9 +404,13 @@ class ChromaMemoryProvider(BaseMemoryProvider):
             except Exception:
                 pass
 
-            profile_combined = _clean_memory_items(list(dict.fromkeys(user_facts[:4] + mentioned_facts[:4])))
-            topic_combined = _clean_memory_items(list(dict.fromkeys(semantic_facts[:4] + meme_facts[:4])))
-            events_combined = _clean_memory_items(list(dict.fromkeys(event_facts[:4])))
+            profile_combined = _clean_memory_items(
+                list(dict.fromkeys(chroma_user_facts[:5] + mentioned_facts[:4] + db_profile_facts[:3]))
+            )[:6]
+            topic_combined = _clean_memory_items(
+                list(dict.fromkeys(semantic_facts[:5] + meme_facts[:4]))
+            )[:6]
+            events_combined = _clean_memory_items(list(dict.fromkeys(event_facts[:5])))[:5]
 
             return format_memory_context(
                 profile_facts=profile_combined,
@@ -315,6 +428,7 @@ class ChromaMemoryProvider(BaseMemoryProvider):
         try:
             clean_event = event_text.strip()
             doc_id = f"event_{chat_id}_{_md5_short(clean_event)}"
+            now_iso = datetime.now(timezone.utc).isoformat()
             self._collection.upsert(
                 documents=[clean_event],
                 metadatas=[{
@@ -322,8 +436,17 @@ class ChromaMemoryProvider(BaseMemoryProvider):
                     "entity_name": entity_name,
                     "source": "event_timeline",
                     "confidence": 0.95,
+                    "updated_at": now_iso,
                 }],
                 ids=[doc_id],
+            )
+            self._sync_upsert_db(
+                chat_id,
+                doc_id,
+                clean_event,
+                entity_name=entity_name,
+                source="event_timeline",
+                confidence=0.95,
             )
             self._log("chat_event_stored", chat_id=chat_id, event=clean_event[:60])
             if self.backup_service:
@@ -346,6 +469,17 @@ class ChromaMemoryProvider(BaseMemoryProvider):
         if not extracted:
             return
 
+        existing_items: list[tuple[str, str, str]] = []
+        try:
+            existing_data = self._collection.get(where={"chat_id": str(chat_id)})
+            if existing_data and existing_data.get("ids"):
+                for ex_id, ex_doc in zip(existing_data["ids"], existing_data.get("documents") or []):
+                    ex_str = str(ex_doc or "").strip()
+                    if ex_str:
+                        existing_items.append((ex_id, ex_str, _normalize_fact_text(ex_str)))
+        except Exception:
+            pass
+
         stored = 0
         for item in extracted.get("facts", [])[: self.settings.memory_extraction_max_facts]:
             fact = str(item.get("fact") or "").strip()
@@ -356,34 +490,64 @@ class ChromaMemoryProvider(BaseMemoryProvider):
             if confidence < self.settings.memory_fact_min_confidence:
                 continue
 
-            # Умный поиск дубликатов по смыслу перед записью
-            entity_name = (item.get("entities") or [participants[0] if participants else ""])[0]
-            doc_id = f"fact_{chat_id}_{_md5_short(fact)}"
+            norm_fact = _normalize_fact_text(fact)
+            if not norm_fact:
+                continue
 
-            try:
-                existing = self._collection.query(
-                    query_texts=[fact],
-                    n_results=1,
-                    where={"chat_id": str(chat_id)}
+            entity_name = _resolve_entity_name(fact, item.get("entities"), participants)
+            source = str(item.get("source") or "ai_extracted")
+
+            exact_existing_id: str | None = None
+            near_dup_idx: int | None = None
+            best_ratio = 0.0
+            for idx, (ex_id, _ex_str, ex_norm) in enumerate(existing_items):
+                if ex_norm == norm_fact:
+                    exact_existing_id = ex_id
+                    break
+                ratio = difflib.SequenceMatcher(None, norm_fact, ex_norm).ratio()
+                if ratio >= 0.88 and ratio > best_ratio:
+                    best_ratio = ratio
+                    near_dup_idx = idx
+
+            if exact_existing_id is not None:
+                self._sync_upsert_db(
+                    chat_id,
+                    exact_existing_id,
+                    fact,
+                    entity_name=entity_name,
+                    source=source,
+                    confidence=confidence,
                 )
-                if existing and existing.get("distances") and existing["distances"][0]:
-                    dist = existing["distances"][0][0]
-                    if dist < 0.15 and existing.get("ids") and existing["ids"][0]:
-                        doc_id = existing["ids"][0][0]  # Перезаписываем существующий аналогичный факт
-            except Exception:
-                pass
+                continue
 
+            if near_dup_idx is not None:
+                doc_id = existing_items[near_dup_idx][0]
+                existing_items[near_dup_idx] = (doc_id, fact, norm_fact)
+            else:
+                doc_id = f"fact_{chat_id}_{_md5_short(fact)}"
+                existing_items.append((doc_id, fact, norm_fact))
+
+            now_iso = datetime.now(timezone.utc).isoformat()
             self._collection.upsert(
                 documents=[fact],
                 metadatas=[
                     {
                         "chat_id": str(chat_id),
                         "entity_name": entity_name,
-                        "source": str(item.get("source") or "ai_extracted"),
+                        "source": source,
                         "confidence": confidence,
+                        "updated_at": now_iso,
                     }
                 ],
                 ids=[doc_id],
+            )
+            self._sync_upsert_db(
+                chat_id,
+                doc_id,
+                fact,
+                entity_name=entity_name,
+                source=source,
+                confidence=confidence,
             )
 
             stored += 1
@@ -429,6 +593,7 @@ class ChromaMemoryProvider(BaseMemoryProvider):
         *,
         source_message_id: int | None = None,
         user_id: int | None = None,
+        _sync_to_db: bool = True,
     ) -> bool:
         """Сохранение одного конкретного факта вручную (например через remember_user_fact)"""
         if not self._collection or not fact.strip():
@@ -437,10 +602,12 @@ class ChromaMemoryProvider(BaseMemoryProvider):
         try:
             clean_fact = fact.strip()
             doc_id = f"fact_{chat_id}_{_md5_short(clean_fact)}"
+            now_iso = datetime.now(timezone.utc).isoformat()
             meta: dict[str, Any] = {
                 "chat_id": str(chat_id),
                 "entity_name": entity_name,
                 "source": "manual_remember",
+                "updated_at": now_iso,
             }
             if source_message_id is not None:
                 meta["source_message_id"] = int(source_message_id)
@@ -451,6 +618,17 @@ class ChromaMemoryProvider(BaseMemoryProvider):
                 metadatas=[meta],
                 ids=[doc_id],
             )
+            if _sync_to_db:
+                self._sync_upsert_db(
+                    chat_id,
+                    doc_id,
+                    clean_fact,
+                    entity_name=entity_name,
+                    source="manual_remember",
+                    confidence=0.95,
+                    source_message_id=source_message_id,
+                    user_id=user_id,
+                )
             self._log("single_fact_stored", chat_id=chat_id, fact=clean_fact[:60])
             if self.backup_service:
                 try:
@@ -504,6 +682,7 @@ class ChromaMemoryProvider(BaseMemoryProvider):
 
             if ids_to_delete:
                 self._collection.delete(ids=ids_to_delete)
+                self._sync_delete_db(chat_id, ids_to_delete)
                 if self.backup_service:
                     try:
                         loop = asyncio.get_running_loop()
@@ -522,19 +701,21 @@ class ChromaMemoryProvider(BaseMemoryProvider):
 
         try:
             results = self._collection.get(where={"chat_id": str(chat_id)})
-            deleted = 0
+            deleted_ids: list[str] = []
             if results and results.get("ids"):
                 for doc_id, doc in zip(results["ids"], results["documents"]):
                     if query.casefold() in doc.casefold():
                         self._collection.delete(ids=[doc_id])
-                        deleted += 1
-            if deleted > 0 and self.backup_service:
-                try:
-                    loop = asyncio.get_running_loop()
-                    loop.create_task(self.backup_service.upload_backup("💾 Бэкап после удаления факта"))
-                except RuntimeError:
-                    pass
-            return deleted
+                        deleted_ids.append(doc_id)
+            if deleted_ids:
+                self._sync_delete_db(chat_id, deleted_ids)
+                if self.backup_service:
+                    try:
+                        loop = asyncio.get_running_loop()
+                        loop.create_task(self.backup_service.upload_backup("💾 Бэкап после удаления факта"))
+                    except RuntimeError:
+                        pass
+            return len(deleted_ids)
         except Exception as e:
             self._log("delete_fact_error", error=str(e))
             return 0
@@ -545,6 +726,7 @@ class ChromaMemoryProvider(BaseMemoryProvider):
             return False
         clean_fact = fact_text.strip()
         doc_id = f"manual_{chat_id}_{_md5_short(clean_fact)}"
+        now_iso = datetime.now(timezone.utc).isoformat()
         self._collection.upsert(
             documents=[clean_fact],
             metadatas=[{
@@ -552,8 +734,17 @@ class ChromaMemoryProvider(BaseMemoryProvider):
                 "entity_name": entity_name,
                 "source": "manual_admin",
                 "confidence": 1.0,
+                "updated_at": now_iso,
             }],
             ids=[doc_id]
+        )
+        self._sync_upsert_db(
+            chat_id,
+            doc_id,
+            clean_fact,
+            entity_name=entity_name,
+            source="manual_admin",
+            confidence=1.0,
         )
         if self.backup_service:
             try:
@@ -570,14 +761,17 @@ class ChromaMemoryProvider(BaseMemoryProvider):
         all_data = self._collection.get(where={"chat_id": str(chat_id)})
         count = 0
         if all_data and all_data.get("documents"):
+            now_iso = datetime.now(timezone.utc).isoformat()
             for doc_id, doc, meta in zip(all_data["ids"], all_data["documents"], all_data["metadatas"]):
                 if old_text.casefold() in doc.casefold():
                     updated_doc = re.sub(re.escape(old_text), new_text, doc, flags=re.IGNORECASE)
+                    updated_meta = {**(meta or {}), "updated_at": now_iso}
                     self._collection.upsert(
                         documents=[updated_doc],
-                        metadatas=[meta],
+                        metadatas=[updated_meta],
                         ids=[doc_id]
                     )
+                    self._sync_update_db(chat_id, doc_id, updated_doc)
                     count += 1
         if count > 0 and self.backup_service:
             try:
@@ -597,7 +791,7 @@ class ChromaMemoryProvider(BaseMemoryProvider):
         user_name: str = "",
         limit: int = 10,
     ) -> list[str]:
-        """Возвращает факты, относящиеся к конкретному участнику"""
+        """Возвращает факты, относящиеся к конкретному участнику (сначала самые свежие)"""
         if isinstance(user_or_id, int):
             resolved_user_id: int | None = user_or_id
             if isinstance(user_name_or_limit, str):
@@ -626,8 +820,10 @@ class ChromaMemoryProvider(BaseMemoryProvider):
             facts: list[str] = []
             if results and results.get("documents"):
                 clean_name = resolved_user_name.strip().casefold()
-                for doc, meta in zip(results["documents"], results["metadatas"]):
-                    meta = meta or {}
+                for doc, meta in _iter_docs_newest_first(
+                    results["documents"],
+                    results.get("metadatas") or [],
+                ):
                     entity = str(meta.get("entity_name") or "").casefold()
                     if resolved_user_id and meta.get("user_id") == resolved_user_id:
                         facts.append(doc)
@@ -673,6 +869,7 @@ class ChromaMemoryProvider(BaseMemoryProvider):
             return False
         try:
             self._collection.delete(ids=[doc_id])
+            self._sync_delete_db(chat_id, [doc_id])
             if self.backup_service:
                 try:
                     loop = asyncio.get_running_loop()
@@ -691,12 +888,14 @@ class ChromaMemoryProvider(BaseMemoryProvider):
         try:
             results = self._collection.get(ids=[doc_id])
             if results and results.get("metadatas"):
-                meta = results["metadatas"][0]
+                clean_new = new_text.strip()
+                meta = {**(results["metadatas"][0] or {}), "updated_at": datetime.now(timezone.utc).isoformat()}
                 self._collection.upsert(
-                    documents=[new_text.strip()],
+                    documents=[clean_new],
                     metadatas=[meta],
                     ids=[doc_id],
                 )
+                self._sync_update_db(chat_id, doc_id, clean_new)
                 if self.backup_service:
                     try:
                         loop = asyncio.get_running_loop()
@@ -721,6 +920,7 @@ class ChromaMemoryProvider(BaseMemoryProvider):
             docs = list(all_data.get("documents") or [])
             if full_wipe:
                 self._collection.delete(ids=ids)
+                self._sync_delete_db(chat_id, ids)
                 return len(ids)
 
             seen: set[str] = set()
@@ -734,6 +934,7 @@ class ChromaMemoryProvider(BaseMemoryProvider):
                     seen.add(norm)
             if to_delete:
                 self._collection.delete(ids=to_delete)
+                self._sync_delete_db(chat_id, to_delete)
             return len(to_delete)
         except Exception as e:
             self._log("cleanup_chat_memory_error", error=str(e))

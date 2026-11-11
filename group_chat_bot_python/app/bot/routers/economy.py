@@ -8,7 +8,7 @@ from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKe
 
 from app.services.ai_service import AIService
 from app.services.supabase_db import SupabaseDB
-from app.bot.admin import is_admin, make_captcha_gate_middleware
+from app.bot.admin import is_admin, is_superadmin, make_captcha_gate_middleware
 from app.bot.routers.jail_helpers import (
     bail_cost,
     deny_if_jailed,
@@ -68,12 +68,19 @@ def build_economy_router(db: SupabaseDB, ai: AIService) -> Router:
         badges = db.get_user_badges(target.id)
         badges_str = " ".join(badges) if badges else "Нет"
 
+        if is_superadmin(target.user_id, target.username):
+            role_label = "👑 Разработчик бота"
+        elif await is_admin(message.bot, message.chat.id, target.user_id, target.username):
+            role_label = "🛡 Администратор"
+        else:
+            role_label = "Пользователь"
+
         body = (
             f"<b>{'Мой профиль' if target.user_id == sender.user_id else 'Профиль пользователя'}</b>\n\n"
             f"Имя: <code>{escape_html(target.display_name)}</code>\n"
             f"Ранг: <b>{escape_html(rank)}</b>\n"
             f"Бейджи: {badges_str}\n"
-            f"Роль: <i>Пользователь</i>\n"
+            f"Роль: <i>{role_label}</i>\n"
             f"Уровень: <b>{target.level}</b>\n"
             f"Прогресс: <code>{build_progress_bar(progress)} {int(progress)}%</code>\n"
             f"XP: <code>{target.xp} / {next_xp}</code>\n"

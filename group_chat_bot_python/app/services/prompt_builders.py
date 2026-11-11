@@ -20,6 +20,7 @@ def build_character_system_prompt(
     memory_context: str,
     personality_mode: str = "hard",
     compact_prompt: bool = False,
+    caller_is_owner: bool = False,
 ) -> str:
     stage = str(persona_state.get("stage", "fresh"))
     troll = float(persona_state.get("troll", 0.4))
@@ -28,6 +29,18 @@ def build_character_system_prompt(
     attachment = float(persona_state.get("attachment", 0.2))
     respect = float(persona_state.get("respect", 0.5))
     personality = _personality_profile(personality_mode)
+    owner_compact_note = (
+        "\n- Статус собеседника: это твой создатель и разработчик (полный доступ в боте, даже без админки Telegram). "
+        "Узнавай его как «своего» человека, относись тепло и с уважением, охотно помогай и выполняй его просьбы, сохраняя живой фирменный вайб."
+        if caller_is_owner
+        else ""
+    )
+    owner_xml_note = (
+        "\n        <creator_context>Собеседник — твой создатель и главный разработчик (полный доступ к управлению тобой, даже если у него нет плашки админа в чате). "
+        "Относись к нему тепло, лояльно и по-свойски: можешь легко иронизировать, но всегда признавай его авторитет и помогай без отказов.</creator_context>"
+        if caller_is_owner
+        else ""
+    )
 
     if compact_prompt:
         memory_block = memory_context if memory_context else "Полезных фактов пока нет."
@@ -42,7 +55,7 @@ def build_character_system_prompt(
             Контекст диалога размечен XML-тегами <msg>. Учитывай атрибуты author, reply_to и forwarded. Различай себя ({bot_name}) и других участников чата.
 
             Контекст пользователя и состояния:
-            - Имя: {user_name} (админ: {"да" if caller_is_admin else "нет"})
+            - Имя: {user_name} (админ: {"да" if caller_is_admin else "нет"}){owner_compact_note}
             - Настроение ({mood}/100): {_mood_note(mood)}
             - Отношения: {stage} (troll={troll:.2f}, warmth={warmth:.2f}, chaos={chaos:.2f}, respect={respect:.2f})
 
@@ -82,7 +95,7 @@ def build_character_system_prompt(
 
 
         <dynamic_context>
-        <user>Имя: {user_name} | Админ: {caller_is_admin}</user>
+        <user>Имя: {user_name} | Админ: {caller_is_admin} | Создатель бота: {caller_is_owner}</user>{owner_xml_note}
         <relationship>{_stage_note(stage)} {_relation_note(troll=troll, warmth=warmth, chaos=chaos, attachment=attachment, respect=respect)}</relationship>
         <mood>{_mood_note(mood)}</mood>
         </dynamic_context>
@@ -211,11 +224,11 @@ def format_memory_context(
     sections: list[str] = []
 
     if profile_facts:
-        sections.append("📋 Профиль и предпочтения собеседника:\n" + "\n".join(f"- {item}" for item in profile_facts[:5]))
+        sections.append("📋 Профиль и предпочтения собеседника:\n" + "\n".join(f"- {item}" for item in profile_facts[:6]))
     if topic_facts:
-        sections.append("🔍 Факты по теме разговора:\n" + "\n".join(f"- {item}" for item in topic_facts[:5]))
+        sections.append("🔍 Факты по теме разговора:\n" + "\n".join(f"- {item}" for item in topic_facts[:6]))
     if recent_facts:
-        sections.append("📜 Лента ярких событий чата:\n" + "\n".join(f"- {item}" for item in recent_facts[:4]))
+        sections.append("📜 Лента ярких событий чата:\n" + "\n".join(f"- {item}" for item in recent_facts[:5]))
 
     return "\n\n".join(sections).strip()
 

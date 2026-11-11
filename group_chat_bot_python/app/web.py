@@ -1,15 +1,27 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import random
 import time
 from contextlib import asynccontextmanager
+from urllib.parse import urlparse
 
+import httpx
 from aiogram import Bot, Dispatcher
-from aiogram.types import Update, BotCommand, BotCommandScopeDefault, BotCommandScopeAllChatAdministrators, InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import (
+    BotCommand,
+    BotCommandScopeAllChatAdministrators,
+    BotCommandScopeChat,
+    BotCommandScopeChatMember,
+    BotCommandScopeDefault,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Update,
+)
 from fastapi import FastAPI, HTTPException, Request
 
-from app.bot.admin import build_admin_router
+from app.bot.admin import build_admin_router, is_superadmin
 from app.bot.routers.general_admin import build_general_admin_router, make_quiz_question
 from app.bot.routers import game_sessions
 from app.bot.messages import build_messages_router
@@ -21,12 +33,86 @@ from app.bot.routers.games import build_games_router
 from app.bot.routers.profile_ai import build_profile_ai_router
 from app.bot.routers.chat_settings import build_chat_settings_router, get_chat_settings_cached
 from app.bot.routers.memes import build_memes_router
-from app.config import get_settings
+from app.config import get_settings, get_superadmin_ids
 from app.models import Sender
 from app.services.ai_service import AIService
 from app.services.memory_provider import build_memory_provider
 from app.services.persona_service import PersonaService
 from app.services.supabase_db import SupabaseDB
+
+APP_STARTED_AT = time.time()
+_SUPERADMIN_SCOPED_CHATS: set[tuple[int, int]] = set()
+
+USER_BOT_COMMANDS = [
+    BotCommand(command="help", description="✨ Главное меню и помощь"),
+    BotCommand(command="summary", description="📝 Краткая сводка последних сообщений"),
+    BotCommand(command="ask", description="💡 Задать прямой вопрос Нике"),
+    BotCommand(command="card", description="👤 Персональная карточка участника"),
+    BotCommand(command="me", description="📊 Мой профиль и баланс"),
+    BotCommand(command="whoami", description="🆔 Проверить свой ID и роль в боте"),
+    BotCommand(command="rules", description="📜 Правила чата"),
+    BotCommand(command="remind", description="⏰ Напоминание в чате"),
+    BotCommand(command="kto", description="🎲 Случайный участник чата"),
+    BotCommand(command="lore", description="📜 Легенды и Лента событий чата"),
+    BotCommand(command="daily", description="🍪 Ежедневный бонус"),
+    BotCommand(command="top", description="🏆 Рейтинг участников"),
+    BotCommand(command="aiimage", description="🎨 Сгенерировать ИИ-картинку"),
+    BotCommand(command="signai", description="✍️ ИИ-сигна с Никой"),
+    BotCommand(command="remember", description="🧠 Запомнить факт в память"),
+    BotCommand(command="forget_me", description="🧹 Стереть факты о себе"),
+    BotCommand(command="shop", description="🛒 Магазин печенек"),
+    BotCommand(command="debts", description="📒 Долги и должники"),
+    BotCommand(command="jail", description="🚔 Статус тюрьмы"),
+]
+
+ADMIN_BOT_COMMANDS = USER_BOT_COMMANDS + [
+    BotCommand(command="chatsettings", description="⚙️ Панель настроек чата"),
+    BotCommand(command="warn", description="⚠️ Выдать предупреждение"),
+    BotCommand(command="unwarn", description="✅ Снять предупреждение"),
+    BotCommand(command="mute", description="🤐 Выдать мут участнику"),
+    BotCommand(command="unmute", description="🔊 Снять мут с участника"),
+    BotCommand(command="kick", description="👢 Исключить из чата"),
+    BotCommand(command="ban", description="🚫 Забанить участника"),
+    BotCommand(command="unban", description="🔓 Разбанить участника"),
+    BotCommand(command="purge", description="🧹 Очистить сообщения"),
+    BotCommand(command="setrules", description="📜 Установить правила чата"),
+    BotCommand(command="all_facts", description="📚 Все сохранённые факты"),
+    BotCommand(command="export_facts", description="📥 Скачать базу знаний (.txt)"),
+    BotCommand(command="status", description="📡 Технический статус бота"),
+]
+
+
+async def ensure_superadmin_command_scope(bot: Bot, chat_id: int, user_id: int) -> bool:
+    """Персонально открывает админ-меню команд (/) разработчику в групповом чате даже без админки Telegram."""
+    if chat_id >= 0 or user_id <= 0:
+        return False
+    key = (chat_id, user_id)
+    if key in _SUPERADMIN_SCOPED_CHATS:
+        return True
+    setter = getattr(bot, "set_my_commands", None)
+    if not callable(setter):
+        return False
+    try:
+        maybe_coro = setter(
+            ADMIN_BOT_COMMANDS,
+            scope=BotCommandScopeChatMember(chat_id=chat_id, user_id=user_id),
+        )
+        if inspect.isawaitable(maybe_coro):
+            await maybe_coro
+        _SUPERADMIN_SCOPED_CHATS.add(key)
+        return True
+    except Exception:
+        return False
+
+
+def is_public_keepalive_url(raw_url: str) -> bool:
+    base = (raw_url or "").strip().rstrip("/")
+    if not base.startswith(("http://", "https://")):
+        return False
+    host = (urlparse(base).hostname or "").lower()
+    if not host or host in {"127.0.0.1", "localhost", "0.0.0.0", "your-service.onrender.com"}:
+        return False
+    return True
 
 
 def create_app() -> FastAPI:
@@ -58,17 +144,47 @@ def create_app() -> FastAPI:
 
     @dispatcher.message.outer_middleware()
     async def activity_middleware(handler, event, data):
-        # Блокируем команды от пользователей, не прошедших капчу в данном чате
+        # Блокируем команды и неверные попытки от пользователей, не прошедших капчу в данном чате
         if getattr(event, "from_user", None) and getattr(event, "chat", None) and not getattr(event, "new_chat_members", None):
-            pending = db.get_verification(event.from_user.id, chat_id=event.chat.id)
-            if pending and pending.chat_id == event.chat.id:
-                txt = (getattr(event, "text", None) or "").strip()
-                if txt != pending.code:
-                    try:
-                        await event.delete()
-                    except Exception:
-                        pass
-                    return None
+            if not is_superadmin(event.from_user.id, getattr(event.from_user, "username", None)):
+                pending = db.get_verification(event.from_user.id, chat_id=event.chat.id)
+                if pending and pending.chat_id == event.chat.id:
+                    txt = (getattr(event, "text", None) or "").strip()
+                    if txt != pending.code:
+                        try:
+                            await event.delete()
+                        except Exception:
+                            pass
+                        if txt and not txt.startswith("/"):
+                            attempts = int(pending.metadata.get("attempts", 0)) + 1
+                            pending.metadata["attempts"] = attempts
+                            if attempts >= 5:
+                                from datetime import datetime, timedelta, timezone
+
+                                db.pop_verification(event.from_user.id, chat_id=event.chat.id)
+                                try:
+                                    await bot.delete_message(event.chat.id, pending.prompt_message_id)
+                                except Exception:
+                                    pass
+                                try:
+                                    await bot.ban_chat_member(
+                                        event.chat.id,
+                                        event.from_user.id,
+                                        until_date=datetime.now(timezone.utc) + timedelta(seconds=60),
+                                    )
+                                    try:
+                                        await bot.unban_chat_member(
+                                            event.chat.id,
+                                            event.from_user.id,
+                                            only_if_banned=True,
+                                        )
+                                    except Exception:
+                                        pass
+                                except Exception:
+                                    pass
+                        return None
+            elif getattr(event.chat, "id", 0) < 0:
+                asyncio.create_task(ensure_superadmin_command_scope(bot, event.chat.id, event.from_user.id))
         # Обновляем время активности при каждом сообщении
         chat_type = getattr(event.chat, "type", "")
         chat_type_value = getattr(chat_type, "value", str(chat_type))
@@ -79,6 +195,30 @@ def create_app() -> FastAPI:
     reminder_task: asyncio.Task | None = None
     auto_event_task: asyncio.Task | None = None
     backup_task: asyncio.Task | None = None
+    keep_alive_task: asyncio.Task | None = None
+
+    async def keep_alive_loop() -> None:
+        interval = max(60, int(settings.keep_alive_interval_seconds or 600))
+        last_db_touch = time.monotonic()
+        try:
+            while True:
+                await asyncio.sleep(interval)
+                base_url = settings.render_external_url.rstrip("/")
+                if is_public_keepalive_url(base_url):
+                    try:
+                        async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
+                            await client.get(f"{base_url}/ping")
+                    except Exception as ping_err:
+                        print(f"[keep_alive_ping_warning] {ping_err}")
+                # Раз в 6 часов лёгкий запрос в Supabase, чтобы Free проект не засыпал
+                if time.monotonic() - last_db_touch >= 6 * 3600:
+                    last_db_touch = time.monotonic()
+                    try:
+                        db.get_active_chat_ids(minutes=60, limit=1)
+                    except Exception:
+                        pass
+        except asyncio.CancelledError:
+            pass
 
     async def backup_loop() -> None:
         try:
@@ -225,50 +365,20 @@ def create_app() -> FastAPI:
             drop_pending_updates=False,
         )
 
-        user_commands = [
-            BotCommand(command="help", description="✨ Главное меню и помощь"),
-            BotCommand(command="summary", description="📝 Краткая сводка последних сообщений"),
-            BotCommand(command="ask", description="💡 Задать прямой вопрос Нике"),
-            BotCommand(command="card", description="👤 Персональная карточка участника"),
-            BotCommand(command="me", description="📊 Мой профиль и баланс"),
-            BotCommand(command="rules", description="📜 Правила чата"),
-            BotCommand(command="remind", description="⏰ Напоминание в чате"),
-            BotCommand(command="kto", description="🎲 Случайный участник чата"),
-            BotCommand(command="lore", description="📜 Легенды и Лента событий чата"),
-            BotCommand(command="daily", description="🍪 Ежедневный бонус"),
-            BotCommand(command="top", description="🏆 Рейтинг участников"),
-            BotCommand(command="aiimage", description="🎨 Сгенерировать ИИ-картинку"),
-            BotCommand(command="signai", description="✍️ ИИ-сигна с Никой"),
-            BotCommand(command="remember", description="🧠 Запомнить факт в память"),
-            BotCommand(command="forget_me", description="🧹 Стереть факты о себе"),
-            BotCommand(command="shop", description="🛒 Магазин печенек"),
-            BotCommand(command="debts", description="📒 Долги и должники"),
-            BotCommand(command="jail", description="🚔 Статус тюрьмы"),
-        ]
-        admin_commands = user_commands + [
-            BotCommand(command="chatsettings", description="⚙️ Панель настроек чата"),
-            BotCommand(command="warn", description="⚠️ Выдать предупреждение"),
-            BotCommand(command="unwarn", description="✅ Снять предупреждение"),
-            BotCommand(command="mute", description="🤐 Выдать мут участнику"),
-            BotCommand(command="unmute", description="🔊 Снять мут с участника"),
-            BotCommand(command="kick", description="👢 Исключить из чата"),
-            BotCommand(command="ban", description="🚫 Забанить участника"),
-            BotCommand(command="unban", description="🔓 Разбанить участника"),
-            BotCommand(command="purge", description="🧹 Очистить сообщения"),
-            BotCommand(command="setrules", description="📜 Установить правила чата"),
-            BotCommand(command="all_facts", description="📚 Все сохранённые факты"),
-            BotCommand(command="export_facts", description="📥 Скачать базу знаний (.txt)"),
-            BotCommand(command="status", description="📡 Технический статус бота"),
-        ]
         try:
-            await bot.set_my_commands(user_commands, scope=BotCommandScopeDefault())
-            await bot.set_my_commands(admin_commands, scope=BotCommandScopeAllChatAdministrators())
+            await bot.set_my_commands(USER_BOT_COMMANDS, scope=BotCommandScopeDefault())
+            await bot.set_my_commands(ADMIN_BOT_COMMANDS, scope=BotCommandScopeAllChatAdministrators())
+            for dev_uid in get_superadmin_ids():
+                try:
+                    await bot.set_my_commands(ADMIN_BOT_COMMANDS, scope=BotCommandScopeChat(chat_id=dev_uid))
+                except Exception:
+                    continue
         except Exception as e:
             print(f"[set_my_commands error] {e}")
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
-        nonlocal reminder_task, auto_event_task, backup_task
+        nonlocal reminder_task, auto_event_task, backup_task, keep_alive_task
         me = await bot.get_me()
         settings.bot_username = me.username
         try:
@@ -278,7 +388,15 @@ def create_app() -> FastAPI:
         reminder_task = asyncio.create_task(reminders_loop())
         auto_event_task = asyncio.create_task(auto_events_loop())
         backup_task = asyncio.create_task(backup_loop())
+        if settings.keep_alive_enabled:
+            keep_alive_task = asyncio.create_task(keep_alive_loop())
         yield
+        if keep_alive_task:
+            keep_alive_task.cancel()
+            try:
+                await keep_alive_task
+            except Exception:
+                pass
         if backup_task:
             backup_task.cancel()
             try:
@@ -305,6 +423,7 @@ def create_app() -> FastAPI:
     app.state.db = db
     app.state.memory = memory
     app.state.settings = settings
+    app.state.started_at = APP_STARTED_AT
 
     @app.get("/")
     async def root() -> dict:
@@ -314,9 +433,27 @@ def create_app() -> FastAPI:
     async def root_head() -> None:
         return None
 
+    @app.get("/ping")
+    @app.get("/healthz")
+    async def ping() -> dict:
+        return {
+            "ok": True,
+            "status": "awake",
+            "uptime_seconds": max(0, int(time.time() - APP_STARTED_AT)),
+        }
+
+    @app.head("/ping")
+    @app.head("/healthz")
+    async def ping_head() -> None:
+        return None
+
     @app.get("/health")
     async def health() -> dict:
-        return {"status": "ok", "memory": await memory.health()}
+        return {
+            "status": "ok",
+            "uptime_seconds": max(0, int(time.time() - APP_STARTED_AT)),
+            "memory": await memory.health(),
+        }
 
     @app.head("/health")
     async def health_head() -> None:

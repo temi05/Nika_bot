@@ -16,7 +16,7 @@ from aiogram import Bot
 from aiogram.types import ChatPermissions
 from openai import AsyncOpenAI
 
-from app.bot.admin import is_admin
+from app.bot.admin import is_admin, is_superadmin
 from app.config import Settings
 from app.models import ChatUser, Sender
 from app.services.memory_provider import BaseMemoryProvider
@@ -78,6 +78,7 @@ class AIService:
             else self.client
         )
         self.chat_buffers: dict[int, deque[str]] = defaultdict(lambda: deque(maxlen=25))
+        self._pending_memory_lines: dict[int, deque[str]] = defaultdict(lambda: deque(maxlen=25))
         self.recent_bot_replies: dict[int, deque[str]] = defaultdict(lambda: deque(maxlen=8))
         self.moods: dict[int, int] = defaultdict(lambda: 60)
         self.last_group_reply_at: dict[int, datetime] = {}
@@ -94,6 +95,7 @@ class AIService:
     def remember_message(self, chat_id: int, sender: Sender, text: str) -> None:
         rendered = self._render_chat_buffer_line(sender, text)
         self.chat_buffers[chat_id].append(rendered)
+        self._pending_memory_lines[chat_id].append(rendered)
         self._unflushed_counts[chat_id] = self._unflushed_counts.get(chat_id, 0) + 1
         self._log("remember", chat_id=chat_id, sender=sender.display_name, text=rendered[:160])
 
@@ -186,9 +188,11 @@ class AIService:
             return
         self._unflushed_counts[chat_id] = 0
 
-        transcript = "\n".join(self.chat_buffers[chat_id])
+        pending_lines = list(self._pending_memory_lines[chat_id]) or buffer_snapshot[-max(threshold, unflushed):]
+        self._pending_memory_lines[chat_id].clear()
+        transcript = "\n".join(pending_lines)
         participants_list: list[str] = []
-        for line in self.chat_buffers[chat_id]:
+        for line in pending_lines:
             author_m = re.search(r'author="([^"]+)"', line)
             uid_m = re.search(r'user_id="([^"]+)"', line)
             if author_m:
@@ -199,7 +203,7 @@ class AIService:
             else:
                 participants_list.append(line.split(":", 1)[0])
         participants = list(dict.fromkeys(participants_list))
-        self._log("flush_memory_start", chat_id=chat_id, participants=participants, lines=len(self.chat_buffers[chat_id]))
+        self._log("flush_memory_start", chat_id=chat_id, participants=participants, lines=len(pending_lines))
         await self.memory.save_transcript(chat_id, transcript, participants)
         recent_tail = list(self.chat_buffers[chat_id])[-10:]
         self.chat_buffers[chat_id].clear()
@@ -397,9 +401,12 @@ class AIService:
         is_private_chat: bool = False,
         image_data_urls: list[str] | None = None,
         source_message_id: int | None = None,
+        caller_is_owner: bool = False,
     ) -> str | None:
         self._current_source_message_id[chat_id] = source_message_id
         self._remember_triggered_in_chat[chat_id] = False
+        caller_is_owner = caller_is_owner or is_superadmin(sender.user_id, sender.username)
+        effective_admin = caller_is_admin or caller_is_owner
 
         if not user_text:
             self._log("skip", reason="empty_text", chat_id=chat_id)
@@ -429,7 +436,7 @@ class AIService:
                 return None
             if not addressed and len(plain_user_text.strip()) < self.settings.ai_min_message_len:
                 return None
-            if not addressed and self._group_reply_cooldown_active(chat_id):
+            if not addressed and not caller_is_owner and self._group_reply_cooldown_active(chat_id):
                 return None
 
         self._log(
@@ -438,7 +445,8 @@ class AIService:
             sender=sender.display_name,
             reply_to_bot=reply_to_bot,
             mentioned=mentioned,
-            caller_is_admin=caller_is_admin,
+            caller_is_admin=effective_admin,
+            caller_is_owner=caller_is_owner,
             user_text=plain_user_text[:200],
         )
 
@@ -457,12 +465,13 @@ class AIService:
         system_prompt = build_character_system_prompt(
             bot_name=self.settings.bot_name,
             user_name=sender.display_name,
-            caller_is_admin=caller_is_admin,
+            caller_is_admin=effective_admin,
             mood=self.moods[chat_id],
             persona_state=persona_state,
             memory_context=memory_text,
             personality_mode=self.settings.bot_personality_mode,
             compact_prompt=self.settings.ai_compact_prompt,
+            caller_is_owner=caller_is_owner,
         )
 
         images = list(image_data_urls or [])
@@ -536,9 +545,10 @@ class AIService:
                         tool_result = await self._run_tool_call(
                             chat_id=chat_id,
                             sender=sender,
-                            caller_is_admin=caller_is_admin,
+                            caller_is_admin=effective_admin,
                             tool_name=call.function.name,
                             raw_arguments=call.function.arguments,
+                            caller_is_owner=caller_is_owner,
                         )
                         messages.append(
                             {
@@ -1028,7 +1038,16 @@ class AIService:
             },
         ]
 
-    async def _run_tool_call(self, chat_id: int, sender: Sender, caller_is_admin: bool, tool_name: str, raw_arguments: str) -> str:
+    async def _run_tool_call(
+        self,
+        chat_id: int,
+        sender: Sender,
+        caller_is_admin: bool,
+        tool_name: str,
+        raw_arguments: str,
+        *,
+        caller_is_owner: bool = False,
+    ) -> str:
         try:
             args = json.loads(raw_arguments or "{}")
         except json.JSONDecodeError:
@@ -1051,11 +1070,11 @@ class AIService:
         if tool_name == "create_poll":
             return await self._tool_create_poll(chat_id, args)
         if tool_name == "transfer_reputation":
-            return await self._tool_transfer_reputation(chat_id, sender, args)
+            return await self._tool_transfer_reputation(chat_id, sender, args, caller_is_owner=caller_is_owner)
         if tool_name == "send_reaction":
             return await self._tool_send_reaction(chat_id, args)
         if tool_name == "generate_visual":
-            return await self._tool_generate_visual(chat_id, args)
+            return await self._tool_generate_visual(chat_id, args, caller_is_owner=caller_is_owner)
         if tool_name == "get_chat_top":
             return self._tool_get_chat_top(chat_id, args)
         if tool_name == "send_dice":
@@ -1090,9 +1109,15 @@ class AIService:
             self._log("reaction_error", error=str(exc))
             return f"Не удалось поставить реакцию: {exc}"
 
-    async def _tool_generate_visual(self, chat_id: int, args: dict[str, Any]) -> str:
+    async def _tool_generate_visual(
+        self,
+        chat_id: int,
+        args: dict[str, Any],
+        *,
+        caller_is_owner: bool = False,
+    ) -> str:
         mood = self.moods.get(chat_id, 60)
-        if mood < 35:
+        if mood < 35 and not caller_is_owner:
             return f"Отклонено: У Ники отвратительное настроение ({mood}/100), она наотрез отказывается рисовать для вас или выполнять ваши капризы. Пусть её сначала кто-то задобрит теплыми словами или печеньками!"
 
         prompt = str(args.get("prompt") or "").strip()
@@ -1392,7 +1417,7 @@ class AIService:
             self.db.update_user(target.id, {"reputation": target.reputation + amount})
             return f"Выдано {amount} печенек для {target.display_name}."
 
-        if action in {"warn", "mute"} and await is_admin(self.bot, chat_id, target.user_id):
+        if action in {"warn", "mute"} and await is_admin(self.bot, chat_id, target.user_id, target.username):
             return f"Отклонено: нельзя применить {action} к администратору чата ({target.display_name})."
 
         if action == "warn":
@@ -1479,9 +1504,16 @@ class AIService:
         except Exception as exc:
             return f"Ошибка API Telegram при создании опроса: {exc}"
 
-    async def _tool_transfer_reputation(self, chat_id: int, sender: Sender, args: dict[str, Any]) -> str:
+    async def _tool_transfer_reputation(
+        self,
+        chat_id: int,
+        sender: Sender,
+        args: dict[str, Any],
+        *,
+        caller_is_owner: bool = False,
+    ) -> str:
         mood = self.moods.get(chat_id, 60)
-        if mood < 35:
+        if mood < 35 and not caller_is_owner:
             return f"Отклонено: Ника слишком раздражена ({mood}/100), чтобы пересылать печеньки по вашему приказу. Она советует сначала её порадовать!"
 
         target_name = str(args.get("target_name") or "").strip()
@@ -2106,7 +2138,9 @@ class AIService:
         question: str,
         *,
         reply_context: str = "",
+        caller_is_owner: bool = False,
     ) -> str:
+        caller_is_owner = caller_is_owner or is_superadmin(sender.user_id, sender.username)
         clean_q = (question or "").strip()
         if not clean_q and reply_context:
             clean_q = reply_context.strip()
@@ -2120,12 +2154,19 @@ class AIService:
             sender.display_name,
             user_id=sender.user_id,
         )
+        owner_note = (
+            "\nВАЖНО: Вопрос задаёт твой создатель и главный разработчик бота. "
+            "Отвечай максимально точно, уважительно и по делу, помогая ему в любых задачах."
+            if caller_is_owner
+            else ""
+        )
         prompt_messages = [
             {
                 "role": "system",
                 "content": (
                     f"Ты — {self.settings.bot_name}. Пользователь задал тебе прямой вопрос через /ask. "
                     "Дай точный, полезный и структурированный ответ по делу (2-6 предложений), сохраняя свой живой характер. "
+                    + owner_note
                     + (f"\nИзвестные факты чата:\n{memory_text}" if memory_text else "")
                 ),
             },

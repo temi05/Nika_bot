@@ -108,7 +108,7 @@ def build_chat_settings_router(db: SupabaseDB) -> Router:
     @router.message(Command("chatsettings", "настройки", "settings"))
     async def chatsettings_command(message: Message) -> None:
         sender = get_sender_data(message)
-        if not await is_admin(message.bot, message.chat.id, sender.user_id):
+        if not await is_admin(message.bot, message.chat.id, sender.user_id, sender.username):
             await message.answer("❌ Настройки могут смотреть и менять только администраторы.")
             return
         settings = _get_cached(db, message.chat.id)
@@ -120,7 +120,8 @@ def build_chat_settings_router(db: SupabaseDB) -> Router:
 
     async def _require_admin_cb(query: CallbackQuery) -> bool:
         user_id = query.from_user.id if query.from_user else 0
-        if not query.message or not await is_admin(query.bot, query.message.chat.id, user_id):
+        username = query.from_user.username if query.from_user else None
+        if not query.message or not await is_admin(query.bot, query.message.chat.id, user_id, username):
             await query.answer("❌ Только для администраторов.", show_alert=True)
             return False
         return True

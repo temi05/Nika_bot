@@ -14,7 +14,7 @@ from aiogram.exceptions import TelegramBadRequest
 
 from app.services.ai_service import AIService
 from app.services.supabase_db import SupabaseDB
-from app.bot.admin import is_admin, make_captcha_gate_middleware
+from app.bot.admin import get_bot_chat_permissions, is_admin, is_superadmin, make_captcha_gate_middleware
 
 from app.bot.routers.jail_helpers import (
     bail_cost,
@@ -119,6 +119,7 @@ def build_general_admin_router(db: SupabaseDB, bot_name: str, ai: AIService) -> 
         ),
         "admin": (
             "🛡 <b>Администрирование и Модерация</b>\n\n"
+            "• <code>/status</code>, <code>/whoami</code> — Технический статус бота и проверка своих прав/ID\n"
             "• <code>/chatsettings</code> — Панель настроек чата (ИИ, авто-события, ссылки)\n"
             "• <code>/ban</code>, <code>/unban</code>, <code>/kick</code> — Бан / разбан / кик (с поддержкой срока)\n"
             "• <code>/mute [10m|2h|1d]</code>, <code>/unmute</code> — Мут / размут\n"
@@ -128,7 +129,7 @@ def build_general_admin_router(db: SupabaseDB, bot_name: str, ai: AIService) -> 
             "• <code>/banword</code>, <code>/unbanword</code>, <code>/listwords</code> — Фильтр стоп-слов\n"
             "• <code>/all_facts</code>, <code>/export_facts</code>, <code>/clean_memory</code> — Управление базой знаний\n"
             "• <code>/backup_memory</code>, <code>/restore_memory</code> — Бэкап и восстановление памяти\n"
-            "• <code>/cookie_rain</code>, <code>/whisper</code>, <code>/judge</code> — Спец-команды админов"
+            "• <code>/cookie_rain</code>, <code>/whisper</code> — Спец-команды админов"
         ),
         "support": (
             "✉️ <b>Обратная связь и Жалобы</b>\n\n"
@@ -375,7 +376,7 @@ def build_general_admin_router(db: SupabaseDB, bot_name: str, ai: AIService) -> 
     @router.message(Command("cookie_rain", "дождь"))
     async def rain_command(message: Message) -> None:
         sender = get_sender_data(message)
-        if not await is_admin(message.bot, message.chat.id, sender.user_id):
+        if not await is_admin(message.bot, message.chat.id, sender.user_id, sender.username):
             await message.answer("❌ Эта магия доступна только администраторам.")
             return
         
@@ -397,7 +398,7 @@ def build_general_admin_router(db: SupabaseDB, bot_name: str, ai: AIService) -> 
     @router.message(Command("whisper", "шепот"))
     async def whisper_command(message: Message, command: CommandObject) -> None:
         sender = get_sender_data(message)
-        if not await is_admin(message.bot, message.chat.id, sender.user_id):
+        if not await is_admin(message.bot, message.chat.id, sender.user_id, sender.username):
             await message.answer("🤫 Тсс... (Только для админов)")
             return
         if not command.args: return
@@ -429,10 +430,12 @@ def build_general_admin_router(db: SupabaseDB, bot_name: str, ai: AIService) -> 
         if not _is_group_chat(message):
             await message.answer("🍪 Печеньки в чат падают только в группах.")
             return
-        allowed, remaining = db.can_use_command(message.chat.id, "cookie_drop", 35 * 60)
-        if not allowed:
-            await message.answer(f"🍪 Следующая печенька упадет примерно через {remaining // 60 + 1} мин.")
-            return
+        sender = get_sender_data(message)
+        if not is_superadmin(sender.user_id, sender.username):
+            allowed, remaining = db.can_use_command(message.chat.id, "cookie_drop", 35 * 60)
+            if not allowed:
+                await message.answer(f"🍪 Следующая печенька упадет примерно через {remaining // 60 + 1} мин.")
+                return
         reward = random.randint(10, 28)
         created_at = int(time.time())
         msg = await message.answer(
@@ -493,10 +496,12 @@ def build_general_admin_router(db: SupabaseDB, bot_name: str, ai: AIService) -> 
         if not _is_group_chat(message):
             await message.answer("🧠 Викторина запускается только в группах.")
             return
-        allowed, remaining = db.can_use_command(message.chat.id, "quiz", 25 * 60)
-        if not allowed:
-            await message.answer(f"🧠 Следующий вопрос через {remaining // 60 + 1} мин.")
-            return
+        sender = get_sender_data(message)
+        if not is_superadmin(sender.user_id, sender.username):
+            allowed, remaining = db.can_use_command(message.chat.id, "quiz", 25 * 60)
+            if not allowed:
+                await message.answer(f"🧠 Следующий вопрос через {remaining // 60 + 1} мин.")
+                return
         quiz = make_quiz_question()
         created_at = int(time.time())
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -636,6 +641,107 @@ def build_general_admin_router(db: SupabaseDB, bot_name: str, ai: AIService) -> 
         await message.answer(
             f"🎲 <b>Кто {escape_html(question)}?</b>\n"
             f"└ Звёзды указывают на <b>{escape_html(chosen.display_name)}</b>!",
+            parse_mode="HTML",
+        )
+
+    @router.message(Command("whoami", "myid", "devcheck"))
+    async def whoami_command(message: Message) -> None:
+        sender = get_sender_data(message)
+        dev_access = is_superadmin(sender.user_id, sender.username)
+        chat_admin = await is_admin(message.bot, message.chat.id, sender.user_id, sender.username)
+
+        scope_synced = False
+        if dev_access and message.chat.id < 0:
+            from app.web import ensure_superadmin_command_scope
+
+            scope_synced = await ensure_superadmin_command_scope(message.bot, message.chat.id, sender.user_id)
+
+        if dev_access:
+            role_label = "👑 Разработчик бота (Superadmin)"
+        elif chat_admin:
+            role_label = "🛡 Администратор чата"
+        else:
+            role_label = "👤 Участник"
+
+        uname = f"@{escape_html(sender.username)}" if sender.username else "не указан"
+        extra_note = ""
+        if dev_access:
+            menu_hint = "персональное меню / команд синхронизировано" if scope_synced else "полный доступ активен"
+            extra_note = f"\n✅ <i>Режим разработчика включён ({menu_hint}) — админка в самом чате не требуется.</i>"
+        elif not chat_admin:
+            extra_note = (
+                f"\n💡 <i>Если это твой аккаунт разработчика, добавь ID <code>{sender.user_id}</code> "
+                "в переменную <code>SUPERADMIN_IDS</code> на Render.</i>"
+            )
+
+        await message.answer(
+            f"🆔 <b>Профиль доступа</b>\n\n"
+            f"• Имя: <b>{escape_html(sender.display_name)}</b>\n"
+            f"• Telegram ID: <code>{sender.user_id}</code>\n"
+            f"• Username: {uname}\n"
+            f"• Chat ID: <code>{message.chat.id}</code>\n"
+            f"• Статус в боте: <b>{role_label}</b>"
+            f"{extra_note}",
+            parse_mode="HTML",
+        )
+
+    @router.message(Command("status", "статус", "dev"))
+    async def status_command(message: Message) -> None:
+        sender = get_sender_data(message)
+        if not await is_admin(message.bot, message.chat.id, sender.user_id, sender.username):
+            await message.answer("❌ Технический статус доступен только администраторам и разработчику.")
+            return
+
+        from app.web import APP_STARTED_AT, is_public_keepalive_url
+
+        uptime_sec = int(max(0, time.time() - APP_STARTED_AT))
+        uptime_str = (
+            f"{uptime_sec} сек."
+            if uptime_sec < 60
+            else human_timedelta(uptime_sec // 3600, (uptime_sec % 3600) // 60)
+        )
+        dev_access = is_superadmin(sender.user_id, sender.username)
+        role_label = "👑 Разработчик (Superadmin)" if dev_access else "🛡 Админ чата"
+
+        mem_health = await ai.memory.health()
+        mem_provider = str(mem_health.get("provider", "unknown"))
+        mem_total_docs = mem_health.get("count", "?")
+        chat_facts_count = 0
+        if hasattr(ai.memory, "get_all_facts_paged"):
+            try:
+                chat_facts_count = int(ai.memory.get_all_facts_paged(message.chat.id, page=1, page_size=1).get("total", 0))
+            except Exception:
+                chat_facts_count = 0
+        else:
+            chat_facts_count = len(db.get_recent_memories(message.chat.id, limit=500))
+
+        chat_cfg = db.get_chat_settings(message.chat.id)
+        keep_alive_ok = ai.settings.keep_alive_enabled and is_public_keepalive_url(ai.settings.render_external_url)
+        keep_alive_str = (
+            f"🟢 активен ({ai.settings.keep_alive_interval_seconds}с)"
+            if keep_alive_ok
+            else ("🟡 ждёт RENDER_EXTERNAL_URL / внешний cron" if ai.settings.keep_alive_enabled else "🔴 выключен")
+        )
+
+        bot_perms_line = "ЛС (не требуется)"
+        if message.chat.id < 0:
+            perms = await get_bot_chat_permissions(message.bot, message.chat.id)
+            if perms["is_admin"]:
+                flags = []
+                flags.append("удаление ✅" if perms["can_delete_messages"] else "удаление ❌")
+                flags.append("мут/бан ✅" if perms["can_restrict_members"] else "мут/бан ❌")
+                bot_perms_line = f"🟢 Админ ({', '.join(flags)})"
+            else:
+                bot_perms_line = "⚠️ Нет прав админа у самого бота (Telegram заблокирует /ban, /mute, /purge)"
+
+        await message.answer(
+            f"📡 <b>Технический статус {escape_html(bot_name)}</b>\n\n"
+            f"• Аптайм: <b>{escape_html(uptime_str)}</b>\n"
+            f"• Ваш доступ: <b>{role_label}</b>\n"
+            f"• Память: <code>{escape_html(mem_provider)}</code> (в чате: <b>{chat_facts_count}</b>, всего в базе: <b>{mem_total_docs}</b>)\n"
+            f"• Anti-sleep Render: {keep_alive_str}\n"
+            f"• Права бота в ТГ: {bot_perms_line}\n"
+            f"• Настройки чата: ИИ={'✅' if chat_cfg.ai_enabled else '❌'}, Проактив={'✅' if chat_cfg.proactive_enabled else '❌'}, Ссылки={'🛡' if chat_cfg.link_filter_enabled else '❌'}, Ивенты={'✅' if (chat_cfg.auto_drop_enabled or chat_cfg.auto_quiz_enabled) else '❌'}",
             parse_mode="HTML",
         )
 

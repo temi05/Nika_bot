@@ -13,7 +13,7 @@ from aiogram.types import Message, BufferedInputFile, InlineKeyboardMarkup, Inli
 from app.models import MemoryRecord, Sender
 from app.services.ai_service import AIService
 from app.services.supabase_db import SupabaseDB
-from app.bot.admin import is_admin, make_captcha_gate_middleware
+from app.bot.admin import is_admin, is_superadmin, make_captcha_gate_middleware
 from app.bot.routers.jail_helpers import deny_if_jailed
 from app.utils import build_progress_bar, escape_html, get_sender_data, parse_birthday_parts, get_zodiac_sign, get_nika_compatibility
 
@@ -143,8 +143,9 @@ def build_profile_ai_router(db: SupabaseDB, ai: AIService, bot_name: str) -> Rou
         sender = get_sender_data(message)
         db.get_or_create_user(message.chat.id, sender)
         
+        fact_text = f"{sender.display_name}: {fact[:500]}"
         record = MemoryRecord(
-            fact=f"{sender.display_name}: {fact[:500]}",
+            fact=fact_text,
             source="manual_memory",
             confidence=0.98,
             meta={"user_id": sender.user_id, "user_name": sender.display_name},
@@ -153,9 +154,8 @@ def build_profile_ai_router(db: SupabaseDB, ai: AIService, bot_name: str) -> Rou
             source_message_id=message.message_id,
         )
         
-        fact_text = f"{sender.display_name}: {fact[:500]}"
         db.store_memory(message.chat.id, record)
-        if hasattr(ai.memory, "store_single_fact"):
+        if getattr(db, "_chroma_memory", None) is None and hasattr(ai.memory, "store_single_fact"):
             ai.memory.store_single_fact(
                 message.chat.id,
                 fact_text,
@@ -189,8 +189,9 @@ def build_profile_ai_router(db: SupabaseDB, ai: AIService, bot_name: str) -> Rou
         try:
             msg_id = int(msg_id_str)
             caller_id = query.from_user.id if query.from_user else 0
+            caller_username = query.from_user.username if query.from_user else None
             owner_id = db.get_memory_owner_by_source_id(query.message.chat.id, msg_id)
-            caller_admin = await is_admin(query.bot, query.message.chat.id, caller_id)
+            caller_admin = await is_admin(query.bot, query.message.chat.id, caller_id, caller_username)
             if owner_id is not None and caller_id != owner_id and not caller_admin:
                 await query.answer("❌ Удалить этот факт может только его автор или администратор.", show_alert=True)
                 return
@@ -238,7 +239,7 @@ def build_profile_ai_router(db: SupabaseDB, ai: AIService, bot_name: str) -> Rou
             await message.answer(f"Фильтр ссылок сейчас {status}.")
             return
         sender = get_sender_data(message)
-        if not await is_admin(message.bot, message.chat.id, sender.user_id):
+        if not await is_admin(message.bot, message.chat.id, sender.user_id, sender.username):
             await message.answer("⛔ Менять фильтр ссылок могут только администраторы.")
             return
         arg = command.args.strip().lower()
@@ -263,6 +264,8 @@ def build_profile_ai_router(db: SupabaseDB, ai: AIService, bot_name: str) -> Rou
 
     async def _charge_after_success(user_id: int, chat_id: int, price: int) -> tuple[bool, int]:
         fresh = db.get_user_by_platform_id(chat_id, user_id)
+        if price <= 0:
+            return True, (fresh.reputation if fresh else 0)
         if not fresh or fresh.reputation < price:
             return False, fresh.reputation if fresh else 0
         updated = db.update_user(fresh.id, {"reputation": fresh.reputation - price})
@@ -430,7 +433,7 @@ def build_profile_ai_router(db: SupabaseDB, ai: AIService, bot_name: str) -> Rou
     @router.message(Command("setnika"))
     async def set_nika_reference_command(message: Message) -> None:
         sender = get_sender_data(message)
-        if not await is_admin(message.bot, message.chat.id, sender.user_id):
+        if not await is_admin(message.bot, message.chat.id, sender.user_id, sender.username):
             await message.answer("❌ Менять референс Ники может только админ.")
             return
         source = message.reply_to_message or message
@@ -488,31 +491,39 @@ def build_profile_ai_router(db: SupabaseDB, ai: AIService, bot_name: str) -> Rou
     @router.message(Command("aiimage", "картинка"))
     async def ai_image_command(message: Message, command: CommandObject) -> None:
         prompt = (command.args or "").strip()
+        raw_sender = get_sender_data(message)
+        caller_is_dev = is_superadmin(raw_sender.user_id, raw_sender.username)
         count_24h = db.get_recent_stats_count(message.chat.id, "aiimage_plays", hours=24)
         dynamic_price = _get_dynamic_price(ai.settings.ai_image_price, count_24h)
         
         if not prompt:
+            price_line = (
+                "Цена: <b>0</b> 🍪 <i>(бесплатно для разработчика)</i>\n"
+                if caller_is_dev
+                else f"Цена: <b>{dynamic_price}</b> 🍪 <i>(динамическая, зависит от спроса)</i>\n"
+            )
             await message.answer(
                 "🖼️ <b>ИИ-картинка</b>\n\n"
-                f"Цена: <b>{dynamic_price}</b> 🍪 <i>(динамическая, зависит от спроса)</i>\n"
+                f"{price_line}"
                 "Использование: <code>/aiimage описание картинки</code>\n"
                 "Если ответить командой на картинку, она станет референсом позы/ракурса, а не внешности.",
                 parse_mode="HTML",
             )
             return
-        if message.chat.type != "private" and not db.get_chat_settings(message.chat.id).ai_enabled:
+        if message.chat.type != "private" and not caller_is_dev and not db.get_chat_settings(message.chat.id).ai_enabled:
             await message.answer("🤖 ИИ-функции в этом чате сейчас выключены администратором.")
             return
-        sender = db.get_or_create_user(message.chat.id, get_sender_data(message))
+        sender = db.get_or_create_user(message.chat.id, raw_sender)
         if await deny_if_jailed(db, message, sender, "/aiimage"):
             return
             
-        price = max(1, dynamic_price)
-        if sender.reputation < price:
+        price = 0 if caller_is_dev else max(1, dynamic_price)
+        if price > 0 and sender.reputation < price:
             await message.answer(f"❌ Для ИИ-картинки сейчас нужно <b>{price}</b> 🍪. Баланс: <b>{sender.reputation}</b> 🍪", parse_mode="HTML")
             return
             
-        status_msg = await message.answer(f"🖼️ <b>Рисую...</b> Это займет 10-20 секунд.\n<i>Текущая цена: {price} 🍪</i>", parse_mode="HTML")
+        status_note = "режим разработчика (0 🍪)" if caller_is_dev else f"Текущая цена: {price} 🍪"
+        status_msg = await message.answer(f"🖼️ <b>Рисую...</b> Это займет 10-20 секунд.\n<i>{status_note}</i>", parse_mode="HTML")
         
         async def _background_task():
             try:
@@ -535,9 +546,14 @@ def build_profile_ai_router(db: SupabaseDB, ai: AIService, bot_name: str) -> Rou
                 
                 db.increment_stat(sender.id, "aiimage_plays")
                 db.record_stat_usage(message.chat.id, "aiimage_plays")
+                cost_caption = (
+                    f"🖼️ Готово <i>(👑 бесплатно для разработчика)</i>\nБаланс: <b>{balance}</b> 🍪"
+                    if price == 0
+                    else f"🖼️ Готово. Списано <b>{price}</b> 🍪\nБаланс: <b>{balance}</b> 🍪"
+                )
                 await message.answer_photo(
                     BufferedInputFile(image_bytes, filename="nika_ai_image.png"),
-                    caption=f"🖼️ Готово. Списано <b>{price}</b> 🍪\nБаланс: <b>{balance}</b> 🍪",
+                    caption=cost_caption,
                     parse_mode="HTML",
                     reply_to_message_id=message.message_id
                 )
@@ -554,32 +570,40 @@ def build_profile_ai_router(db: SupabaseDB, ai: AIService, bot_name: str) -> Rou
     @router.message(Command("signai", "aisign", "сигнаии"))
     async def ai_sign_command(message: Message, command: CommandObject) -> None:
         text = (command.args or "").strip()
+        raw_sender = get_sender_data(message)
+        caller_is_dev = is_superadmin(raw_sender.user_id, raw_sender.username)
         count_24h = db.get_recent_stats_count(message.chat.id, "signai_plays", hours=24)
         dynamic_price = _get_dynamic_price(ai.settings.ai_sign_price, count_24h)
         
         if not text:
+            price_line = (
+                "Цена: <b>0</b> 🍪 <i>(бесплатно для разработчика)</i>\n"
+                if caller_is_dev
+                else f"Цена: <b>{dynamic_price}</b> 🍪 <i>(динамическая, зависит от спроса)</i>\n"
+            )
             await message.answer(
                 "✍️ <b>ИИ-сигна</b>\n\n"
-                f"Цена: <b>{dynamic_price}</b> 🍪 <i>(динамическая, зависит от спроса)</i>\n"
+                f"{price_line}"
                 "Использование: <code>/signai текст на сигне</code>\n"
                 "На картинке будет Ника, но сцена/поза/место каждый раз меняются.\n"
                 "Внешность берется из сохраненного /setnika, а reply-картинка дает только позу/ракурс.",
                 parse_mode="HTML",
             )
             return
-        if message.chat.type != "private" and not db.get_chat_settings(message.chat.id).ai_enabled:
+        if message.chat.type != "private" and not caller_is_dev and not db.get_chat_settings(message.chat.id).ai_enabled:
             await message.answer("🤖 ИИ-функции в этом чате сейчас выключены администратором.")
             return
-        sender = db.get_or_create_user(message.chat.id, get_sender_data(message))
+        sender = db.get_or_create_user(message.chat.id, raw_sender)
         if await deny_if_jailed(db, message, sender, "/signai"):
             return
             
-        price = max(1, dynamic_price)
-        if sender.reputation < price:
+        price = 0 if caller_is_dev else max(1, dynamic_price)
+        if price > 0 and sender.reputation < price:
             await message.answer(f"❌ Для ИИ-сигны сейчас нужно <b>{price}</b> 🍪. Баланс: <b>{sender.reputation}</b> 🍪", parse_mode="HTML")
             return
             
-        status_msg = await message.answer(f"✍️ <b>Рисую сигну...</b> Это займет 10-20 секунд.\n<i>Текущая цена: {price} 🍪</i>", parse_mode="HTML")
+        status_note = "режим разработчика (0 🍪)" if caller_is_dev else f"Текущая цена: {price} 🍪"
+        status_msg = await message.answer(f"✍️ <b>Рисую сигну...</b> Это займет 10-20 секунд.\n<i>{status_note}</i>", parse_mode="HTML")
         
         async def _background_task():
             try:
@@ -603,11 +627,15 @@ def build_profile_ai_router(db: SupabaseDB, ai: AIService, bot_name: str) -> Rou
                 
                 db.increment_stat(sender.id, "signai_plays")
                 db.record_stat_usage(message.chat.id, "signai_plays")
+                cost_line = (
+                    f"✍️ ИИ-сигна готова <i>(👑 бесплатно для разработчика)</i>\nБаланс: <b>{balance}</b> 🍪"
+                    if price == 0
+                    else f"✍️ ИИ-сигна готова. Списано <b>{price}</b> 🍪\nБаланс: <b>{balance}</b> 🍪"
+                )
                 await message.answer_photo(
                     BufferedInputFile(image_bytes, filename="nika_ai_sign.png"),
                     caption=(
-                        f"✍️ ИИ-сигна готова. Списано <b>{price}</b> 🍪\n"
-                        f"Баланс: <b>{balance}</b> 🍪"
+                        cost_line
                         + _reference_caption(bool(saved_nika_reference), bool(pose_references))
                     ),
                     parse_mode="HTML",
@@ -626,7 +654,7 @@ def build_profile_ai_router(db: SupabaseDB, ai: AIService, bot_name: str) -> Rou
     @router.message(Command("forget", "забудь"))
     async def forget_command(message: Message, command: CommandObject) -> None:
         sender = get_sender_data(message)
-        if not await is_admin(message.bot, message.chat.id, sender.user_id):
+        if not await is_admin(message.bot, message.chat.id, sender.user_id, sender.username):
             await message.answer("❌ Заставлять меня забывать факты могут только администраторы.")
             return
         if not command.args:
@@ -678,7 +706,7 @@ def build_profile_ai_router(db: SupabaseDB, ai: AIService, bot_name: str) -> Rou
     async def backup_memory_command(message: Message) -> None:
         """Принудительная выгрузка бэкапа векторной базы данных в Telegram"""
         sender = get_sender_data(message)
-        if not await is_admin(message.bot, message.chat.id, sender.user_id):
+        if not await is_admin(message.bot, message.chat.id, sender.user_id, sender.username):
             await message.answer("❌ Эта команда доступна только администраторам.")
             return
 
@@ -695,7 +723,7 @@ def build_profile_ai_router(db: SupabaseDB, ai: AIService, bot_name: str) -> Rou
     async def restore_memory_command(message: Message) -> None:
         """Восстановление векторной памяти из прикрепленного zip файла бэкапа"""
         sender = get_sender_data(message)
-        if not await is_admin(message.bot, message.chat.id, sender.user_id):
+        if not await is_admin(message.bot, message.chat.id, sender.user_id, sender.username):
             await message.answer("❌ Восстанавливать память могут только администраторы.")
             return
 
@@ -727,7 +755,7 @@ def build_profile_ai_router(db: SupabaseDB, ai: AIService, bot_name: str) -> Rou
     async def clean_memory_command(message: Message, command: CommandObject | None = None) -> None:
         """Очищает память и БД от бытового мусора, старых логов, закрытых долгов и дублей (либо полностью по флагу full)."""
         sender = get_sender_data(message)
-        if not await is_admin(message.bot, message.chat.id, sender.user_id):
+        if not await is_admin(message.bot, message.chat.id, sender.user_id, sender.username):
             await message.answer("❌ Эта команда доступна только администраторам.")
             return
 
@@ -828,7 +856,7 @@ def build_profile_ai_router(db: SupabaseDB, ai: AIService, bot_name: str) -> Rou
     async def add_fact_command(message: Message, command: CommandObject) -> None:
         """Ручное добавление факта администратором"""
         sender = get_sender_data(message)
-        if not await is_admin(message.bot, message.chat.id, sender.user_id):
+        if not await is_admin(message.bot, message.chat.id, sender.user_id, sender.username):
             await message.answer("❌ Добавлять факты вручную могут только администраторы.")
             return
 
@@ -857,7 +885,7 @@ def build_profile_ai_router(db: SupabaseDB, ai: AIService, bot_name: str) -> Rou
     async def edit_fact_command(message: Message, command: CommandObject) -> None:
         """Редактирование текста фактов администратором"""
         sender = get_sender_data(message)
-        if not await is_admin(message.bot, message.chat.id, sender.user_id):
+        if not await is_admin(message.bot, message.chat.id, sender.user_id, sender.username):
             await message.answer("❌ Редактировать факты могут только администраторы.")
             return
 
@@ -938,7 +966,7 @@ def build_profile_ai_router(db: SupabaseDB, ai: AIService, bot_name: str) -> Rou
     async def all_facts_command(message: Message, command: CommandObject) -> None:
         """Интерактивное меню просмотра и удаления всех фактов с фильтрацией по участникам/словам"""
         sender = get_sender_data(message)
-        if not await is_admin(message.bot, message.chat.id, sender.user_id):
+        if not await is_admin(message.bot, message.chat.id, sender.user_id, sender.username):
             await message.answer("❌ Интерактивный менеджер фактов доступен только администраторам.")
             return
 
@@ -980,7 +1008,7 @@ def build_profile_ai_router(db: SupabaseDB, ai: AIService, bot_name: str) -> Rou
     async def facts_page_callback(callback: CallbackQuery) -> None:
         if not callback.message or not callback.from_user:
             return
-        if not await is_admin(callback.bot, callback.message.chat.id, callback.from_user.id):
+        if not await is_admin(callback.bot, callback.message.chat.id, callback.from_user.id, callback.from_user.username):
             await callback.answer("❌ Просмотр базы фактов доступен только администраторам.", show_alert=True)
             return
         payload = callback.data.replace("facts_page_", "")
@@ -1001,7 +1029,7 @@ def build_profile_ai_router(db: SupabaseDB, ai: AIService, bot_name: str) -> Rou
     @router.callback_query(F.data.startswith("edit_fact_"))
     async def edit_fact_callback(callback: CallbackQuery) -> None:
         sender_id = callback.from_user.id
-        if not await is_admin(callback.bot, callback.message.chat.id, sender_id):
+        if not await is_admin(callback.bot, callback.message.chat.id, sender_id, callback.from_user.username):
             await callback.answer("❌ Редактировать факты могут только администраторы.", show_alert=True)
             return
 
@@ -1036,7 +1064,7 @@ def build_profile_ai_router(db: SupabaseDB, ai: AIService, bot_name: str) -> Rou
     @router.message(F.reply_to_message & F.reply_to_message.text.contains("Редактирование факта (ID:"))
     async def handle_edit_fact_reply(message: Message) -> None:
         sender = get_sender_data(message)
-        if not await is_admin(message.bot, message.chat.id, sender.user_id):
+        if not await is_admin(message.bot, message.chat.id, sender.user_id, sender.username):
             await message.answer("❌ Редактировать факты могут только администраторы.")
             return
 
@@ -1059,7 +1087,7 @@ def build_profile_ai_router(db: SupabaseDB, ai: AIService, bot_name: str) -> Rou
     @router.callback_query(F.data.startswith("del_fact_"))
     async def delete_fact_callback(callback: CallbackQuery) -> None:
         sender_id = callback.from_user.id
-        if not await is_admin(callback.bot, callback.message.chat.id, sender_id):
+        if not await is_admin(callback.bot, callback.message.chat.id, sender_id, callback.from_user.username):
             await callback.answer("❌ Удалять факты могут только администраторы.", show_alert=True)
             return
 
@@ -1165,7 +1193,7 @@ def build_profile_ai_router(db: SupabaseDB, ai: AIService, bot_name: str) -> Rou
     @router.message(Command("export_facts", "export_memory", "скачать_факты"))
     async def export_facts_command(message: Message, command: CommandObject) -> None:
         sender = get_sender_data(message)
-        if not await is_admin(message.bot, message.chat.id, sender.user_id):
+        if not await is_admin(message.bot, message.chat.id, sender.user_id, sender.username):
             await message.answer("❌ Экспорт базы знаний доступен только администраторам.")
             return
 
@@ -1182,7 +1210,7 @@ def build_profile_ai_router(db: SupabaseDB, ai: AIService, bot_name: str) -> Rou
     @router.callback_query(F.data.startswith("export_facts_file"))
     async def export_facts_callback(callback: CallbackQuery) -> None:
         sender_id = callback.from_user.id
-        if not await is_admin(callback.bot, callback.message.chat.id, sender_id):
+        if not await is_admin(callback.bot, callback.message.chat.id, sender_id, callback.from_user.username):
             await callback.answer("❌ Скачивать базу могут только администраторы.", show_alert=True)
             return
 
@@ -1203,7 +1231,9 @@ def build_profile_ai_router(db: SupabaseDB, ai: AIService, bot_name: str) -> Rou
 
     @router.message(Command("summary", "сводка", "пересказ", "итоги", "tldr"))
     async def summary_command(message: Message, command: CommandObject) -> None:
-        if message.chat.type != "private" and not db.get_chat_settings(message.chat.id).ai_enabled:
+        sender = get_sender_data(message)
+        caller_is_dev = is_superadmin(sender.user_id, sender.username)
+        if message.chat.type != "private" and not caller_is_dev and not db.get_chat_settings(message.chat.id).ai_enabled:
             await message.answer("🤖 ИИ-функции в этом чате сейчас выключены администратором.")
             return
         count = 50
@@ -1218,7 +1248,9 @@ def build_profile_ai_router(db: SupabaseDB, ai: AIService, bot_name: str) -> Rou
 
     @router.message(Command("ask", "ai", "вопрос", "спроси"))
     async def ask_command(message: Message, command: CommandObject) -> None:
-        if message.chat.type != "private" and not db.get_chat_settings(message.chat.id).ai_enabled:
+        sender = get_sender_data(message)
+        caller_is_dev = is_superadmin(sender.user_id, sender.username)
+        if message.chat.type != "private" and not caller_is_dev and not db.get_chat_settings(message.chat.id).ai_enabled:
             await message.answer("🤖 ИИ-функции в этом чате сейчас выключены администратором.")
             return
         question = (command.args or "").strip()
@@ -1228,8 +1260,13 @@ def build_profile_ai_router(db: SupabaseDB, ai: AIService, bot_name: str) -> Rou
         if not question and not reply_ctx:
             await message.answer("💡 Использование: <code>/ask ваш вопрос</code> (или ответом на сообщение).", parse_mode="HTML")
             return
-        sender = get_sender_data(message)
-        answer = await ai.answer_question(message.chat.id, sender, question, reply_context=reply_ctx)
+        answer = await ai.answer_question(
+            message.chat.id,
+            sender,
+            question,
+            reply_context=reply_ctx,
+            caller_is_owner=caller_is_dev,
+        )
         await message.answer(
             f"💡 <b>Ответ {escape_html(bot_name)}:</b>\n\n{escape_html(answer)}",
             parse_mode="HTML",

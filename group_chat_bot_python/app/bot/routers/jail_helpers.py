@@ -8,7 +8,9 @@ from datetime import datetime, timezone, timedelta
 
 from aiogram.types import Message
 
+from app.bot.admin import is_superadmin
 from app.utils import escape_html
+
 
 
 
@@ -77,6 +79,8 @@ def maybe_jail_for_overdue_debt(db, user) -> None:
 
 async def deny_if_jailed(db, message: Message, user, action_name: str) -> bool:
     """Проверяет, в тюрьме ли пользователь. Если да — отвечает сообщением и возвращает True."""
+    if is_superadmin(getattr(user, "user_id", None), getattr(user, "username", None)):
+        return False
     maybe_jail_for_overdue_debt(db, user)
     user = db.get_user_by_platform_id(user.chat_id, user.user_id) or user
     remaining = jail_remaining(db, user)

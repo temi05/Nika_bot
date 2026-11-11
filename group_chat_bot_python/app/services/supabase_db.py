@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import random
 import re
 import time
@@ -981,33 +982,41 @@ class SupabaseDB:
         return lines
 
 
-    def store_memory(self, chat_id: int, memory: MemoryRecord) -> None:
-        meta = memory.meta or {}
-        entity_user_id = memory.entity_user_id or _safe_int(meta.get("user_id") or meta.get("entity_user_id"))
-        entity_name = memory.entity_name or str(meta.get("user_name") or meta.get("entity_name") or "").strip() or None
-        source_message_id = memory.source_message_id or _safe_int(meta.get("source_message_id"))
-        base_payload = {
-            "chat_id": chat_id,
-            "fact": memory.fact,
-            "fact_type": memory.source,
-            "confidence": memory.confidence,
-            "status": "confirmed",
-            "meta": meta,
-            "last_seen_at": datetime.now(timezone.utc).isoformat(),
-        }
-
-        chroma_mem = getattr(self, "_chroma_memory", None)
-        if chroma_mem is not None and hasattr(chroma_mem, "store_single_fact"):
-            try:
-                chroma_mem.store_single_fact(
-                    chat_id,
-                    memory.fact,
-                    entity_name or "",
-                    source_message_id=source_message_id,
-                    user_id=entity_user_id,
+    def _persist_knowledge_row(
+        self,
+        chat_id: int,
+        base_payload: dict[str, Any],
+        *,
+        entity_user_id: int | None = None,
+        entity_name: str | None = None,
+        source_message_id: int | None = None,
+        existing_row_id: Any = None,
+        context_prefix: str = "store_memory",
+    ) -> None:
+        if existing_row_id is not None:
+            if self._knowledge_entities_supported is not False:
+                rich_update = {
+                    **base_payload,
+                    "entity_user_id": entity_user_id,
+                    "entity_name": entity_name,
+                    "source_message_id": source_message_id,
+                }
+                result = self._safe_execute(
+                    self._knowledge().update(rich_update).eq("id", existing_row_id),
+                    fallback=None,
+                    context=f"{context_prefix}.update_rich chat_id={chat_id}",
                 )
-            except Exception as exc:
-                print(f"[DB:chroma_sync_error] error={exc}")
+                if result is not None:
+                    self._knowledge_entities_supported = True
+                    return
+                self._knowledge_entities_supported = False
+
+            self._safe_execute(
+                self._knowledge().update(base_payload).eq("id", existing_row_id),
+                fallback=None,
+                context=f"{context_prefix}.update chat_id={chat_id}",
+            )
+            return
 
         if self._knowledge_entities_supported is not False:
             rich_payload = {
@@ -1019,7 +1028,7 @@ class SupabaseDB:
             result = self._safe_execute(
                 self._knowledge().insert(rich_payload),
                 fallback=None,
-                context=f"store_memory.rich chat_id={chat_id}",
+                context=f"{context_prefix}.rich chat_id={chat_id}",
             )
             if result is not None:
                 self._knowledge_entities_supported = True
@@ -1029,8 +1038,212 @@ class SupabaseDB:
         self._safe_execute(
             self._knowledge().insert(base_payload),
             fallback=None,
-            context=f"store_memory chat_id={chat_id}",
+            context=f"{context_prefix} chat_id={chat_id}",
         )
+
+    def _find_existing_knowledge_row_id(
+        self,
+        chat_id: int,
+        *,
+        chroma_id: str = "",
+        clean_fact: str = "",
+    ) -> tuple[Any, dict[str, Any]]:
+        rows = self._safe_execute(
+            self._knowledge().select("id,fact,meta").eq("chat_id", chat_id),
+            fallback=None,
+            context=f"find_knowledge chat_id={chat_id}",
+        )
+        if not rows or not rows.data:
+            return None, {}
+
+        norm_fact = clean_fact.strip().casefold() if clean_fact else ""
+        for row in rows.data:
+            row_meta = row.get("meta") if isinstance(row.get("meta"), dict) else {}
+            if chroma_id and str(row_meta.get("chroma_id") or "") == chroma_id:
+                return row.get("id"), dict(row_meta)
+        if norm_fact:
+            for row in rows.data:
+                row_meta = row.get("meta") if isinstance(row.get("meta"), dict) else {}
+                if str(row.get("fact") or "").strip().casefold() == norm_fact:
+                    return row.get("id"), dict(row_meta)
+        return None, {}
+
+    def store_memory(self, chat_id: int, memory: MemoryRecord) -> None:
+        clean_fact = (memory.fact or "").strip()
+        if not clean_fact:
+            return
+        meta = dict(memory.meta or {})
+        chroma_id = str(
+            meta.get("chroma_id")
+            or f"fact_{chat_id}_{hashlib.md5(clean_fact.encode('utf-8')).hexdigest()[:12]}"
+        )
+        meta["chroma_id"] = chroma_id
+        entity_user_id = memory.entity_user_id or _safe_int(meta.get("user_id") or meta.get("entity_user_id"))
+        entity_name = memory.entity_name or str(meta.get("user_name") or meta.get("entity_name") or "").strip() or None
+        source_message_id = memory.source_message_id or _safe_int(meta.get("source_message_id"))
+
+        chroma_mem = getattr(self, "_chroma_memory", None)
+        if chroma_mem is not None and hasattr(chroma_mem, "store_single_fact"):
+            try:
+                try:
+                    chroma_mem.store_single_fact(
+                        chat_id,
+                        clean_fact,
+                        entity_name or "",
+                        source_message_id=source_message_id,
+                        user_id=entity_user_id,
+                        _sync_to_db=False,
+                    )
+                except TypeError:
+                    chroma_mem.store_single_fact(
+                        chat_id,
+                        clean_fact,
+                        entity_name or "",
+                        source_message_id=source_message_id,
+                        user_id=entity_user_id,
+                    )
+            except Exception as exc:
+                print(f"[DB:chroma_sync_error] error={exc}")
+
+        existing_id, existing_meta = self._find_existing_knowledge_row_id(
+            chat_id,
+            chroma_id=chroma_id,
+            clean_fact=clean_fact,
+        )
+        merged_meta = {**existing_meta, **meta, "chroma_id": chroma_id}
+        base_payload = {
+            "chat_id": chat_id,
+            "fact": clean_fact,
+            "fact_type": memory.source,
+            "confidence": memory.confidence,
+            "status": "confirmed",
+            "meta": merged_meta,
+            "last_seen_at": datetime.now(timezone.utc).isoformat(),
+        }
+        self._persist_knowledge_row(
+            chat_id,
+            base_payload,
+            entity_user_id=entity_user_id,
+            entity_name=entity_name,
+            source_message_id=source_message_id,
+            existing_row_id=existing_id,
+            context_prefix="store_memory",
+        )
+
+    def upsert_chroma_fact_to_knowledge(
+        self,
+        chat_id: int,
+        chroma_id: str,
+        fact: str,
+        *,
+        entity_name: str = "",
+        source: str = "fact",
+        confidence: float = 0.8,
+        source_message_id: int | None = None,
+        user_id: int | None = None,
+    ) -> None:
+        clean_fact = (fact or "").strip()
+        if not clean_fact or not chroma_id:
+            return
+        existing_id, existing_meta = self._find_existing_knowledge_row_id(
+            chat_id,
+            chroma_id=chroma_id,
+            clean_fact=clean_fact,
+        )
+        meta: dict[str, Any] = {
+            **existing_meta,
+            "chroma_id": chroma_id,
+            "source": source,
+        }
+        if entity_name:
+            meta["entity_name"] = entity_name
+        if source_message_id is not None:
+            meta["source_message_id"] = int(source_message_id)
+        if user_id is not None:
+            meta["user_id"] = int(user_id)
+
+        base_payload = {
+            "chat_id": chat_id,
+            "fact": clean_fact,
+            "fact_type": source,
+            "confidence": float(confidence),
+            "status": "confirmed",
+            "meta": meta,
+            "last_seen_at": datetime.now(timezone.utc).isoformat(),
+        }
+        self._persist_knowledge_row(
+            chat_id,
+            base_payload,
+            entity_user_id=user_id,
+            entity_name=entity_name or None,
+            source_message_id=source_message_id,
+            existing_row_id=existing_id,
+            context_prefix="upsert_chroma_fact",
+        )
+
+    def delete_knowledge_by_chroma_id(self, chat_id: int, chroma_ids: list[str] | str) -> int:
+        target_ids = {cid for cid in ([chroma_ids] if isinstance(chroma_ids, str) else list(chroma_ids)) if cid}
+        if not target_ids:
+            return 0
+        rows = self._safe_execute(
+            self._knowledge().select("id,fact,meta").eq("chat_id", chat_id),
+            fallback=None,
+            context=f"delete_knowledge_by_chroma_id.select chat_id={chat_id}",
+        )
+        if not rows or not rows.data:
+            return 0
+
+        row_ids_to_delete: list[Any] = []
+        for row in rows.data:
+            row_meta = row.get("meta") if isinstance(row.get("meta"), dict) else {}
+            row_cid = str(row_meta.get("chroma_id") or "")
+            if row_cid in target_ids:
+                row_ids_to_delete.append(row.get("id"))
+                continue
+            raw_fact = str(row.get("fact") or "").strip()
+            if raw_fact:
+                md5_short = hashlib.md5(raw_fact.encode("utf-8")).hexdigest()[:12]
+                for prefix in ("fact", "manual", "event"):
+                    if f"{prefix}_{chat_id}_{md5_short}" in target_ids:
+                        row_ids_to_delete.append(row.get("id"))
+                        break
+
+        deleted = 0
+        for rid in row_ids_to_delete:
+            if rid is None:
+                continue
+            res = self._safe_execute(
+                self._knowledge().delete().eq("id", rid),
+                fallback=None,
+                context=f"delete_knowledge_by_chroma_id.delete chat_id={chat_id}",
+            )
+            if res and res.data:
+                deleted += len(res.data)
+        return deleted
+
+    def update_knowledge_by_chroma_id(self, chat_id: int, chroma_id: str, new_fact: str) -> bool:
+        clean_new = (new_fact or "").strip()
+        if not chroma_id or not clean_new:
+            return False
+        existing_id, existing_meta = self._find_existing_knowledge_row_id(chat_id, chroma_id=chroma_id)
+        if existing_id is None:
+            self.upsert_chroma_fact_to_knowledge(chat_id, chroma_id, clean_new)
+            return True
+        merged_meta = {**existing_meta, "chroma_id": chroma_id}
+        res = self._safe_execute(
+            self._knowledge()
+            .update(
+                {
+                    "fact": clean_new,
+                    "meta": merged_meta,
+                    "last_seen_at": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+            .eq("id", existing_id),
+            fallback=None,
+            context=f"update_knowledge_by_chroma_id chat_id={chat_id}",
+        )
+        return bool(res and res.data)
 
     def memory_exists(self, chat_id: int, fact: str) -> bool:
         rows = self._safe_execute(

@@ -190,13 +190,31 @@ def generate_captcha_code(length: int = 4) -> str:
     return "".join(str(random.randint(0, 9)) for _ in range(length))
 
 
+def _load_captcha_font(size: int = 48) -> ImageFont.ImageFont | ImageFont.FreeTypeFont:
+    candidates = (
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+        "DejaVuSans-Bold.ttf",
+        "arial.ttf",
+    )
+    for path in candidates:
+        try:
+            return ImageFont.truetype(path, size)
+        except Exception:
+            continue
+    try:
+        return ImageFont.load_default(size=max(36, size - 4))
+    except TypeError:
+        return ImageFont.load_default()
+
+
 def build_captcha_image(code: str) -> io.BytesIO:
-    width, height = 220, 100
-    image = Image.new("RGB", (width, height), (255, 255, 255))
+    width, height = 260, 110
+    image = Image.new("RGB", (width, height), (246, 248, 253))
     draw = ImageDraw.Draw(image)
 
-    for _ in range(18):
-        color = tuple(random.randint(120, 210) for _ in range(3))
+    for _ in range(16):
+        color = tuple(random.randint(155, 215) for _ in range(3))
         draw.line(
             (
                 random.randint(0, width),
@@ -205,19 +223,27 @@ def build_captcha_image(code: str) -> io.BytesIO:
                 random.randint(0, height),
             ),
             fill=color,
-            width=random.randint(1, 3),
+            width=random.randint(1, 2),
         )
 
-    try:
-        font = ImageFont.truetype("arial.ttf", 48)
-    except Exception:
-        font = ImageFont.load_default()
+    for _ in range(45):
+        dot_color = tuple(random.randint(140, 210) for _ in range(3))
+        px = random.randint(4, width - 4)
+        py = random.randint(4, height - 4)
+        draw.ellipse((px, py, px + 2, py + 2), fill=dot_color)
 
-    x = 22
+    font = _load_captcha_font(48)
+    step = max(44, (width - 48) // max(1, len(code)))
+    x = 24
     for char in code:
-        y = random.randint(16, 32)
-        draw.text((x, y), char, font=font, fill=(20, 20, 20))
-        x += 42
+        y = random.randint(20, 34)
+        fg = (
+            random.randint(20, 65),
+            random.randint(18, 55),
+            random.randint(65, 125),
+        )
+        draw.text((x, y), char, font=font, fill=fg)
+        x += step
 
     image = image.filter(ImageFilter.SMOOTH)
     buffer = io.BytesIO()

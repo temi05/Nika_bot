@@ -25,7 +25,7 @@ def build_memes_router(db: SupabaseDB) -> Router:
     @router.message(Command("memeadd", "мемдобавить", "мем"))
     async def meme_add_command(message: Message, command: CommandObject) -> None:
         sender = get_sender_data(message)
-        if not await is_admin(message.bot, message.chat.id, sender.user_id):
+        if not await is_admin(message.bot, message.chat.id, sender.user_id, sender.username):
             await message.answer("❌ Мемную базу могут пополнять только администраторы.")
             return
 
@@ -59,7 +59,7 @@ def build_memes_router(db: SupabaseDB) -> Router:
     @router.message(Command("memedel", "мемудалить"))
     async def meme_delete_command(message: Message, command: CommandObject) -> None:
         sender = get_sender_data(message)
-        if not await is_admin(message.bot, message.chat.id, sender.user_id):
+        if not await is_admin(message.bot, message.chat.id, sender.user_id, sender.username):
             await message.answer("❌ Удалять мемы могут только администраторы.")
             return
 

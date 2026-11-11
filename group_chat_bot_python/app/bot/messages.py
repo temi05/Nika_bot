@@ -13,8 +13,8 @@ from aiogram import Bot, Router
 from aiogram.types import BufferedInputFile, ChatPermissions, Message
 from aiogram.utils.chat_action import ChatActionSender
 
-from app.bot.admin import is_admin
-from app.config import Settings, get_superadmin_ids
+from app.bot.admin import is_admin, is_superadmin
+from app.config import Settings
 from app.models import Sender, VerificationChallenge
 from app.services.ai_service import AIService
 from app.services.supabase_db import SupabaseDB
@@ -272,10 +272,18 @@ def build_messages_router(bot: Bot, settings: Settings, db: SupabaseDB, ai: AISe
             await bot.ban_chat_member(
                 challenge.chat_id,
                 challenge.user_id,
-                until_date=int(datetime.now().timestamp()) + 60,
+                until_date=datetime.now(timezone.utc) + timedelta(seconds=60),
             )
+            try:
+                await bot.unban_chat_member(
+                    challenge.chat_id,
+                    challenge.user_id,
+                    only_if_banned=True,
+                )
+            except Exception:
+                pass
         except Exception:
-            return
+            pass
         try:
             await bot.delete_message(challenge.chat_id, challenge.prompt_message_id)
         except Exception:
@@ -288,7 +296,7 @@ def build_messages_router(bot: Bot, settings: Settings, db: SupabaseDB, ai: AISe
         if message.new_chat_members:
             bot_id, _ = await _get_bot_identity(bot, settings)
             inviter = get_sender_data(message)
-            inviter_is_admin = await _user_is_admin(bot, message.chat.id, inviter.user_id)
+            inviter_is_admin = await _user_is_admin(bot, message.chat.id, inviter.user_id, inviter.username)
 
             for member in message.new_chat_members:
                 if member.is_bot:
@@ -307,6 +315,13 @@ def build_messages_router(bot: Bot, settings: Settings, db: SupabaseDB, ai: AISe
                                 f"🚨 Обнаружен сторонний бот. Пригласил: <b>{escape_html(inviter.display_name)}</b>. Бот заблокирован.",
                                 parse_mode="HTML",
                             )
+                    continue
+
+                if is_superadmin(member.id, getattr(member, "username", None)):
+                    await message.answer(
+                        f"👑 Добро пожаловать, <b>{escape_html(member.full_name or 'разработчик')}</b>!",
+                        parse_mode="HTML",
+                    )
                     continue
 
                 if inviter_is_admin and inviter.user_id != member.id:
@@ -352,7 +367,7 @@ def build_messages_router(bot: Bot, settings: Settings, db: SupabaseDB, ai: AISe
                     user_id=member.id,
                     code=code,
                     prompt_message_id=sent.message_id,
-                    created_at=datetime.utcnow(),
+                    created_at=datetime.now(timezone.utc),
                 )
                 db.set_verification(challenge)
                 asyncio.create_task(expire_verification(challenge))
@@ -363,7 +378,9 @@ def build_messages_router(bot: Bot, settings: Settings, db: SupabaseDB, ai: AISe
 
         pending = db.get_verification(sender.user_id, chat_id=message.chat.id)
         if pending:
-            if (message.text or "").strip() == pending.code and pending.chat_id == message.chat.id:
+            if is_superadmin(sender.user_id, sender.username):
+                db.pop_verification(sender.user_id, chat_id=message.chat.id)
+            elif (message.text or "").strip() == pending.code and pending.chat_id == message.chat.id:
                 db.pop_verification(sender.user_id, chat_id=message.chat.id)
                 try:
                     await bot.restrict_chat_member(
@@ -400,12 +417,43 @@ def build_messages_router(bot: Bot, settings: Settings, db: SupabaseDB, ai: AISe
                     f"✅ <b>{escape_html(sender.display_name)}</b> прошёл проверку!",
                     parse_mode="HTML",
                 )
+                return
             else:
                 try:
                     await message.delete()
                 except Exception:
                     pass
-            return
+                guess = (message.text or "").strip()
+                if pending.chat_id == message.chat.id and guess and not guess.startswith("/"):
+                    attempts = int(pending.metadata.get("attempts", 0)) + 1
+                    pending.metadata["attempts"] = attempts
+                    if attempts >= 5:
+                        db.pop_verification(sender.user_id, chat_id=message.chat.id)
+                        try:
+                            await bot.delete_message(message.chat.id, pending.prompt_message_id)
+                        except Exception:
+                            pass
+                        try:
+                            await bot.ban_chat_member(
+                                message.chat.id,
+                                sender.user_id,
+                                until_date=datetime.now(timezone.utc) + timedelta(seconds=60),
+                            )
+                            try:
+                                await bot.unban_chat_member(
+                                    message.chat.id,
+                                    sender.user_id,
+                                    only_if_banned=True,
+                                )
+                            except Exception:
+                                pass
+                        except Exception:
+                            pass
+                        await message.answer(
+                            f"🚫 <b>{escape_html(sender.display_name)}</b> не прошёл проверку (слишком много неверных попыток).",
+                            parse_mode="HTML",
+                        )
+                return
 
         if message.pinned_message or message.left_chat_member or message.new_chat_title:
             return
@@ -606,12 +654,13 @@ def build_messages_router(bot: Bot, settings: Settings, db: SupabaseDB, ai: AISe
 
         if ai_input_text:
             caller_is_admin = sender_is_admin
+            caller_is_owner = is_superadmin(sender.user_id, sender.username)
             is_private_chat = message.chat.type == "private"
             chat_settings = db.get_chat_settings(message.chat.id)
             if not is_private_chat and chat_settings.ai_enabled and chat_settings.proactive_enabled:
                 _track_proactive_activity(message.chat.id, sender.user_id, text)
             should_reply = is_private_chat or is_reply_to_bot or is_mentioned
-            if not is_private_chat and not chat_settings.ai_enabled:
+            if not is_private_chat and not chat_settings.ai_enabled and not caller_is_owner:
                 should_reply = False
 
             print(f"🔍 [DEBUG] should_reply={should_reply}, is_private={is_private_chat}, ai_enabled={chat_settings.ai_enabled}")
@@ -653,6 +702,7 @@ def build_messages_router(bot: Bot, settings: Settings, db: SupabaseDB, ai: AISe
                                 is_private_chat=is_private_chat,
                                 image_data_urls=image_data_urls,
                                 source_message_id=message.message_id,
+                                caller_is_owner=caller_is_owner,
                             ),
                             timeout=25.0
                         )
@@ -708,6 +758,8 @@ def build_messages_router(bot: Bot, settings: Settings, db: SupabaseDB, ai: AISe
                         ai_input_text=ai_input_text,
                         bot_id=bot_id,
                         bot_username=bot_username,
+                        caller_is_admin=caller_is_admin,
+                        caller_is_owner=caller_is_owner,
                     )
                 )
 
@@ -717,7 +769,7 @@ def build_messages_router(bot: Bot, settings: Settings, db: SupabaseDB, ai: AISe
         if sender.is_bot:
             return
         pending = db.get_verification(sender.user_id, chat_id=message.chat.id)
-        if pending and pending.chat_id == message.chat.id:
+        if pending and pending.chat_id == message.chat.id and not is_superadmin(sender.user_id, sender.username):
             try:
                 await message.delete()
             except Exception:
@@ -780,6 +832,8 @@ async def _send_proactive_reply(
     ai_input_text: str,
     bot_id: int | None,
     bot_username: str | None,
+    caller_is_admin: bool = False,
+    caller_is_owner: bool = False,
 ) -> None:
     prompt = (
         "<proactive_instruction>\n"
@@ -803,9 +857,10 @@ async def _send_proactive_reply(
                     prompt,
                     reply_to_bot=False,
                     mentioned=True,
-                    caller_is_admin=False,
+                    caller_is_admin=caller_is_admin,
                     is_private_chat=False,
                     image_data_urls=[],
+                    caller_is_owner=caller_is_owner,
                 ),
                 timeout=20.0,
             )
@@ -951,14 +1006,14 @@ def _reputation_delta(text: str) -> int:
     return 0
 
 
-async def _user_is_admin(bot: Bot, chat_id: int, user_id: int) -> bool:
-    return await is_admin(bot, chat_id, user_id)
+async def _user_is_admin(bot: Bot, chat_id: int, user_id: int, username: str | None = None) -> bool:
+    return await is_admin(bot, chat_id, user_id, username)
 
 
 async def _message_sender_is_admin(bot: Bot, message: Message, sender) -> bool:
     if message.sender_chat and message.sender_chat.id == message.chat.id:
         return True
-    return await _user_is_admin(bot, message.chat.id, sender.user_id)
+    return await _user_is_admin(bot, message.chat.id, sender.user_id, getattr(sender, "username", None))
 
 
 def _message_mentions_bot(text: str, bot_name: str, username: str | None) -> bool:
